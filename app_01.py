@@ -21,6 +21,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer, QDate, QPoint, QRect
 from PyQt5.QtGui import QImage, QPixmap, QClipboard, QPainter, QFont, QColor, QIcon
+from PyQt5 import QtSvg
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -1477,6 +1478,8 @@ class MainWindow(QMainWindow):
 
         btn_recordings = QToolButton()
         btn_recordings.setIcon(QIcon(str(ICON_DIR / "folder.svg")))
+        if btn_recordings.icon().isNull():
+            print("Ostrzeżenie: nie udało się załadować ikony folder.svg")
         btn_recordings.setIconSize(QSize(50, 50))
         btn_recordings.clicked.connect(self.open_recordings_browser)
 
