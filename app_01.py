@@ -538,6 +538,8 @@ class AlertListWidget(QWidget):
         self.list = QListWidget()
         self.list.setMinimumWidth(320)
         self.list.setStyleSheet("QListWidget{background:#0b0b0b; border:1px solid #222;} ")
+        self.list.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         layout.addWidget(self.list)
 
         self.menu_btn = QToolButton(self)
@@ -1463,31 +1465,30 @@ class MainWindow(QMainWindow):
         self.camera_view.mouseDoubleClickEvent = lambda e: self.toggle_fullscreen()
 
         controls_widget = QWidget()
-        controls_widget.setStyleSheet("background:#000;")
+        controls_widget.setStyleSheet("background:#000; color:#fff;")
         controls_layout = QHBoxLayout(controls_widget)
-        controls_layout.setContentsMargins(0,0,0,0)
+        controls_layout.setContentsMargins(0,50,0,50)
+        controls_layout.setSpacing(20)
         controls_layout.setAlignment(Qt.AlignCenter)
 
         btn_recordings = QToolButton()
         btn_recordings.setIcon(QIcon("icons/folder.svg"))
-        btn_recordings.setIconSize(QSize(24, 24))
+        btn_recordings.setIconSize(QSize(50, 50))
         btn_recordings.clicked.connect(self.open_recordings_browser)
 
         btn_settings = QToolButton()
         btn_settings.setIcon(QIcon("icons/gear.svg"))
-        btn_settings.setIconSize(QSize(24, 24))
+        btn_settings.setIconSize(QSize(50, 50))
         btn_settings.clicked.connect(self.open_settings)
 
         btn_fullscreen = QToolButton()
         btn_fullscreen.setIcon(QIcon("icons/arrows-fullscreen.svg"))
-        btn_fullscreen.setIconSize(QSize(24, 24))
+        btn_fullscreen.setIconSize(QSize(50, 50))
         btn_fullscreen.clicked.connect(self.toggle_fullscreen)
 
         controls_layout.addStretch()
         controls_layout.addWidget(btn_recordings)
-        controls_layout.addStretch()
         controls_layout.addWidget(btn_settings)
-        controls_layout.addStretch()
         controls_layout.addWidget(btn_fullscreen)
         controls_layout.addStretch()
 
