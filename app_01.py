@@ -17,7 +17,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QPushButton, QSlider, QAction,
     QMenu, QFrame, QFileDialog, QDialog, QFormLayout,
     QComboBox, QMessageBox, QDateEdit, QLineEdit, QCheckBox, QStackedWidget,
-    QSpinBox
+    QSpinBox, QDoubleSpinBox
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer, QDate, QPoint, QRect
 from PyQt5.QtGui import QImage, QPixmap, QClipboard, QPainter, QFont, QColor
@@ -39,9 +39,29 @@ VISIBLE_CLASSES = ["person", "car", "cat", "dog", "bird"]
 RECORD_CLASSES  = ["person", "car", "cat", "dog", "bird"]
 
 # --- UTIL: Konfiguracja ---
+def _fill_camera_defaults(cam, cfg):
+    """Uzupełnij brakujące pola kamery wartościami globalnymi."""
+    defaults = {
+        "fps": cfg.get("fps", 3),
+        "confidence_threshold": cfg.get("confidence_threshold", 0.5),
+        "draw_overlays": cfg.get("draw_overlays", True),
+        "enable_detection": cfg.get("enable_detection", True),
+        "enable_recording": cfg.get("enable_recording", True),
+        "detection_hours": cfg.get("detection_hours", "00:00-23:59"),
+        "visible_classes": cfg.get("visible_classes", VISIBLE_CLASSES),
+        "record_classes": cfg.get("record_classes", RECORD_CLASSES),
+        "record_path": cfg.get("record_path", "./nagrania"),
+        "pre_seconds": cfg.get("pre_seconds", 5),
+        "post_seconds": cfg.get("post_seconds", 5),
+    }
+    for k, v in defaults.items():
+        cam.setdefault(k, v)
+    return cam
+
+
 def load_config():
     if not os.path.exists(CONFIG_PATH):
-        return {
+        cfg = {
             "model": "yolov5nu_silu_coco--640x640_float_tflite_multidevice_1",
             "record_path": "./nagrania",
             "confidence_threshold": 0.5,
@@ -52,16 +72,32 @@ def load_config():
             "visible_classes": ["person", "car", "cat", "dog", "bird"],
             "record_classes": ["person", "car", "cat", "dog", "bird"],
             "detection_hours": "00:00-23:59",
+            "pre_seconds": 5,
+            "post_seconds": 5,
             "cameras": [
-                {"name": "kamera1", "rtsp": "rtsp://admin:IBLTSQ@192.168.8.165:554"}
-            ]
+                {
+                    "name": "kamera1",
+                    "rtsp": "rtsp://admin:IBLTSQ@192.168.8.165:554",
+                }
+            ],
         }
-    with open(CONFIG_PATH, "r") as f:
-        return json.load(f)
+    else:
+        with open(CONFIG_PATH, "r") as f:
+            cfg = json.load(f)
+
+    # uzupełnij kamery
+    for cam in cfg.get("cameras", []):
+        _fill_camera_defaults(cam, cfg)
+    return cfg
+
 
 def save_config(cfg):
+    # dopilnuj uzupełnienia pól kamer
+    for cam in cfg.get("cameras", []):
+        _fill_camera_defaults(cam, cfg)
     with open(CONFIG_PATH, "w") as f:
         json.dump(cfg, f, indent=4)
+
 
 config = load_config()
 VISIBLE_CLASSES = list(config.get("visible_classes", ["person", "car", "cat", "dog", "bird"]))
@@ -69,6 +105,8 @@ RECORD_CLASSES  = list(config.get("record_classes",  ["person", "car", "cat", "d
 CONFIDENCE_THRESHOLD = float(config.get("confidence_threshold", 0.5))
 FPS = int(config.get("fps", 3))
 RECORD_PATH = config.get("record_path", "./nagrania")
+PRE_SECONDS = int(config.get("pre_seconds", 5))
+POST_SECONDS = int(config.get("post_seconds", 5))
 MODEL_NAME = config.get("model", "yolov5nu_silu_coco--640x640_float_tflite_multidevice_1")
 CAMERAS = config.get("cameras", [])
 DRAW_OVERLAYS = bool(config.get("draw_overlays", True))
@@ -153,33 +191,36 @@ class CameraWorker(QThread):
     error_signal = pyqtSignal(str, int)     # komunikat, index
     status_signal = pyqtSignal(str, int)    # status tekstowy, index
 
-    def __init__(self, camera, model, output_dir, pre_seconds, post_seconds, fps, confidence_threshold=0.5, index=0):
+    def __init__(self, camera, model, index=0):
         super().__init__()
-        self.camera = camera
+        # pełny słownik kamery
+        self.camera = dict(camera)
         self.model = model
-        self.output_dir = os.path.join(output_dir, camera["name"])
-        os.makedirs(self.output_dir, exist_ok=True)
+        self.index = index
 
-        self.pre_seconds = pre_seconds
-        self.post_seconds = post_seconds
-        self.fps = fps
-        self.confidence_threshold = confidence_threshold
+        # lokalne ustawienia (z nadpisaniem globalnych)
+        self.fps = int(self.camera.get("fps", FPS))
+        self.confidence_threshold = float(self.camera.get("confidence_threshold", CONFIDENCE_THRESHOLD))
+        self.draw_overlays = bool(self.camera.get("draw_overlays", DRAW_OVERLAYS))
+        self.enable_detection = bool(self.camera.get("enable_detection", ENABLE_DETECTION))
+        self.enable_recording = bool(self.camera.get("enable_recording", ENABLE_RECORDING))
+        self.detection_hours = str(self.camera.get("detection_hours", DETECTION_HOURS))
+        self.visible_classes = list(self.camera.get("visible_classes", VISIBLE_CLASSES))
+        self.record_classes = list(self.camera.get("record_classes", RECORD_CLASSES))
+        self.pre_seconds = int(self.camera.get("pre_seconds", PRE_SECONDS))
+        self.post_seconds = int(self.camera.get("post_seconds", POST_SECONDS))
+        rec_path = self.camera.get("record_path", RECORD_PATH)
+        self.output_dir = os.path.join(rec_path, self.camera.get("name", "camera"))
+        os.makedirs(self.output_dir, exist_ok=True)
 
         self.recording = False
         self.video_writer = None
         self.output_file = None
         self.frames_since_last_detection = 0
         self.stop_signal = False
-        self.index = index
 
         self.prerecord_buffer = deque(maxlen=int(self.pre_seconds * self.fps))
         self.frame = None
-
-        # features
-        self.draw_overlays = True
-        self.enable_detection = True
-        self.enable_recording = True
-        self.detection_hours = "00:00-23:59"
 
         # hot-reload
         self.restart_requested = False
@@ -187,24 +228,30 @@ class CameraWorker(QThread):
     # hot reload API
     def set_confidence(self, thr: float):
         self.confidence_threshold = float(thr)
+        self.camera["confidence_threshold"] = self.confidence_threshold
 
     def set_fps(self, fps: int):
         self.fps = int(max(1, fps))
+        self.camera["fps"] = self.fps
         self.restart_requested = True
 
     # Feature toggles (live)
     def set_draw_overlays(self, v: bool):
         self.draw_overlays = bool(v)
+        self.camera["draw_overlays"] = self.draw_overlays
 
     def set_enable_detection(self, v: bool):
         self.enable_detection = bool(v)
+        self.camera["enable_detection"] = self.enable_detection
 
     def set_enable_recording(self, v: bool):
         self.enable_recording = bool(v)
+        self.camera["enable_recording"] = self.enable_recording
 
     def set_detection_schedule(self, hours: str):
         # format "HH:MM-HH:MM(;HH:MM-HH:MM ...)", local time
         self.detection_hours = str(hours or "").strip() or "00:00-23:59"
+        self.camera["detection_hours"] = self.detection_hours
 
     def _is_within_schedule(self):
         try:
@@ -273,14 +320,14 @@ class CameraWorker(QThread):
                         if not label or bbox is None:
                             continue
 
-                        if self.draw_overlays and confidence >= self.confidence_threshold and label in [c.lower() for c in VISIBLE_CLASSES]:
+                        if self.draw_overlays and confidence >= self.confidence_threshold and label in [c.lower() for c in self.visible_classes]:
                             x1, y1, x2, y2 = map(int, bbox)
-                            color = (0, 255, 0) if label in [c.lower() for c in RECORD_CLASSES] else (255, 0, 0)
+                            color = (0, 255, 0) if label in [c.lower() for c in self.record_classes] else (255, 0, 0)
                             cv2.rectangle(self.frame, (x1, y1), (x2, y2), color, 2)
                             text = f"{label}: {confidence * 100:.1f}%"
                             cv2.putText(self.frame, text, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
-                        if self.enable_detection and self._is_within_schedule() and label in [c.lower() for c in RECORD_CLASSES] and confidence >= self.confidence_threshold:
+                        if self.enable_detection and self._is_within_schedule() and label in [c.lower() for c in self.record_classes] and confidence >= self.confidence_threshold:
                             detected = True
                             if confidence > best_score:
                                 best_score = confidence
@@ -1131,6 +1178,125 @@ class AddCameraWizard(QDialog):
             self.test_status.setStyleSheet("color:#f80;")
 
 
+# --- Ustawienia pojedynczej kamery ---
+class CameraSettingsDialog(QDialog):
+    def __init__(self, parent=None, camera=None):
+        super().__init__(parent)
+        self.setWindowTitle("Ustawienia kamery")
+        self.resize(480, 520)
+
+        cam = camera or {}
+
+        form = QFormLayout(self)
+
+        self.name_edit = QLineEdit(cam.get("name", ""))
+        self.rtsp_edit = QLineEdit(cam.get("rtsp", ""))
+        self.fps_spin = QSpinBox()
+        self.fps_spin.setRange(1, 60)
+        self.fps_spin.setValue(int(cam.get("fps", FPS)))
+        self.conf_spin = QDoubleSpinBox()
+        self.conf_spin.setRange(0.0, 1.0)
+        self.conf_spin.setSingleStep(0.05)
+        self.conf_spin.setValue(float(cam.get("confidence_threshold", CONFIDENCE_THRESHOLD)))
+        self.draw_chk = QCheckBox()
+        self.draw_chk.setChecked(bool(cam.get("draw_overlays", DRAW_OVERLAYS)))
+        self.detect_chk = QCheckBox()
+        self.detect_chk.setChecked(bool(cam.get("enable_detection", ENABLE_DETECTION)))
+        self.record_chk = QCheckBox()
+        self.record_chk.setChecked(bool(cam.get("enable_recording", ENABLE_RECORDING)))
+        self.hours_edit = QLineEdit(cam.get("detection_hours", DETECTION_HOURS))
+        self.visible_edit = QLineEdit(",".join(cam.get("visible_classes", VISIBLE_CLASSES)))
+        self.record_edit = QLineEdit(",".join(cam.get("record_classes", RECORD_CLASSES)))
+        self.path_edit = QLineEdit(cam.get("record_path", RECORD_PATH))
+        self.btn_path = QPushButton("Wybierz")
+        self.pre_spin = QSpinBox()
+        self.pre_spin.setRange(0, 60)
+        self.pre_spin.setValue(int(cam.get("pre_seconds", PRE_SECONDS)))
+        self.post_spin = QSpinBox()
+        self.post_spin.setRange(0, 60)
+        self.post_spin.setValue(int(cam.get("post_seconds", POST_SECONDS)))
+
+        path_layout = QHBoxLayout()
+        path_layout.addWidget(self.path_edit)
+        path_layout.addWidget(self.btn_path)
+
+        form.addRow("Nazwa", self.name_edit)
+        form.addRow("RTSP", self.rtsp_edit)
+        form.addRow("FPS", self.fps_spin)
+        form.addRow("Próg pewności", self.conf_spin)
+        form.addRow("Rysuj nakładki", self.draw_chk)
+        form.addRow("Wykrywaj obiekty", self.detect_chk)
+        form.addRow("Nagrywaj detekcje", self.record_chk)
+        form.addRow("Godziny detekcji", self.hours_edit)
+        form.addRow("Widoczne klasy", self.visible_edit)
+        form.addRow("Klasy nagrywane", self.record_edit)
+        form.addRow("Folder nagrań", path_layout)
+        form.addRow("Pre seconds", self.pre_spin)
+        form.addRow("Post seconds", self.post_spin)
+
+        # test rtsp
+        self.test_btn = QPushButton("Test połączenia")
+        self.test_status = QLabel("")
+        form.addRow(self.test_btn, self.test_status)
+
+        btns = QHBoxLayout()
+        self.btn_ok = QPushButton("OK")
+        self.btn_cancel = QPushButton("Anuluj")
+        btns.addStretch(1)
+        btns.addWidget(self.btn_cancel)
+        btns.addWidget(self.btn_ok)
+        form.addRow(btns)
+
+        self.btn_ok.clicked.connect(self.accept)
+        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_path.clicked.connect(self._choose_path)
+        self.test_btn.clicked.connect(self._test_rtsp)
+
+        self.result_camera = None
+
+    def _choose_path(self):
+        d = QFileDialog.getExistingDirectory(self, "Wybierz folder nagrań", self.path_edit.text() or RECORD_PATH)
+        if d:
+            self.path_edit.setText(d)
+
+    def _test_rtsp(self):
+        url = self.rtsp_edit.text().strip()
+        self.test_status.setText("Testuję...")
+        self.test_status.setStyleSheet("color:#ccc;")
+        cap = cv2.VideoCapture(url)
+        ok, _ = cap.read()
+        cap.release()
+        if ok:
+            self.test_status.setText("✅ OK")
+            self.test_status.setStyleSheet("color:#0f0;")
+        else:
+            self.test_status.setText("⚠️ Błąd")
+            self.test_status.setStyleSheet("color:#f80;")
+
+    def accept(self):
+        name = self.name_edit.text().strip()
+        url = self.rtsp_edit.text().strip()
+        if not name or not url:
+            QMessageBox.warning(self, "Błąd", "Nazwa i adres RTSP są wymagane")
+            return
+        cam = {
+            "name": name,
+            "rtsp": url,
+            "fps": int(self.fps_spin.value()),
+            "confidence_threshold": float(self.conf_spin.value()),
+            "draw_overlays": self.draw_chk.isChecked(),
+            "enable_detection": self.detect_chk.isChecked(),
+            "enable_recording": self.record_chk.isChecked(),
+            "detection_hours": self.hours_edit.text().strip() or "00:00-23:59",
+            "visible_classes": [c.strip() for c in self.visible_edit.text().split(",") if c.strip()],
+            "record_classes": [c.strip() for c in self.record_edit.text().split(",") if c.strip()],
+            "record_path": self.path_edit.text().strip() or RECORD_PATH,
+            "pre_seconds": int(self.pre_spin.value()),
+            "post_seconds": int(self.post_spin.value()),
+        }
+        self.result_camera = cam
+        super().accept()
+
 # --- Dialog usuwania kamer ---
 class RemoveCameraDialog(QDialog):
     def __init__(self, cameras, parent=None):
@@ -1337,7 +1503,7 @@ class MainWindow(QMainWindow):
         act_test = menu.addAction("Test połączenia")
         act_copy = menu.addAction("Kopiuj RTSP")
         menu.addSeparator()
-        act_edit = menu.addAction("Edytuj…")
+        act_settings = menu.addAction("Ustawienia…")
         act_del = menu.addAction("Usuń…")
 
         action = menu.exec_(global_pos)
@@ -1352,8 +1518,8 @@ class MainWindow(QMainWindow):
         elif action == act_copy:
             QApplication.clipboard().setText(cam["rtsp"], QClipboard.Clipboard)
             QMessageBox.information(self, "Skopiowano", "Adres RTSP skopiowany do schowka.")
-        elif action == act_edit:
-            self.edit_camera(row)
+        elif action == act_settings:
+            self.camera_settings(row)
         elif action == act_del:
             self.delete_camera(row)
 
@@ -1365,25 +1531,11 @@ class MainWindow(QMainWindow):
         while len(self.workers) < len(self.cameras):
             self.workers.append(None)
         cam = self.cameras[idx]
-        w = CameraWorker(
-            camera=cam,
-            model=self.model,
-            output_dir=self.output_dir,
-            pre_seconds=self.pre_seconds,
-            post_seconds=self.post_seconds,
-            fps=self.fps,
-            confidence_threshold=self.confidence_threshold,
-            index=idx
-        )
+        w = CameraWorker(camera=cam, model=self.model, index=idx)
         w.frame_signal.connect(self.update_frame)
         w.alert_signal.connect(self.on_new_alert)
         w.error_signal.connect(self._worker_error)
         w.status_signal.connect(self._worker_status)
-        # apply toggles
-        w.set_draw_overlays(self.draw_overlays)
-        w.set_enable_detection(self.enable_detection)
-        w.set_enable_recording(self.enable_recording)
-        w.set_detection_schedule(self.detection_hours)
         w.start()
         self.workers[idx] = w
 
@@ -1444,20 +1596,21 @@ class MainWindow(QMainWindow):
         dlg = AddCameraWizard(self)
         if dlg.exec_():
             data = dlg.result_data
+            cfg = load_config()
+            _fill_camera_defaults(data, cfg)
             if any(c["name"] == data["name"] for c in self.cameras):
                 QMessageBox.warning(self, "Duplikat", f"Kamera o nazwie '{data['name']}' już istnieje.")
                 return
             self.cameras.append(data)
-            cfg = load_config()
             cfg["cameras"] = self.cameras
             save_config(cfg)
             self.restart_workers_and_ui()
 
-    def edit_camera(self, idx: int):
+    def camera_settings(self, idx: int):
         cam = self.cameras[idx]
-        dlg = AddCameraWizard(self, existing=cam)
+        dlg = CameraSettingsDialog(self, cam)
         if dlg.exec_():
-            new_data = dlg.result_data
+            new_data = dlg.result_camera
             if new_data["name"] != cam["name"] and any(c["name"] == new_data["name"] for c in self.cameras):
                 QMessageBox.warning(self, "Duplikat", f"Kamera o nazwie '{new_data['name']}' już istnieje.")
                 return
@@ -1465,7 +1618,10 @@ class MainWindow(QMainWindow):
             cfg = load_config()
             cfg["cameras"] = self.cameras
             save_config(cfg)
-            self.restart_workers_and_ui()
+            self.camera_list.rebuild(self.cameras)
+            self.camera_list.setCurrentRow(idx)
+            self.stop_camera(idx)
+            self.start_camera(idx)
 
     def delete_camera(self, idx: int):
         name = self.cameras[idx]["name"]
@@ -1936,8 +2092,8 @@ def main(windowed: bool = False):
         cameras=CAMERAS,
         model=model,
         output_dir=out_dir,
-        pre_seconds=5,
-        post_seconds=5,
+        pre_seconds=PRE_SECONDS,
+        post_seconds=POST_SECONDS,
         fps=FPS,
         confidence_threshold=CONFIDENCE_THRESHOLD
     )
