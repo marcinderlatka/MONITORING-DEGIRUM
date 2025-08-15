@@ -414,9 +414,8 @@ class CameraListWidgetItem(QWidget):
         super().__init__()
         self.setStyleSheet("""
             QWidget#CameraCard {
-                border: 2px solid #2a85ff;
-                border-radius: 10px;
-                background: #0f0f0f;
+                background: transparent;
+                border: none;
             }
             QLabel#CamName {
                 font-weight: 600;
@@ -439,7 +438,7 @@ class CameraListWidgetItem(QWidget):
         self.thumb_w, self.thumb_h = 192, 108
         self.icon_label.setFixedSize(self.thumb_w, self.thumb_h)
         self.icon_label.setFrameShape(QFrame.NoFrame)
-        self.icon_label.setStyleSheet("background: #1a1a1a; border-radius: 8px;")
+        self.icon_label.setStyleSheet("background: transparent; border: none;")
         root.addWidget(self.icon_label, alignment=Qt.AlignCenter)
 
     def set_thumbnail(self, frame):
@@ -453,9 +452,10 @@ class CameraListWidget(QListWidget):
 
     def __init__(self, cameras):
         super().__init__()
-        self.setMaximumWidth(300)
+        self.setFixedWidth(300)
         self.setSpacing(12)
-        self.setStyleSheet("QListWidget{ background:#0b0b0b; border:1px solid #222; padding:8px; }")
+        self.setFrameShape(QFrame.NoFrame)
+        self.setStyleSheet("QListWidget{ background: transparent; border: none; padding:8px; }")
         self.widgets = []
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._on_context_menu)
@@ -499,11 +499,12 @@ class AlertItemWidget(QWidget):
         self.alert = alert
         v = QVBoxLayout(self)
         v.setContentsMargins(6, 6, 6, 6)
+        v.setAlignment(Qt.AlignTop)
 
         self.thumb = QLabel()
         self.thumb.setFixedSize(*thumb_size)
         self.thumb.setStyleSheet("border:1px solid #555; background:#111;")
-        v.addWidget(self.thumb)
+        v.addWidget(self.thumb, alignment=Qt.AlignCenter)
 
         cam = alert.get('camera', '?')
         lbl = alert.get('label', 'object')
@@ -539,10 +540,14 @@ class AlertListWidget(QWidget):
     def __init__(self, alert_memory: AlertMemory):
         super().__init__()
         self.mem = alert_memory
+        self.setFixedWidth(300)
+        self.setStyleSheet("background: transparent;")
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
         self.list = QListWidget()
-        self.list.setMinimumWidth(320)
-        self.list.setStyleSheet("QListWidget{background:#0b0b0b; border:1px solid #222;} ")
+        self.list.setFixedWidth(300)
+        self.list.setFrameShape(QFrame.NoFrame)
+        self.list.setStyleSheet("QListWidget{background: transparent; border: none;}")
         self.list.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         layout.addWidget(self.list)
@@ -1447,9 +1452,13 @@ class MainWindow(QMainWindow):
         self.alert_mem = AlertMemory(ALERTS_HISTORY_PATH, max_items=5000)
 
         main_widget = QWidget()
+        main_widget.setStyleSheet("background-color: black;")
         main_vlayout = QVBoxLayout(main_widget)
+        main_vlayout.setContentsMargins(10,10,10,10)
 
         main_hlayout = QHBoxLayout()
+        main_hlayout.setContentsMargins(10,10,10,10)
+        main_hlayout.setSpacing(10)
 
         self.cameras = list(cameras)
         self.output_dir = self.cameras[0].get("record_path", DEFAULT_RECORD_PATH) if self.cameras else DEFAULT_RECORD_PATH
@@ -1462,6 +1471,7 @@ class MainWindow(QMainWindow):
         self.center_panel = QWidget()
         center_v = QVBoxLayout(self.center_panel)
         center_v.setContentsMargins(0,0,0,0)
+        center_v.setSpacing(10)
         self.camera_view = QLabel("")
         self.camera_view.setMinimumSize(800, 600)
         self.camera_view.setAlignment(Qt.AlignCenter)
@@ -1470,8 +1480,7 @@ class MainWindow(QMainWindow):
         self.camera_view.mouseDoubleClickEvent = lambda e: self.toggle_fullscreen()
 
         controls_widget = QWidget()
-        # Keep only background color; buttons manage their own text/icon color
-        controls_widget.setStyleSheet("background:#d3d3d3;")
+        controls_widget.setStyleSheet("background: transparent;")
         controls_layout = QHBoxLayout(controls_widget)
         controls_layout.setContentsMargins(0,50,0,50)
         controls_layout.setSpacing(20)
