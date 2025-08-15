@@ -17,7 +17,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QPushButton, QSlider, QAction,
     QMenu, QFrame, QFileDialog, QDialog, QFormLayout,
     QComboBox, QMessageBox, QDateEdit, QLineEdit, QCheckBox, QStackedWidget,
-    QSpinBox, QDoubleSpinBox
+    QSpinBox, QDoubleSpinBox, QToolButton, QStyle
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer, QDate, QPoint, QRect
 from PyQt5.QtGui import QImage, QPixmap, QClipboard, QPainter, QFont, QColor
@@ -133,7 +133,8 @@ class AlertMemory:
             "label": alert_meta.get("label", ""),
             "confidence": float(alert_meta.get("confidence", 0.0)),
             "time": alert_meta.get("time", ""),
-            "filepath": alert_meta.get("filepath", "")
+            "filepath": alert_meta.get("filepath", ""),
+            "thumb": alert_meta.get("thumb", ""),
         }
         self.items.append(slim)
         if len(self.items) > self.max_items:
@@ -320,14 +321,20 @@ class CameraWorker(QThread):
                             self.recording = True
                             self.frames_since_last_detection = 0
 
-                            # alert + zapis metadanych i miniatury
+                            thumb_path = self.output_file + ".jpg"
+                            try:
+                                cv2.imwrite(thumb_path, self.frame)
+                            except Exception as ex:
+                                print("Nie zapisano miniatury:", ex)
+
                             alert = {
                                 "camera": self.camera["name"],
                                 "label": best_label or "object",
                                 "confidence": float(best_score),
                                 "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                 "frame": self.frame.copy(),
-                                "filepath": self.output_file
+                                "filepath": self.output_file,
+                                "thumb": thumb_path,
                             }
                             self.alert_signal.emit(alert)
 
@@ -336,19 +343,14 @@ class CameraWorker(QThread):
                                 "label": alert["label"],
                                 "confidence": alert["confidence"],
                                 "time": alert["time"],
-                                "file": self.output_file
+                                "file": self.output_file,
+                                "thumb": thumb_path,
                             }
                             try:
                                 with open(self.output_file + ".json", "w") as f:
                                     json.dump(meta, f, indent=2)
                             except Exception as ex:
                                 print("Nie zapisano metadanych:", ex)
-
-                            try:
-                                thumb_path = self.output_file + ".jpg"
-                                cv2.imwrite(thumb_path, self.frame)
-                            except Exception as ex:
-                                print("Nie zapisano miniatury:", ex)
 
                         else:
                             self.frames_since_last_detection = 0
@@ -510,8 +512,10 @@ class AlertItemWidget(QWidget):
         if frame is not None:
             self.set_frame(frame)
         else:
-            fp = alert.get("filepath") or alert.get("file") or ""
-            jpg = fp + ".jpg" if fp else ""
+            jpg = alert.get("thumb")
+            if not jpg:
+                fp = alert.get("filepath") or alert.get("file") or ""
+                jpg = fp + ".jpg" if fp else ""
             if jpg and os.path.exists(jpg):
                 img = cv2.imread(jpg)
                 if img is not None:
@@ -536,18 +540,19 @@ class AlertListWidget(QWidget):
         self.list.setStyleSheet("QListWidget{background:#0b0b0b; border:1px solid #222;} ")
         layout.addWidget(self.list)
 
-        btn_row = QHBoxLayout()
-        self.reload_btn = QPushButton("Wczytaj ponownie")
-        self.export_btn = QPushButton("Eksport do CSV")
-        self.clear_btn = QPushButton("Wyczyść pamięć")
-        btn_row.addWidget(self.reload_btn)
-        btn_row.addWidget(self.export_btn)
-        btn_row.addWidget(self.clear_btn)
-        layout.addLayout(btn_row)
+        self.menu_btn = QToolButton(self)
+        self.menu_btn.setAutoRaise(True)
+        self.menu_btn.setIcon(self.style().standardIcon(QStyle.SP_MessageBoxWarning))
+        self.menu_btn.setIconSize(QSize(24,24))
+        self.menu_btn.setPopupMode(QToolButton.InstantPopup)
+        menu = QMenu(self.menu_btn)
+        menu.addAction("Wczytaj ponownie", self.reload)
+        menu.addAction("Eksport do CSV", self.export_csv)
+        menu.addAction("Wyczyść pamięć", self.clear)
+        self.menu_btn.setMenu(menu)
+        self.menu_btn.setFixedSize(32,32)
+        self.menu_btn.raise_()
 
-        self.reload_btn.clicked.connect(self.reload)
-        self.export_btn.clicked.connect(self.export_csv)
-        self.clear_btn.clicked.connect(self.clear)
         self.list.itemDoubleClicked.connect(self._open_selected)
 
         self.load_from_history(self.mem.items)
@@ -610,6 +615,12 @@ class AlertListWidget(QWidget):
             self.mem.clear()
             self.list.clear()
 
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        x = self.list.x() + self.list.width() - self.menu_btn.width() - 8
+        y = self.list.y() + (self.list.height() - self.menu_btn.height()) // 2
+        self.menu_btn.move(x, y)
+
 
 # --- ODTWARZACZ WIDEO ---
 class VideoPlayerDialog(QDialog):
@@ -671,6 +682,7 @@ class VideoPlayerDialog(QDialog):
         self.cap = None
         self.current_index = 0
         self.current_frame = None
+        self._normal_geometry = self.geometry()
         self.load_video(self.file_list[self.file_index])
 
     def _read_frame(self, idx=None):
@@ -773,7 +785,10 @@ class VideoPlayerDialog(QDialog):
     def toggle_fullscreen(self):
         if self.isFullScreen():
             self.showNormal()
+            if getattr(self, "_normal_geometry", None):
+                self.setGeometry(self._normal_geometry)
         else:
+            self._normal_geometry = self.geometry()
             self.showFullScreen()
 
     def closeEvent(self, e):
@@ -1432,19 +1447,17 @@ class MainWindow(QMainWindow):
         browse_action.triggered.connect(self.open_recordings_browser)
         recordings_menu.addAction(browse_action)
 
+        # Akcje na pasku menu
+        settings_action = QAction("Ustawienia", self)
+        settings_action.triggered.connect(self.open_settings)
+        menubar.addAction(settings_action)
+
+        fullscreen_action = QAction("Pełny ekran", self)
+        fullscreen_action.triggered.connect(self.toggle_fullscreen)
+        menubar.addAction(fullscreen_action)
+
         main_widget = QWidget()
         main_vlayout = QVBoxLayout(main_widget)
-
-        # Górny pasek przycisków
-        top_controls = QHBoxLayout()
-        top_controls.addStretch(1)
-        self.btn_settings = QPushButton("Ustawienia")
-        self.btn_full = QPushButton("Pełny ekran")
-        top_controls.addWidget(self.btn_settings)
-        top_controls.addSpacing(8)
-        top_controls.addWidget(self.btn_full)
-        top_controls.addStretch(1)
-        main_vlayout.addLayout(top_controls)
 
         main_hlayout = QHBoxLayout()
 
@@ -1480,8 +1493,6 @@ class MainWindow(QMainWindow):
         self.camera_list.currentRowChanged.connect(self.switch_camera)
 
         self.alert_list.open_video.connect(self.open_video_file)
-        self.btn_settings.clicked.connect(self.open_settings)
-        self.btn_full.clicked.connect(self.toggle_fullscreen)
 
         # FPS liczniki i HUD stan
         self._fps_times = {}
