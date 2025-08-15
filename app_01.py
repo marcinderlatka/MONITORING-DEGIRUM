@@ -1493,6 +1493,22 @@ class MainWindow(QMainWindow):
         btn_fullscreen.setIconSize(QSize(50, 50))
         btn_fullscreen.clicked.connect(self.toggle_fullscreen)
 
+        btn_style = """
+QToolButton {
+    background: transparent;
+    border: none;
+    padding: 0px;
+    color: white;
+}
+QToolButton:hover { background: #ff6666; }  # jasnoczerwone tło po najechaniu
+QToolButton:focus { outline: none; }
+        """
+
+        for btn in (btn_recordings, btn_settings, btn_fullscreen):
+            btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
+            btn.setAutoRaise(True)
+            btn.setStyleSheet(btn_style)
+
         controls_layout.addStretch()
         controls_layout.addWidget(btn_recordings)
         controls_layout.addWidget(btn_settings)
