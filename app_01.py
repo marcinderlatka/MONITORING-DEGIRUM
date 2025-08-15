@@ -38,21 +38,34 @@ ALERTS_HISTORY_PATH = "./alerts_history.json"   # plik historii alertów
 VISIBLE_CLASSES = ["person", "car", "cat", "dog", "bird"]
 RECORD_CLASSES  = ["person", "car", "cat", "dog", "bird"]
 
+# Domyślne parametry kamer
+DEFAULT_MODEL = "yolov5nu_silu_coco--640x640_float_tflite_multidevice_1"
+DEFAULT_FPS = 3
+DEFAULT_CONFIDENCE_THRESHOLD = 0.5
+DEFAULT_DRAW_OVERLAYS = True
+DEFAULT_ENABLE_DETECTION = True
+DEFAULT_ENABLE_RECORDING = True
+DEFAULT_DETECTION_HOURS = "00:00-23:59"
+DEFAULT_RECORD_PATH = "./nagrania"
+DEFAULT_PRE_SECONDS = 5
+DEFAULT_POST_SECONDS = 5
+
 # --- UTIL: Konfiguracja ---
-def _fill_camera_defaults(cam, cfg):
-    """Uzupełnij brakujące pola kamery wartościami globalnymi."""
+def _fill_camera_defaults(cam):
+    """Uzupełnij brakujące pola kamery domyślnymi wartościami."""
     defaults = {
-        "fps": cfg.get("fps", 3),
-        "confidence_threshold": cfg.get("confidence_threshold", 0.5),
-        "draw_overlays": cfg.get("draw_overlays", True),
-        "enable_detection": cfg.get("enable_detection", True),
-        "enable_recording": cfg.get("enable_recording", True),
-        "detection_hours": cfg.get("detection_hours", "00:00-23:59"),
-        "visible_classes": cfg.get("visible_classes", VISIBLE_CLASSES),
-        "record_classes": cfg.get("record_classes", RECORD_CLASSES),
-        "record_path": cfg.get("record_path", "./nagrania"),
-        "pre_seconds": cfg.get("pre_seconds", 5),
-        "post_seconds": cfg.get("post_seconds", 5),
+        "model": DEFAULT_MODEL,
+        "fps": DEFAULT_FPS,
+        "confidence_threshold": DEFAULT_CONFIDENCE_THRESHOLD,
+        "draw_overlays": DEFAULT_DRAW_OVERLAYS,
+        "enable_detection": DEFAULT_ENABLE_DETECTION,
+        "enable_recording": DEFAULT_ENABLE_RECORDING,
+        "detection_hours": DEFAULT_DETECTION_HOURS,
+        "visible_classes": VISIBLE_CLASSES,
+        "record_classes": RECORD_CLASSES,
+        "record_path": DEFAULT_RECORD_PATH,
+        "pre_seconds": DEFAULT_PRE_SECONDS,
+        "post_seconds": DEFAULT_POST_SECONDS,
     }
     for k, v in defaults.items():
         cam.setdefault(k, v)
@@ -62,18 +75,6 @@ def _fill_camera_defaults(cam, cfg):
 def load_config():
     if not os.path.exists(CONFIG_PATH):
         cfg = {
-            "model": "yolov5nu_silu_coco--640x640_float_tflite_multidevice_1",
-            "record_path": "./nagrania",
-            "confidence_threshold": 0.5,
-            "fps": 3,
-            "draw_overlays": True,
-            "enable_detection": True,
-            "enable_recording": True,
-            "visible_classes": ["person", "car", "cat", "dog", "bird"],
-            "record_classes": ["person", "car", "cat", "dog", "bird"],
-            "detection_hours": "00:00-23:59",
-            "pre_seconds": 5,
-            "post_seconds": 5,
             "cameras": [
                 {
                     "name": "kamera1",
@@ -85,43 +86,16 @@ def load_config():
         with open(CONFIG_PATH, "r") as f:
             cfg = json.load(f)
 
-    # uzupełnij kamery
     for cam in cfg.get("cameras", []):
-        _fill_camera_defaults(cam, cfg)
+        _fill_camera_defaults(cam)
     return cfg
 
 
 def save_config(cfg):
-    # dopilnuj uzupełnienia pól kamer
     for cam in cfg.get("cameras", []):
-        _fill_camera_defaults(cam, cfg)
+        _fill_camera_defaults(cam)
     with open(CONFIG_PATH, "w") as f:
         json.dump(cfg, f, indent=4)
-
-
-config = load_config()
-VISIBLE_CLASSES = list(config.get("visible_classes", ["person", "car", "cat", "dog", "bird"]))
-RECORD_CLASSES  = list(config.get("record_classes",  ["person", "car", "cat", "dog", "bird"]))
-CONFIDENCE_THRESHOLD = float(config.get("confidence_threshold", 0.5))
-FPS = int(config.get("fps", 3))
-RECORD_PATH = config.get("record_path", "./nagrania")
-PRE_SECONDS = int(config.get("pre_seconds", 5))
-POST_SECONDS = int(config.get("post_seconds", 5))
-MODEL_NAME = config.get("model", "yolov5nu_silu_coco--640x640_float_tflite_multidevice_1")
-CAMERAS = config.get("cameras", [])
-DRAW_OVERLAYS = bool(config.get("draw_overlays", True))
-ENABLE_DETECTION = bool(config.get("enable_detection", True))
-ENABLE_RECORDING = bool(config.get("enable_recording", True))
-DETECTION_HOURS = str(config.get("detection_hours", "00:00-23:59"))
-
-os.makedirs(RECORD_PATH, exist_ok=True)
-
-# Załaduj model DeGirum
-model = dg.load_model(
-    model_name=MODEL_NAME,
-    inference_host_address="@local",
-    zoo_url=os.path.join(MODELS_PATH, MODEL_NAME)
-)
 
 # --- PAMIĘĆ ALERTÓW ---
 class AlertMemory:
@@ -199,17 +173,17 @@ class CameraWorker(QThread):
         self.index = index
 
         # lokalne ustawienia (z nadpisaniem globalnych)
-        self.fps = int(self.camera.get("fps", FPS))
-        self.confidence_threshold = float(self.camera.get("confidence_threshold", CONFIDENCE_THRESHOLD))
-        self.draw_overlays = bool(self.camera.get("draw_overlays", DRAW_OVERLAYS))
-        self.enable_detection = bool(self.camera.get("enable_detection", ENABLE_DETECTION))
-        self.enable_recording = bool(self.camera.get("enable_recording", ENABLE_RECORDING))
-        self.detection_hours = str(self.camera.get("detection_hours", DETECTION_HOURS))
+        self.fps = int(self.camera.get("fps", DEFAULT_FPS))
+        self.confidence_threshold = float(self.camera.get("confidence_threshold", DEFAULT_CONFIDENCE_THRESHOLD))
+        self.draw_overlays = bool(self.camera.get("draw_overlays", DEFAULT_DRAW_OVERLAYS))
+        self.enable_detection = bool(self.camera.get("enable_detection", DEFAULT_ENABLE_DETECTION))
+        self.enable_recording = bool(self.camera.get("enable_recording", DEFAULT_ENABLE_RECORDING))
+        self.detection_hours = str(self.camera.get("detection_hours", DEFAULT_DETECTION_HOURS))
         self.visible_classes = list(self.camera.get("visible_classes", VISIBLE_CLASSES))
         self.record_classes = list(self.camera.get("record_classes", RECORD_CLASSES))
-        self.pre_seconds = int(self.camera.get("pre_seconds", PRE_SECONDS))
-        self.post_seconds = int(self.camera.get("post_seconds", POST_SECONDS))
-        rec_path = self.camera.get("record_path", RECORD_PATH)
+        self.pre_seconds = int(self.camera.get("pre_seconds", DEFAULT_PRE_SECONDS))
+        self.post_seconds = int(self.camera.get("post_seconds", DEFAULT_POST_SECONDS))
+        rec_path = self.camera.get("record_path", DEFAULT_RECORD_PATH)
         self.output_dir = os.path.join(rec_path, self.camera.get("name", "camera"))
         os.makedirs(self.output_dir, exist_ok=True)
 
@@ -550,24 +524,44 @@ class AlertItemWidget(QWidget):
         pix = QPixmap.fromImage(qimg).scaled(self.thumb.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.thumb.setPixmap(pix)
 
-class AlertListWidget(QListWidget):
+class AlertListWidget(QWidget):
     open_video = pyqtSignal(str)
 
-    def __init__(self):
+    def __init__(self, alert_memory: AlertMemory):
         super().__init__()
-        self.setMinimumWidth(320)
-        self.setStyleSheet("QListWidget{background:#0b0b0b; border:1px solid #222;} ")
+        self.mem = alert_memory
+        layout = QVBoxLayout(self)
+        self.list = QListWidget()
+        self.list.setMinimumWidth(320)
+        self.list.setStyleSheet("QListWidget{background:#0b0b0b; border:1px solid #222;} ")
+        layout.addWidget(self.list)
+
+        btn_row = QHBoxLayout()
+        self.reload_btn = QPushButton("Wczytaj ponownie")
+        self.export_btn = QPushButton("Eksport do CSV")
+        self.clear_btn = QPushButton("Wyczyść pamięć")
+        btn_row.addWidget(self.reload_btn)
+        btn_row.addWidget(self.export_btn)
+        btn_row.addWidget(self.clear_btn)
+        layout.addLayout(btn_row)
+
+        self.reload_btn.clicked.connect(self.reload)
+        self.export_btn.clicked.connect(self.export_csv)
+        self.clear_btn.clicked.connect(self.clear)
+        self.list.itemDoubleClicked.connect(self._open_selected)
+
+        self.load_from_history(self.mem.items)
 
     def add_alert(self, alert: dict):
         widget = AlertItemWidget(alert)
         item = QListWidgetItem()
         item.setSizeHint(widget.sizeHint())
-        self.insertItem(0, item)
-        self.setItemWidget(item, widget)
-        self.scrollToItem(item, hint=QListWidget.PositionAtTop)
+        self.list.insertItem(0, item)
+        self.list.setItemWidget(item, widget)
+        self.list.scrollToItem(item, hint=QListWidget.PositionAtTop)
 
     def load_from_history(self, items: list):
-        self.clear()
+        self.list.clear()
         def parse_dt(a):
             t = a.get("time","")
             try:
@@ -578,26 +572,43 @@ class AlertListWidget(QListWidget):
                     return datetime.datetime.fromtimestamp(os.path.getmtime(fp)) if fp and os.path.exists(fp) else datetime.datetime.min
                 except Exception:
                     return datetime.datetime.min
-        # sort newest-first
         sorted_items = sorted(items[-300:], key=parse_dt, reverse=True)
         for a in sorted_items:
             widget = AlertItemWidget(a)
             item = QListWidgetItem()
             item.setSizeHint(widget.sizeHint())
-            self.addItem(item)  # already newest-first
-            self.setItemWidget(item, widget)
-        if self.count():
-            self.scrollToTop()
+            self.list.addItem(item)
+            self.list.setItemWidget(item, widget)
+        if self.list.count():
+            self.list.scrollToTop()
 
-    def mouseDoubleClickEvent(self, event):
-        item = self.itemAt(event.pos())
-        if item is not None:
-            widget = self.itemWidget(item)
-            if isinstance(widget, AlertItemWidget):
-                fp = widget.alert.get("filepath") or widget.alert.get("file")
-                if fp and os.path.exists(fp):
-                    self.open_video.emit(fp)
-        super().mouseDoubleClickEvent(event)
+    def _open_selected(self, item):
+        widget = self.list.itemWidget(item)
+        if isinstance(widget, AlertItemWidget):
+            fp = widget.alert.get("filepath") or widget.alert.get("file")
+            if fp and os.path.exists(fp):
+                self.open_video.emit(fp)
+
+    def reload(self):
+        self.mem.load()
+        self.load_from_history(self.mem.items)
+
+    def export_csv(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Eksport alertów do CSV", "alerts.csv", "CSV (*.csv)")
+        if not path:
+            return
+        ok, err = self.mem.export_csv(path)
+        if ok:
+            QMessageBox.information(self, "Eksport", f"Zapisano: {path}")
+        else:
+            QMessageBox.warning(self, "Eksport", f"Nie udało się zapisać CSV:\n{err}")
+
+    def clear(self):
+        if QMessageBox.question(self, "Wyczyść pamięć alertów",
+                                "Czy na pewno wyczyścić całą historię alertów?",
+                                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes:
+            self.mem.clear()
+            self.list.clear()
 
 
 # --- ODTWARZACZ WIDEO ---
@@ -1191,30 +1202,39 @@ class CameraSettingsDialog(QDialog):
 
         self.name_edit = QLineEdit(cam.get("name", ""))
         self.rtsp_edit = QLineEdit(cam.get("rtsp", ""))
+        self.model_combo = QComboBox()
+        try:
+            models = [d for d in os.listdir(MODELS_PATH) if os.path.isdir(os.path.join(MODELS_PATH, d))]
+        except Exception:
+            models = []
+        if not models:
+            models = [cam.get("model", DEFAULT_MODEL)]
+        self.model_combo.addItems(models)
+        self.model_combo.setCurrentText(cam.get("model", DEFAULT_MODEL))
         self.fps_spin = QSpinBox()
         self.fps_spin.setRange(1, 60)
-        self.fps_spin.setValue(int(cam.get("fps", FPS)))
+        self.fps_spin.setValue(int(cam.get("fps", DEFAULT_FPS)))
         self.conf_spin = QDoubleSpinBox()
         self.conf_spin.setRange(0.0, 1.0)
         self.conf_spin.setSingleStep(0.05)
-        self.conf_spin.setValue(float(cam.get("confidence_threshold", CONFIDENCE_THRESHOLD)))
+        self.conf_spin.setValue(float(cam.get("confidence_threshold", DEFAULT_CONFIDENCE_THRESHOLD)))
         self.draw_chk = QCheckBox()
-        self.draw_chk.setChecked(bool(cam.get("draw_overlays", DRAW_OVERLAYS)))
+        self.draw_chk.setChecked(bool(cam.get("draw_overlays", DEFAULT_DRAW_OVERLAYS)))
         self.detect_chk = QCheckBox()
-        self.detect_chk.setChecked(bool(cam.get("enable_detection", ENABLE_DETECTION)))
+        self.detect_chk.setChecked(bool(cam.get("enable_detection", DEFAULT_ENABLE_DETECTION)))
         self.record_chk = QCheckBox()
-        self.record_chk.setChecked(bool(cam.get("enable_recording", ENABLE_RECORDING)))
-        self.hours_edit = QLineEdit(cam.get("detection_hours", DETECTION_HOURS))
+        self.record_chk.setChecked(bool(cam.get("enable_recording", DEFAULT_ENABLE_RECORDING)))
+        self.hours_edit = QLineEdit(cam.get("detection_hours", DEFAULT_DETECTION_HOURS))
         self.visible_edit = QLineEdit(",".join(cam.get("visible_classes", VISIBLE_CLASSES)))
         self.record_edit = QLineEdit(",".join(cam.get("record_classes", RECORD_CLASSES)))
-        self.path_edit = QLineEdit(cam.get("record_path", RECORD_PATH))
+        self.path_edit = QLineEdit(cam.get("record_path", DEFAULT_RECORD_PATH))
         self.btn_path = QPushButton("Wybierz")
         self.pre_spin = QSpinBox()
         self.pre_spin.setRange(0, 60)
-        self.pre_spin.setValue(int(cam.get("pre_seconds", PRE_SECONDS)))
+        self.pre_spin.setValue(int(cam.get("pre_seconds", DEFAULT_PRE_SECONDS)))
         self.post_spin = QSpinBox()
         self.post_spin.setRange(0, 60)
-        self.post_spin.setValue(int(cam.get("post_seconds", POST_SECONDS)))
+        self.post_spin.setValue(int(cam.get("post_seconds", DEFAULT_POST_SECONDS)))
 
         path_layout = QHBoxLayout()
         path_layout.addWidget(self.path_edit)
@@ -1222,6 +1242,7 @@ class CameraSettingsDialog(QDialog):
 
         form.addRow("Nazwa", self.name_edit)
         form.addRow("RTSP", self.rtsp_edit)
+        form.addRow("Model detekcji", self.model_combo)
         form.addRow("FPS", self.fps_spin)
         form.addRow("Próg pewności", self.conf_spin)
         form.addRow("Rysuj nakładki", self.draw_chk)
@@ -1255,7 +1276,7 @@ class CameraSettingsDialog(QDialog):
         self.result_camera = None
 
     def _choose_path(self):
-        d = QFileDialog.getExistingDirectory(self, "Wybierz folder nagrań", self.path_edit.text() or RECORD_PATH)
+        d = QFileDialog.getExistingDirectory(self, "Wybierz folder nagrań", self.path_edit.text() or DEFAULT_RECORD_PATH)
         if d:
             self.path_edit.setText(d)
 
@@ -1282,15 +1303,16 @@ class CameraSettingsDialog(QDialog):
         cam = {
             "name": name,
             "rtsp": url,
+            "model": self.model_combo.currentText(),
             "fps": int(self.fps_spin.value()),
             "confidence_threshold": float(self.conf_spin.value()),
             "draw_overlays": self.draw_chk.isChecked(),
             "enable_detection": self.detect_chk.isChecked(),
             "enable_recording": self.record_chk.isChecked(),
-            "detection_hours": self.hours_edit.text().strip() or "00:00-23:59",
+            "detection_hours": self.hours_edit.text().strip() or DEFAULT_DETECTION_HOURS,
             "visible_classes": [c.strip() for c in self.visible_edit.text().split(",") if c.strip()],
             "record_classes": [c.strip() for c in self.record_edit.text().split(",") if c.strip()],
-            "record_path": self.path_edit.text().strip() or RECORD_PATH,
+            "record_path": self.path_edit.text().strip() or DEFAULT_RECORD_PATH,
             "pre_seconds": int(self.pre_spin.value()),
             "post_seconds": int(self.post_spin.value()),
         }
@@ -1341,7 +1363,7 @@ class RemoveCameraDialog(QDialog):
 
 # --- GŁÓWNE OKNO ---
 class MainWindow(QMainWindow):
-    def __init__(self, cameras, model, output_dir, pre_seconds, post_seconds, fps, confidence_threshold):
+    def __init__(self, cameras):
         super().__init__()
         self.setWindowTitle("AI Monitoring – PyQt5 (pełne GUI)")
         self.resize(1400, 900)
@@ -1362,16 +1384,7 @@ class MainWindow(QMainWindow):
         main_hlayout = QHBoxLayout()
 
         self.cameras = list(cameras)
-        self.model = model
-        self.output_dir = output_dir
-        self.pre_seconds = pre_seconds
-        self.post_seconds = post_seconds
-        self.fps = fps
-        self.confidence_threshold = confidence_threshold
-        self.draw_overlays = DRAW_OVERLAYS
-        self.enable_detection = ENABLE_DETECTION
-        self.enable_recording = ENABLE_RECORDING
-        self.detection_hours = DETECTION_HOURS
+        self.output_dir = self.cameras[0].get("record_path", DEFAULT_RECORD_PATH) if self.cameras else DEFAULT_RECORD_PATH
 
         self.camera_list = CameraListWidget(self.cameras)
         self.camera_list.request_context.connect(self._show_camera_context_menu)
@@ -1401,7 +1414,7 @@ class MainWindow(QMainWindow):
 
         main_hlayout.addWidget(self.center_panel, stretch=1)
 
-        self.alert_list = AlertListWidget()
+        self.alert_list = AlertListWidget(self.alert_mem)
         main_hlayout.addWidget(self.alert_list)
 
         main_vlayout.addLayout(main_hlayout)
@@ -1424,7 +1437,6 @@ class MainWindow(QMainWindow):
         self.start_btn.clicked.connect(self.start_current)
         self.stop_btn.clicked.connect(self.stop_current)
 
-        self.alert_list.load_from_history(self.alert_mem.items)
         self.alert_list.open_video.connect(self.open_video_file)
         self.btn_settings.clicked.connect(self.open_settings)
         self.btn_full.clicked.connect(self.toggle_fullscreen)
@@ -1468,26 +1480,6 @@ class MainWindow(QMainWindow):
         self.alert_list.add_alert(alert)
         self.alert_mem.add(alert)
 
-    def clear_alert_memory(self):
-        if QMessageBox.question(self, "Wyczyść pamięć alertów",
-                                "Czy na pewno wyczyścić całą historię alertów?",
-                                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes:
-            self.alert_mem.clear()
-            self.alert_list.clear()
-
-    def export_alert_memory(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Eksport alertów do CSV", "alerts.csv", "CSV (*.csv)")
-        if not path:
-            return
-        ok, err = self.alert_mem.export_csv(path)
-        if ok:
-            QMessageBox.information(self, "Eksport", f"Zapisano: {path}")
-        else:
-            QMessageBox.warning(self, "Eksport", f"Nie udało się zapisać CSV:\n{err}")
-
-    def reload_alert_memory(self):
-        self.alert_mem.load()
-        self.alert_list.load_from_history(self.alert_mem.items)
 
     # --- MENU KONTEKSTOWE KAMERY ---
     def _show_camera_context_menu(self, row: int, global_pos: QPoint):
@@ -1531,7 +1523,17 @@ class MainWindow(QMainWindow):
         while len(self.workers) < len(self.cameras):
             self.workers.append(None)
         cam = self.cameras[idx]
-        w = CameraWorker(camera=cam, model=self.model, index=idx)
+        model_name = cam.get("model", DEFAULT_MODEL)
+        try:
+            model = dg.load_model(
+                model_name=model_name,
+                inference_host_address="@local",
+                zoo_url=os.path.join(MODELS_PATH, model_name),
+            )
+        except Exception as e:
+            QMessageBox.warning(self, "Model", f"Nie udało się załadować modelu '{model_name}': {e}")
+            return
+        w = CameraWorker(camera=cam, model=model, index=idx)
         w.frame_signal.connect(self.update_frame)
         w.alert_signal.connect(self.on_new_alert)
         w.error_signal.connect(self._worker_error)
@@ -1596,8 +1598,8 @@ class MainWindow(QMainWindow):
         dlg = AddCameraWizard(self)
         if dlg.exec_():
             data = dlg.result_data
+            _fill_camera_defaults(data)
             cfg = load_config()
-            _fill_camera_defaults(data, cfg)
             if any(c["name"] == data["name"] for c in self.cameras):
                 QMessageBox.warning(self, "Duplikat", f"Kamera o nazwie '{data['name']}' już istnieje.")
                 return
@@ -1796,73 +1798,6 @@ class MainWindow(QMainWindow):
         composed_qimg = self._compose_letterboxed(frame if frame is not None else np.zeros((720,1280,3), dtype=np.uint8), [line1, line2])
         self.camera_view.setPixmap(QPixmap.fromImage(composed_qimg))
 
-    def open_app_settings(self):
-        dlg = SettingsDialog(self, load_config())
-        if dlg.exec_():
-            fresh = load_config()
-            old_model_name = getattr(self.model, 'name', None) or getattr(self.model, 'model_name', None) or MODEL_NAME
-            old_record_path = getattr(self, 'output_dir', RECORD_PATH)
-            old_thr = getattr(self, 'confidence_threshold', 0.5)
-            old_fps = getattr(self, 'fps', 3)
-
-            new_model_name = fresh.get("model", MODEL_NAME)
-            new_thr = float(fresh.get("confidence_threshold", old_thr))
-            new_fps = int(fresh.get("fps", old_fps))
-            new_record_path = fresh.get("record_path", old_record_path)
-            new_draw_overlays = bool(fresh.get("draw_overlays", self.draw_overlays))
-            new_enable_detection = bool(fresh.get("enable_detection", self.enable_detection))
-            new_enable_recording = bool(fresh.get("enable_recording", self.enable_recording))
-            new_detection_hours = str(fresh.get("detection_hours", self.detection_hours))
-
-            # zastosuj natychmiast
-            self.confidence_threshold = new_thr
-            self.fps = new_fps
-            self.draw_overlays = new_draw_overlays
-            self.enable_detection = new_enable_detection
-            self.enable_recording = new_enable_recording
-            self.detection_hours = new_detection_hours
-            for w in self.workers:
-                if isinstance(w, CameraWorker):
-                    w.set_confidence(new_thr)
-                    w.set_fps(new_fps)
-                    w.set_draw_overlays(new_draw_overlays)
-                    w.set_enable_detection(new_enable_detection)
-                    w.set_enable_recording(new_enable_recording)
-                    w.set_detection_schedule(new_detection_hours)
-
-            # model/folder wymagają restartu workerów
-            need_restart = False
-            if new_model_name and (new_model_name != old_model_name):
-                need_restart = True
-            if new_record_path and (new_record_path != old_record_path):
-                need_restart = True
-
-            if need_restart:
-                if new_model_name and (new_model_name != old_model_name):
-                    try:
-                        new_model = dg.load_model(
-                            model_name=new_model_name,
-                            inference_host_address="@local",
-                            zoo_url=os.path.join(MODELS_PATH, new_model_name)
-                        )
-                        self.model = new_model
-                    except Exception as e:
-                        QMessageBox.warning(self, "Model", f"Nie udało się załadować modelu '{new_model_name}': {e}")
-                        return
-                if new_record_path:
-                    try:
-                        os.makedirs(new_record_path, exist_ok=True)
-                    except Exception as e:
-                        QMessageBox.warning(self, "Folder nagrań", f"Nie udało się utworzyć folderu '{new_record_path}': {e}")
-                    self.output_dir = new_record_path
-
-                self.stop_all()
-                self.workers = [None] * len(self.cameras)
-                for idx in range(len(self.cameras)):
-                    self.start_camera(idx)
-
-            QMessageBox.information(self, "Zastosowano",
-                                    f"Próg: {int(new_thr*100)}%  |  FPS: {new_fps}  |  Model: {new_model_name}  |  Folder: {new_record_path}\\nNakładki: {new_draw_overlays}  |  Detekcja: {new_enable_detection}  |  Nagrywanie: {new_enable_recording}  |  Godziny: {new_detection_hours}")
 
     def open_video_file(self, filepath: str):
         dlg = VideoPlayerDialog(filepath, self)
@@ -1882,221 +1817,33 @@ class MainWindow(QMainWindow):
         dlg.exec_()
 
 
-# --- Ustawienia (model, próg, folder, fps + przełączniki) ---
-class SettingsDialog(QDialog):
-    def __init__(self, parent=None, config=None):
-        super().__init__(parent)
-        self.setWindowTitle("Ustawienia")
-        self.resize(640, 380)
-        self.setMinimumSize(600, 360)
-        self.cfg = dict(config or {})
-
-        layout = QFormLayout(self)
-
-        # MODELE
-        self.model_selector = QComboBox()
-        try:
-            models = [d for d in os.listdir(MODELS_PATH) if os.path.isdir(os.path.join(MODELS_PATH, d))]
-        except Exception:
-            models = []
-        if not models:
-            models = [self.cfg.get("model", "yolov5nu_silu_coco--640x640_float_tflite_multidevice_1")]
-        self.model_selector.addItems(models)
-        self.model_selector.setCurrentText(self.cfg.get("model", models[0]))
-
-        # PRÓG DETEKCJI (%)
-        self.th_slider = QSlider(Qt.Horizontal)
-        self.th_slider.setRange(0, 100)
-        self.th_slider.setValue(int(float(self.cfg.get("confidence_threshold", 0.5)) * 100))
-        self.th_value = QSpinBox()
-        self.th_value.setRange(0, 100)
-        self.th_value.setValue(self.th_slider.value())
-        self.th_label = QLabel(f"{self.th_slider.value()} %")
-
-        th_row = QHBoxLayout()
-        th_row.addWidget(self.th_slider, stretch=1)
-        th_row.addWidget(self.th_value)
-        th_row.addWidget(self.th_label)
-
-        # FPS
-        self.fps_slider = QSlider(Qt.Horizontal)
-        self.fps_slider.setRange(1, 60)
-        self.fps_slider.setValue(int(self.cfg.get("fps", 3)))
-        self.fps_value = QSpinBox()
-        self.fps_value.setRange(1, 60)
-        self.fps_value.setValue(self.fps_slider.value())
-        self.fps_label = QLabel(f"{self.fps_slider.value()} fps")
-
-        fps_row = QHBoxLayout()
-        fps_row.addWidget(self.fps_slider, stretch=1)
-        fps_row.addWidget(self.fps_value)
-        fps_row.addWidget(self.fps_label)
-
-        # FOLDER
-        self.record_path_btn = QPushButton(self.cfg.get("record_path", "./nagrania"))
-        self.record_path_btn.clicked.connect(self.choose_path)
-
-        # PRZEŁĄCZNIKI
-        self.chk_overlays = QCheckBox("Pokaż nakładki detekcji (boksy i etykiety)")
-        self.chk_overlays.setChecked(bool(self.cfg.get("draw_overlays", True)))
-        self.chk_enable_det = QCheckBox("Włącz detekcję (wykrywanie obiektów)")
-        self.chk_enable_det.setChecked(bool(self.cfg.get("enable_detection", True)))
-        self.chk_enable_rec = QCheckBox("Włącz nagrywanie")
-        self.chk_enable_rec.setChecked(bool(self.cfg.get("enable_recording", True)))
-        self.hours_edit = QLineEdit(self.cfg.get("detection_hours", "00:00-23:59"))
-        self.hours_edit.setPlaceholderText("np. 08:00-20:00;22:00-23:59")
-        # KLASY (lista przecinkami)
-        self.visible_classes_edit = QLineEdit(",".join(self.cfg.get("visible_classes", ["person","car","cat","dog","bird"])))
-        self.record_classes_edit = QLineEdit(",".join(self.cfg.get("record_classes", ["person","car","cat","dog","bird"])))
-
-
-        # ZAPIS
-        self.save_btn = QPushButton("Zapisz ustawienia")
-        self.save_btn.setMinimumHeight(36)
-        self.save_btn.clicked.connect(self.save_settings)
-
-        # FORM
-        layout.addRow("Model detekcji", self.model_selector)
-        layout.addRow("Próg detekcji (%)", th_row)
-        layout.addRow("FPS (kl./s)", fps_row)
-        layout.addRow("Folder nagrań", self.record_path_btn)
-        layout.addRow("", QLabel(""))
-        layout.addRow("Nakładki", self.chk_overlays)
-        layout.addRow("Detekcja", self.chk_enable_det)
-        layout.addRow("Nagrywanie", self.chk_enable_rec)
-        layout.addRow("Godziny detekcji", self.hours_edit)
-        layout.addRow("Klasy widoczne (overlay)", self.visible_classes_edit)
-        layout.addRow("Klasy nagrywane", self.record_classes_edit)
-
-        layout.addRow("", self.save_btn)
-
-        # SYNC
-        self.th_slider.valueChanged.connect(self._on_th_changed)
-        self.th_value.valueChanged.connect(self._on_th_changed)
-        self.fps_slider.valueChanged.connect(self._on_fps_changed)
-        self.fps_value.valueChanged.connect(self._on_fps_changed)
-
-    def _on_th_changed(self, val):
-        sender = self.sender()
-        if sender is self.th_slider and self.th_value.value() != val:
-            self.th_value.setValue(val)
-        elif sender is self.th_value and self.th_slider.value() != val:
-            self.th_slider.setValue(val)
-        self.th_label.setText(f"{self.th_slider.value()} %")
-
-    def _on_fps_changed(self, val):
-        sender = self.sender()
-        if sender is self.fps_slider and self.fps_value.value() != val:
-            self.fps_value.setValue(val)
-        elif sender is self.fps_value and self.fps_slider.value() != val:
-            self.fps_slider.setValue(val)
-        self.fps_label.setText(f"{self.fps_slider.value()} fps")
-
-    def choose_path(self):
-        path = QFileDialog.getExistingDirectory(self, "Wybierz folder zapisu")
-        if path:
-            self.record_path_btn.setText(path)
-
-    def save_settings(self):
-        self.cfg["model"] = self.model_selector.currentText()
-        self.cfg["confidence_threshold"] = round(self.th_slider.value() / 100.0, 3)
-        self.cfg["fps"] = int(self.fps_slider.value())
-        self.cfg["record_path"] = self.record_path_btn.text()
-        self.cfg["draw_overlays"] = bool(self.chk_overlays.isChecked())
-        self.cfg["enable_detection"] = bool(self.chk_enable_det.isChecked())
-        self.cfg["enable_recording"] = bool(self.chk_enable_rec.isChecked())
-        self.cfg["detection_hours"] = self.hours_edit.text().strip() or "00:00-23:59"
-        # klasy z pól tekstowych
-        vis = [s.strip() for s in self.visible_classes_edit.text().split(",") if s.strip()]
-        rec = [s.strip() for s in self.record_classes_edit.text().split(",") if s.strip()]
-        if not vis:
-            vis = ["person","car","cat","dog","bird"]
-        if not rec:
-            rec = ["person","car","cat","dog","bird"]
-        self.cfg["visible_classes"] = vis
-        self.cfg["record_classes"] = rec
-
-        # prosta walidacja godzin
-        ok = True
-        spec = self.cfg["detection_hours"].replace(" ", "")
-        for part in spec.split(";"):
-            if not part:
-                continue
-            if not re.match(r"^\d{2}:\d{2}-\d{2}:\d{2}$", part):
-                ok = False
-                break
-        if not ok:
-            QMessageBox.warning(self, "Godziny detekcji", "Użyj formatu HH:MM-HH:MM;HH:MM-HH:MM")
-            return
-
-        save_config(self.cfg)
-        try:
-            global config
-            config.update(self.cfg)
-            global VISIBLE_CLASSES, RECORD_CLASSES
-            VISIBLE_CLASSES = list(config.get("visible_classes", VISIBLE_CLASSES))
-            RECORD_CLASSES = list(config.get("record_classes", RECORD_CLASSES))
-
-        except Exception:
-            pass
-        QMessageBox.information(self, "Zapisano", "Ustawienia zapisane. Zmiany zostaną zastosowane od razu.")
-        self.accept()
-
-
 # --- Centrum ustawień ---
 class SettingsHub(QDialog):
     def __init__(self, parent: MainWindow):
         super().__init__(parent)
         self.setWindowTitle("Menu ustawień")
-        self.resize(300, 280)
+        self.resize(300, 200)
 
         layout = QVBoxLayout(self)
 
-        btn_app = QPushButton("Ustawienia aplikacji")
         btn_add_cam = QPushButton("Dodaj kamerę")
         btn_remove_cam = QPushButton("Usuń kamerę")
-        btn_alert_reload = QPushButton("Alerty: wczytaj ponownie")
-        btn_alert_export = QPushButton("Alerty: eksport do CSV")
-        btn_alert_clear = QPushButton("Alerty: wyczyść pamięć")
         btn_restart = QPushButton("Restart aplikacji")
         btn_close = QPushButton("Zamknij")
 
-        for b in [
-            btn_app,
-            btn_add_cam,
-            btn_remove_cam,
-            btn_alert_reload,
-            btn_alert_export,
-            btn_alert_clear,
-            btn_restart,
-            btn_close,
-        ]:
+        for b in [btn_add_cam, btn_remove_cam, btn_restart, btn_close]:
             layout.addWidget(b)
 
-        btn_app.clicked.connect(parent.open_app_settings)
         btn_add_cam.clicked.connect(parent.add_camera_wizard)
         btn_remove_cam.clicked.connect(parent.remove_camera_dialog)
-        btn_alert_reload.clicked.connect(parent.reload_alert_memory)
-        btn_alert_export.clicked.connect(parent.export_alert_memory)
-        btn_alert_clear.clicked.connect(parent.clear_alert_memory)
         btn_restart.clicked.connect(parent.restart_app)
         btn_close.clicked.connect(self.accept)
 
 # --- START ---
 def main(windowed: bool = False):
-    out_dir = RECORD_PATH
-    os.makedirs(out_dir, exist_ok=True)
-
+    cfg = load_config()
     app = QApplication(sys.argv)
-    win = MainWindow(
-        cameras=CAMERAS,
-        model=model,
-        output_dir=out_dir,
-        pre_seconds=PRE_SECONDS,
-        post_seconds=POST_SECONDS,
-        fps=FPS,
-        confidence_threshold=CONFIDENCE_THRESHOLD
-    )
+    win = MainWindow(cameras=cfg.get("cameras", []))
     if windowed:
         win.show()
     else:

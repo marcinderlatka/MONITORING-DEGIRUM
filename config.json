@@ -1,42 +1,17 @@
 {
-    "model": "yolov5nu_silu_coco--640x640_float_tflite_multidevice_1",
-    "visible_classes": [
-        "person",
-        "car",
-        "dog"
-    ],
-    "record_classes": [
-        "person",
-        "car"
-    ],
-    "record_path": "./nagrania",
-    "confidence_threshold": 0.5,
-    "fps": 1,
-    "draw_overlays": true,
-    "enable_detection": true,
-    "enable_recording": true,
-    "detection_hours": "00:00-23:59",
-    "pre_seconds": 5,
-    "post_seconds": 5,
     "cameras": [
         {
             "name": "Kamera 1",
             "rtsp": "rtsp://admin:IBLTSQ@192.168.8.165:554",
+            "model": "yolov5nu_silu_coco--640x640_float_tflite_multidevice_1",
             "fps": 1,
             "confidence_threshold": 0.5,
             "draw_overlays": true,
             "enable_detection": true,
             "enable_recording": true,
             "detection_hours": "00:00-23:59",
-            "visible_classes": [
-                "person",
-                "car",
-                "dog"
-            ],
-            "record_classes": [
-                "person",
-                "car"
-            ],
+            "visible_classes": ["person", "car", "dog"],
+            "record_classes": ["person", "car"],
             "record_path": "./nagrania",
             "pre_seconds": 5,
             "post_seconds": 5
