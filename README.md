@@ -16,13 +16,14 @@ python app_01.py --windowed
 Opcja `--windowed` uruchamia aplikację w oknie, brak opcji – w trybie pełnoekranowym.
 
 ## Plik `config.json`
-Plik konfiguracyjny zawiera ustawienia globalne oraz listę kamer. Każda kamera może nadpisywać wartości globalne. Dostępne pola:
+Plik konfiguracyjny zawiera wyłącznie listę kamer. Każda kamera przechowuje pełny zestaw parametrów:
 
-### Pola globalne
+* `name` – nazwa kamery
+* `rtsp` – adres strumienia RTSP
 * `model` – nazwa modelu DeGirum
-* `record_path` – domyślny katalog nagrań
+* `record_path` – katalog nagrań
 * `confidence_threshold` – próg pewności wykrycia
-* `fps` – domyślny FPS analizy
+* `fps` – częstotliwość analizy
 * `draw_overlays` – rysowanie nakładek
 * `enable_detection` – włączanie detekcji
 * `enable_recording` – włączanie nagrywania
@@ -31,15 +32,12 @@ Plik konfiguracyjny zawiera ustawienia globalne oraz listę kamer. Każda kamera
 * `record_classes` – lista klas wyzwalających nagrywanie
 * `pre_seconds`, `post_seconds` – długość bufora przed i po zdarzeniu
 
-### Pola per‑kamera
-Każdy wpis w `cameras` może mieć analogiczne pola jak globalne: `fps`, `confidence_threshold`, `draw_overlays`, `enable_detection`, `enable_recording`, `detection_hours`, `visible_classes`, `record_classes`, `record_path`, `pre_seconds`, `post_seconds`, a także obowiązkowe `name` i `rtsp`.
-Przy wczytywaniu brakujące pola są uzupełniane wartościami globalnymi.
-
 Przykładowa kamera:
 ```json
 {
   "name": "Kamera 1",
   "rtsp": "rtsp://admin:IBLTSQ@192.168.8.165:554",
+  "model": "yolov5nu_silu_coco--640x640_float_tflite_multidevice_1",
   "fps": 1,
   "confidence_threshold": 0.5,
   "draw_overlays": true,
@@ -64,3 +62,10 @@ Po zatwierdzeniu ustawienia są zapisywane w `config.json`, a wątek kamery zost
 
 ## Nagrania
 Nagrania zapisywane są w podkatalogach `record_path/<nazwa_kamery>`. Przeglądanie oraz odtwarzanie plików umożliwia pozycja **Nagrania → Przeglądaj nagrania** w menu głównym.
+
+## Widżet alertów
+Lista alertów wyposażona jest w przyciski:
+
+* **Wczytaj ponownie** – odświeża historię z pliku,
+* **Eksport do CSV** – zapisuje historię alertów do pliku CSV,
+* **Wyczyść pamięć** – usuwa wszystkie zapamiętane alerty.
