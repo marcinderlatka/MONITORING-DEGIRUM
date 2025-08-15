@@ -21,6 +21,10 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer, QDate, QPoint, QRect
 from PyQt5.QtGui import QImage, QPixmap, QClipboard, QPainter, QFont, QColor, QIcon
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent
+ICON_DIR = BASE_DIR / "icons"
 
 # --- DeGirum ---
 import degirum as dg
@@ -1472,17 +1476,17 @@ class MainWindow(QMainWindow):
         controls_layout.setAlignment(Qt.AlignCenter)
 
         btn_recordings = QToolButton()
-        btn_recordings.setIcon(QIcon("icons/folder.svg"))
+        btn_recordings.setIcon(QIcon(str(ICON_DIR / "folder.svg")))
         btn_recordings.setIconSize(QSize(50, 50))
         btn_recordings.clicked.connect(self.open_recordings_browser)
 
         btn_settings = QToolButton()
-        btn_settings.setIcon(QIcon("icons/gear.svg"))
+        btn_settings.setIcon(QIcon(str(ICON_DIR / "gear.svg")))
         btn_settings.setIconSize(QSize(50, 50))
         btn_settings.clicked.connect(self.open_settings)
 
         btn_fullscreen = QToolButton()
-        btn_fullscreen.setIcon(QIcon("icons/arrows-fullscreen.svg"))
+        btn_fullscreen.setIcon(QIcon(str(ICON_DIR / "arrows-fullscreen.svg")))
         btn_fullscreen.setIconSize(QSize(50, 50))
         btn_fullscreen.clicked.connect(self.toggle_fullscreen)
 
