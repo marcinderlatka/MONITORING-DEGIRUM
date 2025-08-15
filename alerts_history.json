@@ -1,0 +1,72 @@
+[
+  {
+    "camera": "Kamera 1",
+    "label": "car",
+    "confidence": 0.5746710300445557,
+    "time": "2025-08-15 08:05:09",
+    "filepath": "./nagrania/Kamera 1/nagranie_Kamera 1_20250815_080508.mp4"
+  },
+  {
+    "camera": "Kamera 1",
+    "label": "person",
+    "confidence": 0.7567799687385559,
+    "time": "2025-08-15 08:27:50",
+    "filepath": "./nagrania/Kamera 1/nagranie_Kamera 1_20250815_082750.mp4"
+  },
+  {
+    "camera": "Kamera 1",
+    "label": "person",
+    "confidence": 0.6782013177871704,
+    "time": "2025-08-15 08:28:12",
+    "filepath": "./nagrania/Kamera 1/nagranie_Kamera 1_20250815_082811.mp4"
+  },
+  {
+    "camera": "Kamera 1",
+    "label": "person",
+    "confidence": 0.5589362978935242,
+    "time": "2025-08-15 08:29:09",
+    "filepath": "./nagrania/Kamera 1/nagranie_Kamera 1_20250815_082909.mp4"
+  },
+  {
+    "camera": "Kamera 1",
+    "label": "person",
+    "confidence": 0.5303806662559509,
+    "time": "2025-08-15 08:29:58",
+    "filepath": "./nagrania/Kamera 1/nagranie_Kamera 1_20250815_082957.mp4"
+  },
+  {
+    "camera": "Kamera 1",
+    "label": "person",
+    "confidence": 0.523734450340271,
+    "time": "2025-08-15 08:30:15",
+    "filepath": "./nagrania/Kamera 1/nagranie_Kamera 1_20250815_083015.mp4"
+  },
+  {
+    "camera": "Kamera 1",
+    "label": "person",
+    "confidence": 0.6643154621124268,
+    "time": "2025-08-15 08:30:28",
+    "filepath": "./nagrania/Kamera 1/nagranie_Kamera 1_20250815_083028.mp4"
+  },
+  {
+    "camera": "Kamera 1",
+    "label": "person",
+    "confidence": 0.776488721370697,
+    "time": "2025-08-15 08:30:51",
+    "filepath": "./nagrania/Kamera 1/nagranie_Kamera 1_20250815_083051.mp4"
+  },
+  {
+    "camera": "Kamera 1",
+    "label": "car",
+    "confidence": 0.5087504982948303,
+    "time": "2025-08-15 08:35:03",
+    "filepath": "./nagrania/Kamera 1/nagranie_Kamera 1_20250815_083503.mp4"
+  },
+  {
+    "camera": "Kamera 1",
+    "label": "car",
+    "confidence": 0.5954900979995728,
+    "time": "2025-08-15 08:36:40",
+    "filepath": "./nagrania/Kamera 1/nagranie_Kamera 1_20250815_083640.mp4"
+  }
+]
