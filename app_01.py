@@ -615,18 +615,12 @@ class AlertListWidget(QWidget):
 class VideoPlayerDialog(QDialog):
     def __init__(self, filepath, parent=None):
         super().__init__(parent)
-        self.setWindowTitle(os.path.basename(filepath))
         self.resize(900, 600)
-        self.filepath = filepath
 
-        self.cap = cv2.VideoCapture(filepath)
-        if not self.cap.isOpened():
-            QMessageBox.critical(self, "Błąd", f"Nie można otworzyć pliku:\n{filepath}")
-            self.close()
-            return
-
-        self.fps = self.cap.get(cv2.CAP_PROP_FPS) or 25.0
-        self.frame_count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        # lista plików w katalogu – umożliwia przełączanie
+        folder = os.path.dirname(filepath) or "."
+        self.file_list = sorted(glob(os.path.join(folder, "*.mp4")))
+        self.file_index = self.file_list.index(filepath) if filepath in self.file_list else 0
 
         v = QVBoxLayout(self)
         self.video_label = QLabel("Wideo")
@@ -640,14 +634,19 @@ class VideoPlayerDialog(QDialog):
         self.btn_stop = QPushButton("◼")
         self.btn_back = QPushButton("<<")
         self.btn_fwd = QPushButton(">>")
+        self.btn_prev = QPushButton("Nagranie ←")
+        self.btn_next = QPushButton("Nagranie →")
+        self.btn_snap = QPushButton("📷")
         self.slider = QSlider(Qt.Horizontal)
-        self.slider.setRange(0, max(self.frame_count - 1, 0))
         self.btn_full = QPushButton("Pełny ekran")
+        ctrl.addWidget(self.btn_prev)
+        ctrl.addWidget(self.btn_next)
         ctrl.addWidget(self.btn_play)
         ctrl.addWidget(self.btn_pause)
         ctrl.addWidget(self.btn_stop)
         ctrl.addWidget(self.btn_back)
         ctrl.addWidget(self.btn_fwd)
+        ctrl.addWidget(self.btn_snap)
         ctrl.addWidget(self.slider, stretch=1)
         ctrl.addWidget(self.btn_full)
         v.addLayout(ctrl)
@@ -660,11 +659,19 @@ class VideoPlayerDialog(QDialog):
         self.btn_stop.clicked.connect(self.stop)
         self.btn_back.clicked.connect(self.step_back)
         self.btn_fwd.clicked.connect(self.step_forward)
+        self.btn_prev.clicked.connect(self.prev_video)
+        self.btn_next.clicked.connect(self.next_video)
+        self.btn_snap.clicked.connect(self.save_screenshot)
+        self.btn_full.clicked.connect(self.toggle_fullscreen)
         self.slider.sliderPressed.connect(self.pause)
         self.slider.sliderReleased.connect(self.seek_to_slider)
 
+        self.video_label.mouseDoubleClickEvent = lambda e: self.toggle_fullscreen()
+
+        self.cap = None
         self.current_index = 0
-        self._show_frame_at(self.current_index)
+        self.current_frame = None
+        self.load_video(self.file_list[self.file_index])
 
     def _read_frame(self, idx=None):
         if idx is not None:
@@ -675,6 +682,7 @@ class VideoPlayerDialog(QDialog):
     def _show_frame(self, frame):
         if frame is None:
             return
+        self.current_frame = frame.copy()
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
         qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
@@ -725,6 +733,49 @@ class VideoPlayerDialog(QDialog):
         self.pause()
         self._show_frame_at(self.slider.value())
 
+    # --- Pliki ---
+    def load_video(self, filepath):
+        if self.cap:
+            self.cap.release()
+        self.filepath = filepath
+        self.setWindowTitle(os.path.basename(filepath))
+        self.cap = cv2.VideoCapture(filepath)
+        if not self.cap.isOpened():
+            QMessageBox.critical(self, "Błąd", f"Nie można otworzyć pliku:\n{filepath}")
+            return
+        self.fps = self.cap.get(cv2.CAP_PROP_FPS) or 25.0
+        self.frame_count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        self.slider.setRange(0, max(self.frame_count - 1, 0))
+        self.current_index = 0
+        self._show_frame_at(0)
+
+    def next_video(self):
+        if self.file_index < len(self.file_list) - 1:
+            self.file_index += 1
+            self.load_video(self.file_list[self.file_index])
+
+    def prev_video(self):
+        if self.file_index > 0:
+            self.file_index -= 1
+            self.load_video(self.file_list[self.file_index])
+
+    def save_screenshot(self):
+        if self.current_frame is None:
+            return
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        out = os.path.join(os.path.dirname(self.filepath), f"frame_{ts}.jpg")
+        try:
+            cv2.imwrite(out, self.current_frame)
+            QMessageBox.information(self, "Zapisano", f"Kadr zapisany jako: {os.path.basename(out)}")
+        except Exception as e:
+            QMessageBox.warning(self, "Błąd", str(e))
+
+    def toggle_fullscreen(self):
+        if self.isFullScreen():
+            self.showNormal()
+        else:
+            self.showFullScreen()
+
     def closeEvent(self, e):
         self.pause()
         if self.cap:
@@ -739,6 +790,7 @@ class RecordingItemWidget(QWidget):
         self.meta = meta
         v = QVBoxLayout(self)
         v.setContentsMargins(6, 6, 6, 6)
+        v.setAlignment(Qt.AlignCenter)
 
         self.thumb = QLabel()
         self.thumb.setFixedSize(*thumb_size)
@@ -752,7 +804,8 @@ class RecordingItemWidget(QWidget):
         name = os.path.basename(meta.get("file", ""))
 
         self.meta_label = QLabel(f"{cam} | {ts}\n{lbl} ({conf:.1f}%)\n{name}")
-        self.meta_label.setStyleSheet("padding-top:6px; color:#ddd;")
+        self.meta_label.setAlignment(Qt.AlignCenter)
+        self.meta_label.setStyleSheet("padding-top:6px; color:#000;")
         v.addWidget(self.meta_label)
 
         self.load_thumbnail()
@@ -1381,6 +1434,18 @@ class MainWindow(QMainWindow):
 
         main_widget = QWidget()
         main_vlayout = QVBoxLayout(main_widget)
+
+        # Górny pasek przycisków
+        top_controls = QHBoxLayout()
+        top_controls.addStretch(1)
+        self.btn_settings = QPushButton("Ustawienia")
+        self.btn_full = QPushButton("Pełny ekran")
+        top_controls.addWidget(self.btn_settings)
+        top_controls.addSpacing(8)
+        top_controls.addWidget(self.btn_full)
+        top_controls.addStretch(1)
+        main_vlayout.addLayout(top_controls)
+
         main_hlayout = QHBoxLayout()
 
         self.cameras = list(cameras)
@@ -1390,7 +1455,7 @@ class MainWindow(QMainWindow):
         self.camera_list.request_context.connect(self._show_camera_context_menu)
         main_hlayout.addWidget(self.camera_list)
 
-        # Centrum: panel z obrazem i przyciskami pod spodem
+        # Centrum: panel z obrazem
         self.center_panel = QWidget()
         center_v = QVBoxLayout(self.center_panel)
         center_v.setContentsMargins(0,0,0,0)
@@ -1399,18 +1464,7 @@ class MainWindow(QMainWindow):
         self.camera_view.setAlignment(Qt.AlignCenter)
         self.camera_view.setStyleSheet("background:#000; color:#fff;")
         center_v.addWidget(self.camera_view, stretch=1)
-
-        btn_row = QHBoxLayout()
-        btn_row.addStretch(1)
-        self.start_btn = QPushButton("Start kamera")
-        self.stop_btn = QPushButton("Stop kamera")
-        self.start_btn.setMinimumWidth(140)
-        self.stop_btn.setMinimumWidth(140)
-        btn_row.addWidget(self.start_btn)
-        btn_row.addSpacing(16)
-        btn_row.addWidget(self.stop_btn)
-        btn_row.addStretch(1)
-        center_v.addLayout(btn_row)
+        self.camera_view.mouseDoubleClickEvent = lambda e: self.toggle_fullscreen()
 
         main_hlayout.addWidget(self.center_panel, stretch=1)
 
@@ -1419,23 +1473,11 @@ class MainWindow(QMainWindow):
 
         main_vlayout.addLayout(main_hlayout)
 
-        # Dolny pasek: Ustawienia i Pełny ekran zawsze widoczne
-        bottom_controls = QHBoxLayout()
-        bottom_controls.addStretch(1)
-        self.btn_settings = QPushButton("Ustawienia")
-        self.btn_full = QPushButton("Pełny ekran")
-        bottom_controls.addWidget(self.btn_settings)
-        bottom_controls.addSpacing(8)
-        bottom_controls.addWidget(self.btn_full)
-        main_vlayout.addLayout(bottom_controls)
-
         self.setCentralWidget(main_widget)
 
         # backend
         self.workers = []
         self.camera_list.currentRowChanged.connect(self.switch_camera)
-        self.start_btn.clicked.connect(self.start_current)
-        self.stop_btn.clicked.connect(self.stop_current)
 
         self.alert_list.open_video.connect(self.open_video_file)
         self.btn_settings.clicked.connect(self.open_settings)
@@ -1548,22 +1590,6 @@ class MainWindow(QMainWindow):
                 w.stop()
                 self.workers[idx] = None
 
-    def start_current(self):
-        idx = self.camera_list.currentRow()
-        if idx < 0:
-            return
-        self.start_camera(idx)
-        self._last_status[idx] = "Uruchamianie…"
-        self._last_error.pop(idx, None)
-        self._render_current()
-
-    def stop_current(self):
-        idx = self.camera_list.currentRow()
-        if idx < 0:
-            return
-        self.stop_camera(idx)
-        self._last_status[idx] = "Zatrzymano"
-        self._render_current()
 
     def _worker_status(self, text: str, idx: int):
         self._last_status[idx] = text
@@ -1622,8 +1648,33 @@ class MainWindow(QMainWindow):
             save_config(cfg)
             self.camera_list.rebuild(self.cameras)
             self.camera_list.setCurrentRow(idx)
-            self.stop_camera(idx)
-            self.start_camera(idx)
+
+            w = self.workers[idx] if idx < len(self.workers) else None
+            if isinstance(w, CameraWorker) and w.isRunning():
+                if new_data.get("model") != cam.get("model"):
+                    self.stop_camera(idx)
+                    self.start_camera(idx)
+                else:
+                    w.set_confidence(new_data.get("confidence_threshold", DEFAULT_CONFIDENCE_THRESHOLD))
+                    w.set_draw_overlays(new_data.get("draw_overlays", DEFAULT_DRAW_OVERLAYS))
+                    w.set_enable_detection(new_data.get("enable_detection", DEFAULT_ENABLE_DETECTION))
+                    w.set_enable_recording(new_data.get("enable_recording", DEFAULT_ENABLE_RECORDING))
+                    w.set_detection_schedule(new_data.get("detection_hours", DEFAULT_DETECTION_HOURS))
+                    w.visible_classes = list(new_data.get("visible_classes", VISIBLE_CLASSES))
+                    w.record_classes = list(new_data.get("record_classes", RECORD_CLASSES))
+                    w.pre_seconds = int(new_data.get("pre_seconds", DEFAULT_PRE_SECONDS))
+                    w.post_seconds = int(new_data.get("post_seconds", DEFAULT_POST_SECONDS))
+                    w.prerecord_buffer = deque(maxlen=int(w.pre_seconds * w.fps))
+                    w.output_dir = os.path.join(new_data.get("record_path", DEFAULT_RECORD_PATH), new_data.get("name"))
+                    os.makedirs(w.output_dir, exist_ok=True)
+                    w.camera.update(new_data)
+                    if new_data.get("rtsp") != cam.get("rtsp"):
+                        w.restart_requested = True
+                    if new_data.get("fps") != cam.get("fps"):
+                        w.set_fps(new_data.get("fps", w.fps))
+            else:
+                self.stop_camera(idx)
+                self.start_camera(idx)
 
     def delete_camera(self, idx: int):
         name = self.cameras[idx]["name"]
