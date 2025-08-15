@@ -58,10 +58,22 @@ Z listy kamer wybierz pozycję prawym przyciskiem i wybierz **Ustawienia…**. W
 * przetestować połączenie RTSP,
 * wskazać katalog nagrań,
 * ustawić czasy pre/post‑recordingu.
-Po zatwierdzeniu ustawienia są zapisywane w `config.json`, a wątek kamery zostaje ponownie uruchomiony.
+Po zatwierdzeniu ustawienia są zapisywane w `config.json` i natychmiast stosowane w działającej kamerze.
+Pełny restart wątku następuje tylko przy zmianie modelu.
+
+### Sterowanie podglądem
+Przyciski **Ustawienia** i **Pełny ekran** znajdują się na górnym pasku głównego okna.
+Tryb pełnoekranowy można przełączać zarówno przyciskiem, jak i dwuklikiem w obszarze podglądu.
+Przyciski start/stop kamery zostały usunięte – sterowanie odbywa się z menu kontekstowego listy kamer.
 
 ## Nagrania
 Nagrania zapisywane są w podkatalogach `record_path/<nazwa_kamery>`. Przeglądanie oraz odtwarzanie plików umożliwia pozycja **Nagrania → Przeglądaj nagrania** w menu głównym.
+
+### Odtwarzacz wideo
+Odtwarzacz obsługuje:
+* przyciski „Nagranie ←/→” do przełączania między plikami w katalogu,
+* zrzut klatki do pliku (📷),
+* pełny ekran przełączany przyciskiem lub dwuklikiem na obrazie.
 
 ## Widżet alertów
 Lista alertów wyposażona jest w przyciski:
