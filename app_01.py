@@ -1470,7 +1470,8 @@ class MainWindow(QMainWindow):
         self.camera_view.mouseDoubleClickEvent = lambda e: self.toggle_fullscreen()
 
         controls_widget = QWidget()
-        controls_widget.setStyleSheet("background:#d3d3d3; color:#000;")
+        # Keep only background color; buttons manage their own text/icon color
+        controls_widget.setStyleSheet("background:#d3d3d3;")
         controls_layout = QHBoxLayout(controls_widget)
         controls_layout.setContentsMargins(0,50,0,50)
         controls_layout.setSpacing(20)
