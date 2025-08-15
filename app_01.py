@@ -14,13 +14,13 @@ import argparse
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QListWidget, QListWidgetItem,
-    QVBoxLayout, QHBoxLayout, QPushButton, QSlider, QAction,
+    QVBoxLayout, QHBoxLayout, QPushButton, QSlider,
     QMenu, QFrame, QFileDialog, QDialog, QFormLayout,
     QComboBox, QMessageBox, QDateEdit, QLineEdit, QCheckBox, QStackedWidget,
     QSpinBox, QDoubleSpinBox, QToolButton, QStyle
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer, QDate, QPoint, QRect
-from PyQt5.QtGui import QImage, QPixmap, QClipboard, QPainter, QFont, QColor
+from PyQt5.QtGui import QImage, QPixmap, QClipboard, QPainter, QFont, QColor, QIcon
 
 # --- DeGirum ---
 import degirum as dg
@@ -1439,23 +1439,6 @@ class MainWindow(QMainWindow):
         # Pamięć alertów
         self.alert_mem = AlertMemory(ALERTS_HISTORY_PATH, max_items=5000)
 
-        menubar = self.menuBar()
-
-        # --- Nagrania ---
-        recordings_menu = menubar.addMenu("Nagrania")
-        browse_action = QAction("Przeglądaj nagrania", self)
-        browse_action.triggered.connect(self.open_recordings_browser)
-        recordings_menu.addAction(browse_action)
-
-        # Akcje na pasku menu
-        settings_action = QAction("Ustawienia", self)
-        settings_action.triggered.connect(self.open_settings)
-        menubar.addAction(settings_action)
-
-        fullscreen_action = QAction("Pełny ekran", self)
-        fullscreen_action.triggered.connect(self.toggle_fullscreen)
-        menubar.addAction(fullscreen_action)
-
         main_widget = QWidget()
         main_vlayout = QVBoxLayout(main_widget)
 
@@ -1478,6 +1461,37 @@ class MainWindow(QMainWindow):
         self.camera_view.setStyleSheet("background:#000; color:#fff;")
         center_v.addWidget(self.camera_view, stretch=1)
         self.camera_view.mouseDoubleClickEvent = lambda e: self.toggle_fullscreen()
+
+        controls_widget = QWidget()
+        controls_widget.setStyleSheet("background:#000;")
+        controls_layout = QHBoxLayout(controls_widget)
+        controls_layout.setContentsMargins(0,0,0,0)
+        controls_layout.setAlignment(Qt.AlignCenter)
+
+        btn_recordings = QToolButton()
+        btn_recordings.setIcon(QIcon("icons/folder.svg"))
+        btn_recordings.setIconSize(QSize(24, 24))
+        btn_recordings.clicked.connect(self.open_recordings_browser)
+
+        btn_settings = QToolButton()
+        btn_settings.setIcon(QIcon("icons/gear.svg"))
+        btn_settings.setIconSize(QSize(24, 24))
+        btn_settings.clicked.connect(self.open_settings)
+
+        btn_fullscreen = QToolButton()
+        btn_fullscreen.setIcon(QIcon("icons/arrows-fullscreen.svg"))
+        btn_fullscreen.setIconSize(QSize(24, 24))
+        btn_fullscreen.clicked.connect(self.toggle_fullscreen)
+
+        controls_layout.addStretch()
+        controls_layout.addWidget(btn_recordings)
+        controls_layout.addStretch()
+        controls_layout.addWidget(btn_settings)
+        controls_layout.addStretch()
+        controls_layout.addWidget(btn_fullscreen)
+        controls_layout.addStretch()
+
+        center_v.addWidget(controls_widget)
 
         main_hlayout.addWidget(self.center_panel, stretch=1)
 
