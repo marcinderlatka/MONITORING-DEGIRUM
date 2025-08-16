@@ -541,7 +541,7 @@ class AlertListWidget(QWidget):
         super().__init__()
         self.mem = alert_memory
         self.setFixedWidth(300)
-        self.setStyleSheet("background: transparent;")
+        self.setStyleSheet("background: transparent; border: 1px solid red;")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.list = QListWidget()
@@ -632,6 +632,49 @@ class AlertListWidget(QWidget):
         x = self.list.x() + self.list.width() - self.menu_btn.width() - 8
         y = self.list.y() + (self.list.height() - self.menu_btn.height()) // 2
         self.menu_btn.move(x, y)
+
+
+class LogEntryWidget(QFrame):
+    def __init__(self, group: str, text: str):
+        super().__init__()
+        colors = {
+            "application": "#4aa3ff",
+            "detection": "#4caf50",
+            "settings": "#ff8800",
+        }
+        self.setStyleSheet(
+            "QFrame{border:1px solid white; background:rgba(0,0,0,0.4);}" 
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 5, 10, 5)
+        layout.setAlignment(Qt.AlignCenter)
+        title = QLabel(group.capitalize())
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet(f"color:{colors.get(group, '#fff')}; font-weight:600;")
+        msg = QLabel(text)
+        msg.setAlignment(Qt.AlignCenter)
+        msg.setStyleSheet("color:white;")
+        layout.addWidget(title)
+        layout.addWidget(msg)
+
+
+class LogWindow(QListWidget):
+    def __init__(self):
+        super().__init__()
+        self.setFixedWidth(300)
+        self.setFrameShape(QFrame.NoFrame)
+        self.setSpacing(8)
+        self.setStyleSheet("QListWidget{background:transparent; border:none;}")
+
+    def add_entry(self, group: str, text: str):
+        widget = LogEntryWidget(group, text)
+        item = QListWidgetItem(self)
+        item.setSizeHint(widget.sizeHint())
+        self.addItem(item)
+        self.setItemWidget(item, widget)
+        self.scrollToItem(item)
+        if self.count() > 200:
+            self.takeItem(0)
 
 
 # --- ODTWARZACZ WIDEO ---
@@ -1441,6 +1484,33 @@ class RemoveCameraDialog(QDialog):
         self.accept()
 
 
+# --- Dialog listy kamer ---
+class CameraListDialog(QDialog):
+    camera_selected = pyqtSignal(int)
+
+    def __init__(self, list_widget: CameraListWidget, parent=None):
+        super().__init__(parent)
+        self.setModal(True)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setFixedSize(500, 300)
+        self.setStyleSheet(
+            "background:rgba(0,0,0,0.6); border:1px solid white;"
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setAlignment(Qt.AlignCenter)
+        self.list = list_widget
+        self.list.setParent(self)
+        self.list.show()
+        layout.addWidget(self.list)
+        self.list.itemClicked.connect(self._on_item_clicked)
+
+    def _on_item_clicked(self, item):
+        row = self.list.row(item)
+        self.camera_selected.emit(row)
+        self.accept()
+
 # --- GŁÓWNE OKNO ---
 class MainWindow(QMainWindow):
     def __init__(self, cameras):
@@ -1465,7 +1535,10 @@ class MainWindow(QMainWindow):
 
         self.camera_list = CameraListWidget(self.cameras)
         self.camera_list.request_context.connect(self._show_camera_context_menu)
-        main_hlayout.addWidget(self.camera_list)
+        self.camera_list.hide()
+
+        self.log_window = LogWindow()
+        main_hlayout.addWidget(self.log_window)
 
         # Centrum: panel z obrazem
         self.center_panel = QWidget()
@@ -1475,16 +1548,21 @@ class MainWindow(QMainWindow):
         self.camera_view = QLabel("")
         self.camera_view.setMinimumSize(800, 600)
         self.camera_view.setAlignment(Qt.AlignCenter)
-        self.camera_view.setStyleSheet("background:#000; color:#fff;")
+        self.camera_view.setStyleSheet("background:#000; color:#fff; border: 1px solid red;")
         center_v.addWidget(self.camera_view, stretch=1)
         self.camera_view.mouseDoubleClickEvent = lambda e: self.toggle_fullscreen()
 
         controls_widget = QWidget()
-        controls_widget.setStyleSheet("background: transparent;")
+        controls_widget.setStyleSheet("background: transparent; border: 1px solid red;")
         controls_layout = QHBoxLayout(controls_widget)
         controls_layout.setContentsMargins(0,50,0,50)
         controls_layout.setSpacing(20)
         controls_layout.setAlignment(Qt.AlignCenter)
+
+        btn_cameras = QToolButton()
+        btn_cameras.setIcon(QIcon(str(ICON_DIR / "camera-video.svg")))
+        btn_cameras.setIconSize(QSize(50, 50))
+        btn_cameras.clicked.connect(self.open_camera_list_dialog)
 
         btn_recordings = QToolButton()
         btn_recordings.setIcon(QIcon(str(ICON_DIR / "folder.svg")))
@@ -1499,7 +1577,7 @@ class MainWindow(QMainWindow):
         btn_settings.clicked.connect(self.open_settings)
 
         btn_fullscreen = QToolButton()
-        btn_fullscreen.setIcon(QIcon(str(ICON_DIR / "arrows-fullscreen.svg")))
+        btn_fullscreen.setIcon(QIcon(str(ICON_DIR / "window-fullscreen.svg")))
         btn_fullscreen.setIconSize(QSize(50, 50))
         btn_fullscreen.clicked.connect(self.toggle_fullscreen)
 
@@ -1514,12 +1592,13 @@ QToolButton:hover { background: #ff6666; }  # jasnoczerwone tło po najechaniu
 QToolButton:focus { outline: none; }
         """
 
-        for btn in (btn_recordings, btn_settings, btn_fullscreen):
+        for btn in (btn_cameras, btn_recordings, btn_settings, btn_fullscreen):
             btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
             btn.setAutoRaise(True)
             btn.setStyleSheet(btn_style)
 
         controls_layout.addStretch()
+        controls_layout.addWidget(btn_cameras)
         controls_layout.addWidget(btn_recordings)
         controls_layout.addWidget(btn_settings)
         controls_layout.addWidget(btn_fullscreen)
@@ -1535,6 +1614,8 @@ QToolButton:focus { outline: none; }
         main_vlayout.addLayout(main_hlayout)
 
         self.setCentralWidget(main_widget)
+
+        self.log_window.add_entry("application", "aplikacja uruchomiona")
 
         # backend
         self.workers = []
@@ -1580,6 +1661,9 @@ QToolButton:focus { outline: none; }
     def on_new_alert(self, alert: dict):
         self.alert_list.add_alert(alert)
         self.alert_mem.add(alert)
+        label = alert.get("label", "obiekt")
+        self.log_window.add_entry("detection", f"wykryto obiekt ({label})")
+        self.log_window.add_entry("detection", "rozpoczęto nagrywanie")
 
 
     # --- MENU KONTEKSTOWE KAMERY ---
@@ -1674,6 +1758,8 @@ QToolButton:focus { outline: none; }
         else:
             cause = str(msg)
         self._last_error[idx] = cause
+        if "Brak sygnału" in cause:
+            self.log_window.add_entry("application", "brak sygnału RTSP")
         if idx == self.camera_list.currentRow():
             self._render_current()
         print(msg)
@@ -1701,16 +1787,19 @@ QToolButton:focus { outline: none; }
             if new_data["name"] != cam["name"] and any(c["name"] == new_data["name"] for c in self.cameras):
                 QMessageBox.warning(self, "Duplikat", f"Kamera o nazwie '{new_data['name']}' już istnieje.")
                 return
+            model_changed = new_data.get("model") != cam.get("model")
             self.cameras[idx] = new_data
             cfg = load_config()
             cfg["cameras"] = self.cameras
             save_config(cfg)
             self.camera_list.rebuild(self.cameras)
             self.camera_list.setCurrentRow(idx)
+            if model_changed:
+                self.log_window.add_entry("settings", "zmieniono model")
 
             w = self.workers[idx] if idx < len(self.workers) else None
             if isinstance(w, CameraWorker) and w.isRunning():
-                if new_data.get("model") != cam.get("model"):
+                if model_changed:
                     self.stop_camera(idx)
                     self.start_camera(idx)
                 else:
@@ -1918,11 +2007,19 @@ QToolButton:focus { outline: none; }
         dlg.open_video.connect(self.open_video_file)
         dlg.exec_()
 
+    def open_camera_list_dialog(self):
+        dlg = CameraListDialog(self.camera_list, self)
+        dlg.camera_selected.connect(lambda idx: self.camera_list.setCurrentRow(idx))
+        dlg.exec_()
+        self.camera_list.setParent(None)
+        self.camera_list.hide()
+
     def closeEvent(self, event):
         self.stop_all()
         event.accept()
 
     def open_settings(self):
+        self.log_window.add_entry("settings", "otworzono ustawienia")
         dlg = SettingsHub(self)
         dlg.exec_()
 
