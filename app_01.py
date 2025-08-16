@@ -512,7 +512,8 @@ class AlertItemWidget(QWidget):
         ts  = alert.get('time', '--:--:--')
         self.meta = QLabel(f"{cam}\n{ts} — {lbl} ({conf:.1f}%)")
         self.meta.setStyleSheet("padding-top:6px; color:#ddd;")
-        v.addWidget(self.meta)
+        self.meta.setAlignment(Qt.AlignCenter)
+        v.addWidget(self.meta, alignment=Qt.AlignCenter)
 
         frame = alert.get('frame')
         if frame is not None:
@@ -541,7 +542,7 @@ class AlertListWidget(QWidget):
         super().__init__()
         self.mem = alert_memory
         self.setFixedWidth(300)
-        self.setStyleSheet("background: transparent; border: 1px solid red;")
+        self.setStyleSheet("background: transparent;")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.list = QListWidget()
