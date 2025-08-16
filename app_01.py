@@ -542,13 +542,16 @@ class AlertListWidget(QWidget):
         super().__init__()
         self.mem = alert_memory
         self.setFixedWidth(300)
-        self.setStyleSheet("background: transparent;")
+        # Czytelne tło i biały tekst zamiast całkowitej przezroczystości
+        self.setStyleSheet("background: #222; color: white;")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.list = QListWidget()
         self.list.setFixedWidth(300)
         self.list.setFrameShape(QFrame.NoFrame)
-        self.list.setStyleSheet("QListWidget{background: transparent; border: none;}")
+        self.list.setStyleSheet(
+            "QListWidget{background: #222; border: none; color: white;}"
+        )
         self.list.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         layout.addWidget(self.list)
@@ -1512,6 +1515,27 @@ class CameraListDialog(QDialog):
         self.camera_selected.emit(row)
         self.accept()
 
+
+# --- Dialog listy alertów ---
+class AlertListDialog(QDialog):
+    def __init__(self, alert_widget: AlertListWidget, parent=None):
+        super().__init__(parent)
+        self.setModal(True)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setFixedSize(320, 500)
+        # półprzezroczyste tło z jasnym obramowaniem
+        self.setStyleSheet(
+            "background:rgba(0,0,0,0.8); border:1px solid white; color:white;"
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setAlignment(Qt.AlignCenter)
+        self.list = alert_widget
+        self.list.setParent(self)
+        self.list.show()
+        layout.addWidget(self.list)
+
 # --- GŁÓWNE OKNO ---
 class MainWindow(QMainWindow):
     def __init__(self, cameras):
@@ -1561,9 +1585,14 @@ class MainWindow(QMainWindow):
         controls_layout.setAlignment(Qt.AlignCenter)
 
         btn_cameras = QToolButton()
-        btn_cameras.setIcon(QIcon(str(ICON_DIR / "camera-video.svg")))
+        btn_cameras.setIcon(QIcon(str(ICON_DIR / "pc-display-horizontal.svg")))
         btn_cameras.setIconSize(QSize(50, 50))
         btn_cameras.clicked.connect(self.open_camera_list_dialog)
+
+        btn_alerts = QToolButton()
+        btn_alerts.setIcon(QIcon(str(ICON_DIR / "exclamation-square.svg")))
+        btn_alerts.setIconSize(QSize(50, 50))
+        btn_alerts.clicked.connect(self.open_alerts_dialog)
 
         btn_recordings = QToolButton()
         btn_recordings.setIcon(QIcon(str(ICON_DIR / "folder.svg")))
@@ -1593,7 +1622,7 @@ QToolButton:hover { background: #ff6666; }  # jasnoczerwone tło po najechaniu
 QToolButton:focus { outline: none; }
         """
 
-        for btn in (btn_cameras, btn_recordings, btn_settings, btn_fullscreen):
+        for btn in (btn_cameras, btn_recordings, btn_alerts, btn_settings, btn_fullscreen):
             btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
             btn.setAutoRaise(True)
             btn.setStyleSheet(btn_style)
@@ -1601,6 +1630,7 @@ QToolButton:focus { outline: none; }
         controls_layout.addStretch()
         controls_layout.addWidget(btn_cameras)
         controls_layout.addWidget(btn_recordings)
+        controls_layout.addWidget(btn_alerts)
         controls_layout.addWidget(btn_settings)
         controls_layout.addWidget(btn_fullscreen)
         controls_layout.addStretch()
@@ -1610,7 +1640,7 @@ QToolButton:focus { outline: none; }
         main_hlayout.addWidget(self.center_panel, stretch=1)
 
         self.alert_list = AlertListWidget(self.alert_mem)
-        main_hlayout.addWidget(self.alert_list)
+        self.alert_list.hide()
 
         main_vlayout.addLayout(main_hlayout)
 
@@ -2007,6 +2037,12 @@ QToolButton:focus { outline: none; }
         dlg = RecordingsBrowserDialog(self.output_dir, self.cameras, self)
         dlg.open_video.connect(self.open_video_file)
         dlg.exec_()
+
+    def open_alerts_dialog(self):
+        dlg = AlertListDialog(self.alert_list, self)
+        dlg.exec_()
+        self.alert_list.setParent(None)
+        self.alert_list.hide()
 
     def open_camera_list_dialog(self):
         dlg = CameraListDialog(self.camera_list, self)
