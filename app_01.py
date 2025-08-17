@@ -12,6 +12,7 @@ from collections import deque
 from glob import glob
 import argparse
 from contextlib import suppress
+import simpleaudio as sa
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QListWidget, QListWidgetItem,
@@ -1850,6 +1851,7 @@ class MainWindow(QMainWindow):
         # Pamięć alertów
         self.alert_mem = AlertMemory(ALERTS_HISTORY_PATH, max_items=5000)
         self.last_detected_label = ""
+        self.sound_enabled = True
 
         main_widget = QWidget()
         main_widget.setStyleSheet("background-color: black;")
@@ -1919,6 +1921,11 @@ class MainWindow(QMainWindow):
         btn_alerts.setIconSize(QSize(50, 50))
         btn_alerts.clicked.connect(self.open_alert_dialog)
 
+        self.btn_sound = QToolButton()
+        self.btn_sound.setIcon(QIcon(str(ICON_DIR / "volume-up.svg")))
+        self.btn_sound.setIconSize(QSize(50, 50))
+        self.btn_sound.clicked.connect(self.toggle_sound)
+
         btn_fullscreen = QToolButton()
         btn_fullscreen.setIcon(QIcon(str(ICON_DIR / "window-fullscreen.svg")))
         btn_fullscreen.setIconSize(QSize(50, 50))
@@ -1935,7 +1942,7 @@ QToolButton:hover { background: #ff6666; }  # jasnoczerwone tło po najechaniu
 QToolButton:focus { outline: none; }
         """
 
-        for btn in (btn_cameras, btn_recordings, btn_settings, btn_cam_ctrl, btn_alerts, btn_fullscreen):
+        for btn in (btn_cameras, btn_recordings, btn_settings, btn_cam_ctrl, btn_alerts, self.btn_sound, btn_fullscreen):
             btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
             btn.setAutoRaise(True)
             btn.setStyleSheet(btn_style)
@@ -1946,6 +1953,7 @@ QToolButton:focus { outline: none; }
         controls_layout.addWidget(btn_settings)
         controls_layout.addWidget(btn_cam_ctrl)
         controls_layout.addWidget(btn_alerts)
+        controls_layout.addWidget(self.btn_sound)
         controls_layout.addWidget(btn_fullscreen)
         controls_layout.addStretch()
 
@@ -2004,6 +2012,22 @@ QToolButton:focus { outline: none; }
             self.showFullScreen()
             self._is_fullscreen = True
 
+    def toggle_sound(self):
+        self.sound_enabled = not self.sound_enabled
+        icon = "volume-up.svg" if self.sound_enabled else "volume-mute.svg"
+        self.btn_sound.setIcon(QIcon(str(ICON_DIR / icon)))
+        state = "włączono" if self.sound_enabled else "wyłączono"
+        self.log_window.add_entry("application", f"{state} powiadomienia dźwiękowe")
+
+    def play_alert_sound(self):
+        fs = 44100
+        t = np.linspace(0, 1, fs, False)
+        tone = np.sin(2*np.pi*880*t)
+        pulse = (np.sin(2*np.pi*5*t) > 0).astype(float)
+        envelope = np.linspace(1, 0, fs)
+        audio = (tone * pulse * envelope * 0.5 * 32767).astype(np.int16)
+        sa.play_buffer(audio, 1, 2, fs)
+
     def open_alert_dialog(self):
         dlg = AlertDialog(self)
         dlg.exec_()
@@ -2029,6 +2053,9 @@ QToolButton:focus { outline: none; }
         label = alert.get("label", "obiekt")
         self.last_detected_label = label
         self.log_window.add_entry("detection object", cam, "", f"wykryto {label}")
+        if self.sound_enabled:
+            self.play_alert_sound()
+            self.log_window.add_entry("detection sound", cam, "", "odtworzono powiadomienie dźwiękowe")
 
     def on_record_event(self, event: str, filepath: str, cam_name: str):
         det_info = f"wykryto {self.last_detected_label}" if self.last_detected_label else ""
