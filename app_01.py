@@ -773,7 +773,14 @@ class AlertDialog(QDialog):
 
 
 class LogEntryWidget(QFrame):
-    def __init__(self, group: str, text: str):
+    def __init__(
+        self,
+        group: str,
+        ts: str,
+        camera: str = "",
+        action: str = "",
+        detected: str = "",
+    ):
         super().__init__()
         colors = {
             "application": "#4aa3ff",
@@ -798,14 +805,23 @@ class LogEntryWidget(QFrame):
         )
         self.group_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
-        self.msg_label = QLabel(text)
-        self.msg_label.setAlignment(Qt.AlignLeft)
-        self.msg_label.setWordWrap(True)
-        self.msg_label.setStyleSheet("color:white;")
-        self.msg_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-
         layout.addWidget(self.group_label)
-        layout.addWidget(self.msg_label)
+
+        def make_label(text: str, color: str) -> QLabel:
+            lbl = QLabel(text)
+            lbl.setAlignment(Qt.AlignLeft)
+            lbl.setWordWrap(True)
+            lbl.setStyleSheet(f"color:{color};")
+            lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            return lbl
+
+        layout.addWidget(make_label(ts, "white"))
+        if camera:
+            layout.addWidget(make_label(camera, "#4aa3ff"))
+        if action:
+            layout.addWidget(make_label(action, "#ff8800"))
+        if detected:
+            layout.addWidget(make_label(detected, "#4caf50"))
 
 
 class LogWindow(QListWidget):
@@ -818,9 +834,15 @@ class LogWindow(QListWidget):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
-    def add_entry(self, group: str, text: str):
-        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S (%A)")
-        widget = LogEntryWidget(group, f"{ts}: {text}")
+    def add_entry(
+        self,
+        group: str,
+        camera: str = "",
+        action: str = "",
+        detected: str = "",
+    ):
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S %A")
+        widget = LogEntryWidget(group, ts, camera, action, detected)
         item = QListWidgetItem(self)
         self.addItem(item)
         self.setItemWidget(item, widget)
@@ -1745,6 +1767,7 @@ class MainWindow(QMainWindow):
 
         # Pamięć alertów
         self.alert_mem = AlertMemory(ALERTS_HISTORY_PATH, max_items=5000)
+        self.last_detected_label = ""
 
         main_widget = QWidget()
         main_widget.setStyleSheet("background-color: black;")
@@ -1921,13 +1944,25 @@ QToolButton:focus { outline: none; }
         self.alert_mem.add(alert)
         cam = alert.get("camera", "kamera")
         label = alert.get("label", "obiekt")
-        self.log_window.add_entry("detection object", f"{cam}: wykryto obiekt ({label})")
+        self.last_detected_label = label
+        self.log_window.add_entry("detection object", cam, "", f"wykryto {label}")
 
     def on_record_event(self, event: str, filepath: str, cam_name: str):
+        det_info = f"wykryto {self.last_detected_label}" if self.last_detected_label else ""
         if event == "start":
-            self.log_window.add_entry("detection recording", f"kamera {cam_name} rozpoczęła nagrywanie: {filepath}")
+            self.log_window.add_entry(
+                "detection recording",
+                cam_name,
+                "rozpoczęto nagrywanie",
+                det_info,
+            )
         elif event == "stop":
-            self.log_window.add_entry("detection recording", f"kamera {cam_name} zakończyła nagrywanie: {filepath}")
+            self.log_window.add_entry(
+                "detection recording",
+                cam_name,
+                "zakończono nagrywanie",
+                det_info,
+            )
 
     # --- Zarządzanie kamerami ---
 
