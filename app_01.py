@@ -14,10 +14,10 @@ import argparse
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QListWidget, QListWidgetItem,
-    QVBoxLayout, QHBoxLayout, QPushButton, QSlider,
+    QVBoxLayout, QHBoxLayout, QPushButton, QSlider, QGridLayout,
     QMenu, QFrame, QFileDialog, QDialog, QFormLayout,
     QComboBox, QMessageBox, QDateEdit, QLineEdit, QCheckBox, QStackedWidget,
-    QSpinBox, QDoubleSpinBox, QToolButton, QStyle
+    QSpinBox, QDoubleSpinBox, QToolButton, QStyle, QSizePolicy
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer, QDate, QPoint, QRect
 from PyQt5.QtGui import QImage, QPixmap, QClipboard, QPainter, QFont, QColor, QIcon
@@ -456,6 +456,8 @@ class CameraListWidget(QListWidget):
         self.setSpacing(12)
         self.setFrameShape(QFrame.NoFrame)
         self.setStyleSheet("QListWidget{ background: transparent; border: none; padding:8px; }")
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.widgets = []
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._on_context_menu)
@@ -490,6 +492,105 @@ class CameraListWidget(QListWidget):
         if row < 0:
             return
         self.request_context.emit(row, self.mapToGlobal(pos))
+
+# --- Podgląd wszystkich kamer w siatce ---
+class CameraGridItem(QWidget):
+    clicked = pyqtSignal(int)
+
+    def __init__(self, index, name):
+        super().__init__()
+        self.index = index
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.frame_label = QLabel()
+        self.frame_label.setAlignment(Qt.AlignCenter)
+        self.frame_label.setStyleSheet("background:#000;")
+        self.frame_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        layout.addWidget(self.frame_label, 1)
+
+        self.name_label = QLabel(name)
+        self.name_label.setAlignment(Qt.AlignCenter)
+        self.name_label.setStyleSheet("color:white; background:rgba(0,0,0,0.5);")
+        layout.addWidget(self.name_label)
+
+        self._pixmap = None
+
+    def set_frame(self, frame):
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb.shape
+        qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
+        self._pixmap = QPixmap.fromImage(qimg)
+        self._update_pixmap()
+
+    def _update_pixmap(self):
+        if self._pixmap is not None:
+            self.frame_label.setPixmap(
+                self._pixmap.scaled(
+                    self.frame_label.size(),
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation,
+                )
+            )
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_pixmap()
+
+    def mousePressEvent(self, event):
+        self.clicked.emit(self.index)
+
+
+class CameraGridWidget(QWidget):
+    camera_clicked = pyqtSignal(int)
+
+    def __init__(self, cameras):
+        super().__init__()
+        self.cameras = list(cameras)
+        self.layout = QGridLayout(self)
+        self.layout.setContentsMargins(0, 0, 0, 0)
+        self.layout.setSpacing(4)
+        self.items = []
+        self._build()
+
+    def _build(self):
+        for it in self.items:
+            it.setParent(None)
+        self.items = []
+        for idx, cam in enumerate(self.cameras):
+            item = CameraGridItem(idx, cam["name"])
+            item.clicked.connect(self.camera_clicked.emit)
+            self.items.append(item)
+        self._reflow()
+
+    def _reflow(self):
+        while self.layout.count():
+            self.layout.takeAt(0)
+        n = len(self.items)
+        if n == 0:
+            return
+        cols = int(np.ceil(np.sqrt(n)))
+        for idx, item in enumerate(self.items):
+            r = idx // cols
+            c = idx % cols
+            self.layout.addWidget(item, r, c)
+            self.layout.setRowStretch(r, 1)
+            self.layout.setColumnStretch(c, 1)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._reflow()
+
+    def rebuild(self, cameras):
+        self.cameras = list(cameras)
+        self._build()
+
+    def update_frame(self, index, frame):
+        if 0 <= index < len(self.items):
+            self.items[index].set_frame(frame)
 
 
 # --- Alert z miniaturką (karta) ---
@@ -1489,27 +1590,24 @@ class RemoveCameraDialog(QDialog):
 class CameraListDialog(QDialog):
     camera_selected = pyqtSignal(int)
 
-    def __init__(self, list_widget: CameraListWidget, parent=None):
+    def __init__(self, grid_widget: CameraGridWidget, parent=None):
         super().__init__(parent)
         self.setModal(True)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setFixedSize(500, 300)
-        self.setStyleSheet(
-            "background:rgba(0,0,0,0.6); border:1px solid white;"
-        )
+        self.setWindowState(self.windowState() | Qt.WindowFullScreen)
+        self.setStyleSheet("background:rgba(0,0,0,0.6);")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setAlignment(Qt.AlignCenter)
-        self.list = list_widget
-        self.list.setParent(self)
-        self.list.show()
-        layout.addWidget(self.list)
-        self.list.itemClicked.connect(self._on_item_clicked)
+        self.grid = grid_widget
+        self.grid.setParent(self)
+        self.grid.show()
+        layout.addWidget(self.grid)
+        self.grid.camera_clicked.connect(self._on_item_clicked)
 
-    def _on_item_clicked(self, item):
-        row = self.list.row(item)
-        self.camera_selected.emit(row)
+    def _on_item_clicked(self, index):
+        self.camera_selected.emit(index)
         self.accept()
 
 # --- GŁÓWNE OKNO ---
@@ -1537,6 +1635,9 @@ class MainWindow(QMainWindow):
         self.camera_list = CameraListWidget(self.cameras)
         self.camera_list.request_context.connect(self._show_camera_context_menu)
         self.camera_list.hide()
+
+        self.camera_grid = CameraGridWidget(self.cameras)
+        self.camera_grid.hide()
 
         self.log_window = LogWindow()
         main_hlayout.addWidget(self.log_window)
@@ -1794,6 +1895,7 @@ QToolButton:focus { outline: none; }
             cfg["cameras"] = self.cameras
             save_config(cfg)
             self.camera_list.rebuild(self.cameras)
+            self.camera_grid.rebuild(self.cameras)
             self.camera_list.setCurrentRow(idx)
             if model_changed:
                 self.log_window.add_entry("settings", "zmieniono model")
@@ -1857,6 +1959,7 @@ QToolButton:focus { outline: none; }
     def restart_workers_and_ui(self):
         self.stop_all()
         self.camera_list.rebuild(self.cameras)
+        self.camera_grid.rebuild(self.cameras)
         self.workers = [None] * len(self.cameras)
         self.start_all()
 
@@ -1893,6 +1996,7 @@ QToolButton:focus { outline: none; }
 
     def update_frame(self, frame, index):
         self.camera_list.update_thumbnail(index, frame)
+        self.camera_grid.update_frame(index, frame)
 
         # FPS liczenie dla tej kamery
         from time import perf_counter
@@ -2009,11 +2113,11 @@ QToolButton:focus { outline: none; }
         dlg.exec_()
 
     def open_camera_list_dialog(self):
-        dlg = CameraListDialog(self.camera_list, self)
+        dlg = CameraListDialog(self.camera_grid, self)
         dlg.camera_selected.connect(lambda idx: self.camera_list.setCurrentRow(idx))
         dlg.exec_()
-        self.camera_list.setParent(None)
-        self.camera_list.hide()
+        self.camera_grid.setParent(None)
+        self.camera_grid.hide()
 
     def closeEvent(self, event):
         self.stop_all()
