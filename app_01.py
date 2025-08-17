@@ -741,6 +741,37 @@ class AlertListWidget(QWidget):
             self.list.clear()
 
 
+class AlertDialog(QDialog):
+    def __init__(self, main_window):
+        super().__init__(main_window)
+        self.mw = main_window
+        self.setWindowTitle("Alerty")
+        self.setPalette(QApplication.palette())
+
+        v = QVBoxLayout(self)
+
+        self.chk_visible = QCheckBox("Pokaż listę alertów")
+        self.chk_visible.setChecked(self.mw.alert_list.isVisible())
+        self.chk_visible.toggled.connect(self.mw.alert_list.setVisible)
+        v.addWidget(self.chk_visible)
+
+        btn_layout = QHBoxLayout()
+
+        btn_reload = QPushButton("Wczytaj ponownie")
+        btn_reload.clicked.connect(self.mw.alert_list.reload)
+        btn_layout.addWidget(btn_reload)
+
+        btn_export = QPushButton("Eksport do CSV")
+        btn_export.clicked.connect(self.mw.alert_list.export_csv)
+        btn_layout.addWidget(btn_export)
+
+        btn_clear = QPushButton("Wyczyść pamięć")
+        btn_clear.clicked.connect(self.mw.alert_list.clear)
+        btn_layout.addWidget(btn_clear)
+
+        v.addLayout(btn_layout)
+
+
 class LogEntryWidget(QFrame):
     def __init__(self, group: str, text: str):
         super().__init__()
@@ -1780,13 +1811,7 @@ class MainWindow(QMainWindow):
         btn_alerts = QToolButton()
         btn_alerts.setIcon(QIcon(str(ICON_DIR / "exclamation-square.svg")))
         btn_alerts.setIconSize(QSize(50, 50))
-        btn_alerts.setPopupMode(QToolButton.MenuButtonPopup)
-        alerts_menu = QMenu(btn_alerts)
-        alerts_menu.addAction("Wczytaj ponownie", lambda: self.alert_list.reload())
-        alerts_menu.addAction("Eksport do CSV", lambda: self.alert_list.export_csv())
-        alerts_menu.addAction("Wyczyść pamięć", lambda: self.alert_list.clear())
-        btn_alerts.setMenu(alerts_menu)
-        btn_alerts.clicked.connect(self.toggle_alert_list)
+        btn_alerts.clicked.connect(self.open_alert_dialog)
 
         btn_fullscreen = QToolButton()
         btn_fullscreen.setIcon(QIcon(str(ICON_DIR / "window-fullscreen.svg")))
@@ -1873,8 +1898,9 @@ QToolButton:focus { outline: none; }
             self.showFullScreen()
             self._is_fullscreen = True
 
-    def toggle_alert_list(self):
-        self.alert_list.setVisible(not self.alert_list.isVisible())
+    def open_alert_dialog(self):
+        dlg = AlertDialog(self)
+        dlg.exec_()
 
     def open_camera_settings(self):
         self.log_window.add_entry("settings", "otwarto ustawienia kamer")
