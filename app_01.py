@@ -12,8 +12,9 @@ from collections import deque
 from glob import glob
 import argparse
 from contextlib import suppress
-import threading
-import simpleaudio as sa
+import base64
+import io
+import wave
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QListWidget, QListWidgetItem,
@@ -22,9 +23,10 @@ from PyQt5.QtWidgets import (
     QComboBox, QMessageBox, QDateEdit, QLineEdit, QCheckBox, QStackedWidget,
     QSpinBox, QDoubleSpinBox, QToolButton, QStyle, QSizePolicy
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer, QDate, QPoint, QRect
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer, QDate, QPoint, QRect, QUrl
 from PyQt5.QtGui import QImage, QPixmap, QClipboard, QPainter, QFont, QColor, QIcon
 from PyQt5 import QtSvg
+from PyQt5.QtMultimedia import QSoundEffect
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -1855,7 +1857,7 @@ class MainWindow(QMainWindow):
         self.sound_enabled = True
 
         # Precompute alert sound once
-        self.alert_wave = None
+        self.alert_sound = QSoundEffect()
         try:
             fs = 44100
             t = np.linspace(0, 1, fs, False)
@@ -1863,7 +1865,17 @@ class MainWindow(QMainWindow):
             pulse = (np.sin(2 * np.pi * 5 * t) > 0).astype(float)
             envelope = np.linspace(1, 0, fs)
             audio = (tone * pulse * envelope * 0.5 * 32767).astype(np.int16)
-            self.alert_wave = sa.WaveObject(audio, 1, 2, fs)
+
+            buf = io.BytesIO()
+            with wave.open(buf, "wb") as f:
+                f.setnchannels(1)
+                f.setsampwidth(2)
+                f.setframerate(fs)
+                f.writeframes(audio.tobytes())
+            data = base64.b64encode(buf.getvalue()).decode()
+            self.alert_sound.setSource(QUrl.fromEncoded(f"data:audio/wav;base64,{data}".encode()))
+            self.alert_sound.setLoopCount(1)
+            self.alert_sound.setVolume(1.0)
         except Exception as e:
             print(f"Failed to initialize alert sound: {e}")
 
@@ -2030,20 +2042,17 @@ QToolButton:focus { outline: none; }
         self.sound_enabled = not self.sound_enabled
         icon = "volume-up.svg" if self.sound_enabled else "volume-mute.svg"
         self.btn_sound.setIcon(QIcon(str(ICON_DIR / icon)))
+        if self.alert_sound:
+            self.alert_sound.setVolume(1.0 if self.sound_enabled else 0.0)
         state = "włączono" if self.sound_enabled else "wyłączono"
         self.log_window.add_entry("application", f"{state} powiadomienia dźwiękowe")
 
     def play_alert_sound(self):
-        if not self.alert_wave:
-            return
-
-        def _play():
+        if self.alert_sound:
             try:
-                self.alert_wave.play()
+                self.alert_sound.play()
             except Exception as e:
                 print(f"Alert sound playback failed: {e}")
-
-        threading.Thread(target=_play, daemon=True).start()
 
     def open_alert_dialog(self):
         dlg = AlertDialog(self)
