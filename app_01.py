@@ -39,6 +39,8 @@ os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = "/usr/lib/x86_64-linux-gnu/qt5/plugi
 CONFIG_PATH = "./config.json"
 MODELS_PATH = "./models"
 ALERTS_HISTORY_PATH = "./alerts_history.json"   # plik historii alertów
+LOG_HISTORY_PATH = "./log_history.json"        # plik historii logów
+LOG_RETENTION_HOURS = 48
 
 # Domyślne klasy (na sztywno)
 VISIBLE_CLASSES = ["person", "car", "cat", "dog", "bird"]
@@ -79,8 +81,11 @@ def _fill_camera_defaults(cam):
 
 
 def load_config():
+    global LOG_HISTORY_PATH, LOG_RETENTION_HOURS
     if not os.path.exists(CONFIG_PATH):
         cfg = {
+            "log_history_path": LOG_HISTORY_PATH,
+            "log_retention_hours": LOG_RETENTION_HOURS,
             "cameras": [
                 {
                     "name": "kamera1",
@@ -92,14 +97,20 @@ def load_config():
         with open(CONFIG_PATH, "r") as f:
             cfg = json.load(f)
 
+    LOG_HISTORY_PATH = cfg.get("log_history_path", LOG_HISTORY_PATH)
+    LOG_RETENTION_HOURS = int(cfg.get("log_retention_hours", LOG_RETENTION_HOURS))
+
     for cam in cfg.get("cameras", []):
         _fill_camera_defaults(cam)
     return cfg
 
 
 def save_config(cfg):
+    global LOG_HISTORY_PATH, LOG_RETENTION_HOURS
     for cam in cfg.get("cameras", []):
         _fill_camera_defaults(cam)
+    cfg.setdefault("log_history_path", LOG_HISTORY_PATH)
+    cfg.setdefault("log_retention_hours", LOG_RETENTION_HOURS)
     with open(CONFIG_PATH, "w") as f:
         json.dump(cfg, f, indent=4)
 
@@ -825,7 +836,11 @@ class LogEntryWidget(QFrame):
 
 
 class LogWindow(QListWidget):
-    def __init__(self):
+    """Widget prezentujący logi oraz zapisujący je do pliku."""
+
+    LOG_HISTORY_PATH = LOG_HISTORY_PATH
+
+    def __init__(self, log_path: str = LOG_HISTORY_PATH, retention_hours: int = LOG_RETENTION_HOURS):
         super().__init__()
         self.setFixedWidth(300)
         self.setFrameShape(QFrame.NoFrame)
@@ -833,6 +848,54 @@ class LogWindow(QListWidget):
         self.setStyleSheet("QListWidget{background:transparent; border:none;}")
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        self.log_path = log_path
+        self.retention_hours = retention_hours
+        self.history = []
+
+    def _add_widget_entry(self, entry: dict):
+        widget = LogEntryWidget(
+            entry.get("group", ""),
+            entry.get("timestamp", ""),
+            entry.get("camera", ""),
+            entry.get("action", ""),
+            entry.get("detected", ""),
+        )
+        item = QListWidgetItem(self)
+        self.addItem(item)
+        self.setItemWidget(item, widget)
+        item.setSizeHint(widget.sizeHint())
+
+    def _refresh_widget(self):
+        self.clear()
+        for entry in self.history[-200:]:
+            self._add_widget_entry(entry)
+        if self.count():
+            self.scrollToItem(self.item(self.count() - 1))
+
+    def load_history(self):
+        self.history = []
+        try:
+            if os.path.exists(self.log_path):
+                with open(self.log_path, "r") as f:
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        self.history = data
+        except Exception:
+            self.history = []
+
+        cutoff = datetime.datetime.now() - datetime.timedelta(hours=self.retention_hours)
+        filtered = []
+        for entry in self.history:
+            ts_str = entry.get("timestamp")
+            try:
+                ts_dt = datetime.datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S %A")
+            except Exception:
+                continue
+            if ts_dt >= cutoff:
+                filtered.append(entry)
+        self.history = filtered
+        self._refresh_widget()
 
     def add_entry(
         self,
@@ -842,14 +905,33 @@ class LogWindow(QListWidget):
         detected: str = "",
     ):
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S %A")
-        widget = LogEntryWidget(group, ts, camera, action, detected)
-        item = QListWidgetItem(self)
-        self.addItem(item)
-        self.setItemWidget(item, widget)
-        item.setSizeHint(widget.sizeHint())
-        self.scrollToItem(item)
-        if self.count() > 200:
-            self.takeItem(0)
+        entry = {
+            "group": group,
+            "camera": camera,
+            "action": action,
+            "detected": detected,
+            "timestamp": ts,
+        }
+        self.history.append(entry)
+
+        cutoff = datetime.datetime.now() - datetime.timedelta(hours=self.retention_hours)
+        filtered = []
+        for e in self.history:
+            try:
+                ts_dt = datetime.datetime.strptime(e.get("timestamp", ""), "%Y-%m-%d %H:%M:%S %A")
+            except Exception:
+                continue
+            if ts_dt >= cutoff:
+                filtered.append(e)
+        self.history = filtered
+
+        self._refresh_widget()
+
+        try:
+            with open(self.log_path, "w") as f:
+                json.dump(self.history, f, indent=2)
+        except Exception as e:
+            print("Nie udało się zapisać historii logów:", e)
 
 
 # --- ODTWARZACZ WIDEO ---
@@ -1787,7 +1869,8 @@ class MainWindow(QMainWindow):
         self.camera_grid = CameraGridWidget(self.cameras)
         self.camera_grid.hide()
 
-        self.log_window = LogWindow()
+        self.log_window = LogWindow(LOG_HISTORY_PATH, LOG_RETENTION_HOURS)
+        self.log_window.load_history()
         main_hlayout.addWidget(self.log_window)
 
         # Centrum: panel z obrazem
