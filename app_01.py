@@ -401,11 +401,26 @@ class CameraWorker(QThread):
             self.video_writer = None
 
     def stop(self):
+        """Request the worker thread to stop and wait for completion.
+
+        W poprzedniej wersji metoda `stop` jedynie ustawiała flagę
+        `stop_signal` i czekała maksymalnie 2 sekundy na zakończenie wątku.
+        Przy problemach z połączeniem wątek mógł jednak nie
+        zakończyć się w tym czasie, co prowadziło do zawieszania się
+        aplikacji podczas usuwania kamery. Teraz, jeśli wątek nie
+        zatrzyma się w ciągu 2 sekund, zostaje brutalnie zakończony
+        metodą `terminate`.
+        """
         self.stop_signal = True
+        # zwolnij zasoby nagrywania jak najszybciej
         if self.video_writer:
             self.video_writer.release()
             self.video_writer = None
-        self.wait(2000)
+        if self.isRunning() and not self.wait(2000):
+            # wątek nadal żyje – wymuś zakończenie, aby GUI nie
+            # zawiesiło się podczas operacji usuwania
+            self.terminate()
+            self.wait()
 
 
 # --- Miniaturka na liście kamer ---
@@ -1089,6 +1104,11 @@ class RecordingsBrowserDialog(QDialog):
 
         # stan
         self.all_items = []
+        # Opóźnione wczytywanie listy nagrań, aby okno otwierało się szybciej
+        QTimer.singleShot(0, self._initial_load)
+
+    def _initial_load(self):
+        """Skanuje pliki i stosuje filtry po zainicjowaniu okna."""
         self.scan_files()
         self.apply_filters()
 
@@ -1732,8 +1752,9 @@ QToolButton:focus { outline: none; }
         self._last_error = {}
         self._last_fps_text = {}
 
-        # zacznij od startu wszystkich (możesz zmienić na start tylko bieżącej, jeśli wolisz)
-        self.start_all()
+        # zacznij od startu wszystkich, ale z niewielkim opóźnieniem aby GUI
+        # mogło się pojawić bez czekania na inicjalizację kamer
+        QTimer.singleShot(0, self.start_all)
 
     def restart_app(self):
         if QMessageBox.question(
