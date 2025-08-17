@@ -171,6 +171,7 @@ class CameraWorker(QThread):
     alert_signal = pyqtSignal(object)       # dict z klatką i metadanymi
     error_signal = pyqtSignal(str, int)     # komunikat, index
     status_signal = pyqtSignal(str, int)    # status tekstowy, index
+    record_signal = pyqtSignal(str, str)  # (event, filepath)
 
     def __init__(self, camera, model, index=0):
         super().__init__()
@@ -333,6 +334,7 @@ class CameraWorker(QThread):
                                 self.video_writer.write(bf)
                             self.recording = True
                             self.frames_since_last_detection = 0
+                            self.record_signal.emit("start", self.output_file)
 
                             thumb_path = self.output_file + ".jpg"
                             try:
@@ -372,6 +374,7 @@ class CameraWorker(QThread):
                             self.frames_since_last_detection += 1
                             if self.frames_since_last_detection >= int(self.post_seconds * self.fps):
                                 self._safe_release_writer()
+                                self.record_signal.emit("stop", self.output_file or "")
                                 self.recording = False
 
                     if self.recording and self.video_writer:
@@ -402,6 +405,8 @@ class CameraWorker(QThread):
             QThread.msleep(300)
 
         # sprzątanie
+        if self.recording:
+            self.record_signal.emit("stop", self.output_file or "")
         self._safe_release_writer()
 
     def stop(self):
@@ -417,6 +422,8 @@ class CameraWorker(QThread):
         """
         self.stop_signal = True
         # zwolnij zasoby nagrywania jak najszybciej
+        if self.recording:
+            self.record_signal.emit("stop", self.output_file or "")
         self._safe_release_writer()
         if self.isRunning() and not self.wait(2000):
             # wątek nadal żyje – wymuś zakończenie, aby GUI nie
@@ -1886,10 +1893,15 @@ QToolButton:focus { outline: none; }
     def on_new_alert(self, alert: dict):
         self.alert_list.add_alert(alert)
         self.alert_mem.add(alert)
+        cam = alert.get("camera", "kamera")
         label = alert.get("label", "obiekt")
-        self.log_window.add_entry("detection", f"wykryto obiekt ({label})")
-        self.log_window.add_entry("detection", "rozpoczęto nagrywanie")
+        self.log_window.add_entry("detection", f"{cam}: wykryto obiekt ({label})")
 
+    def on_record_event(self, event: str, filepath: str, cam_name: str):
+        if event == "start":
+            self.log_window.add_entry("detection", f"kamera {cam_name} rozpoczęła nagrywanie: {filepath}")
+        elif event == "stop":
+            self.log_window.add_entry("detection", f"kamera {cam_name} zakończyła nagrywanie: {filepath}")
 
     # --- Zarządzanie kamerami ---
 
@@ -1917,6 +1929,7 @@ QToolButton:focus { outline: none; }
         w.alert_signal.connect(self.on_new_alert)
         w.error_signal.connect(self._worker_error)
         w.status_signal.connect(self._worker_status)
+        w.record_signal.connect(lambda event, fp, cam_name=cam.get("name", idx): self.on_record_event(event, fp, cam_name))
         w.start()
         self.workers[idx] = w
         self.log_window.add_entry("application", f"uruchomiono kamerę {cam.get('name', idx)}")
