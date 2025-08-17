@@ -1435,51 +1435,41 @@ class AddCameraWizard(QDialog):
 
 
 # --- Ustawienia pojedynczej kamery ---
-class CameraSettingsDialog(QDialog):
+class SingleCameraDialog(QDialog):
     def __init__(self, parent=None, camera=None):
         super().__init__(parent)
         self.setWindowTitle("Ustawienia kamery")
         self.resize(480, 520)
 
-        cam = camera or {}
-
         form = QFormLayout(self)
 
-        self.name_edit = QLineEdit(cam.get("name", ""))
-        self.rtsp_edit = QLineEdit(cam.get("rtsp", ""))
+        self.name_edit = QLineEdit()
+        self.rtsp_edit = QLineEdit()
         self.model_combo = QComboBox()
         try:
             models = [d for d in os.listdir(MODELS_PATH) if os.path.isdir(os.path.join(MODELS_PATH, d))]
         except Exception:
             models = []
         if not models:
-            models = [cam.get("model", DEFAULT_MODEL)]
+            models = [camera.get("model", DEFAULT_MODEL) if camera else DEFAULT_MODEL]
         self.model_combo.addItems(models)
-        self.model_combo.setCurrentText(cam.get("model", DEFAULT_MODEL))
         self.fps_spin = QSpinBox()
         self.fps_spin.setRange(1, 60)
-        self.fps_spin.setValue(int(cam.get("fps", DEFAULT_FPS)))
         self.conf_spin = QDoubleSpinBox()
         self.conf_spin.setRange(0.0, 1.0)
         self.conf_spin.setSingleStep(0.05)
-        self.conf_spin.setValue(float(cam.get("confidence_threshold", DEFAULT_CONFIDENCE_THRESHOLD)))
         self.draw_chk = QCheckBox()
-        self.draw_chk.setChecked(bool(cam.get("draw_overlays", DEFAULT_DRAW_OVERLAYS)))
         self.detect_chk = QCheckBox()
-        self.detect_chk.setChecked(bool(cam.get("enable_detection", DEFAULT_ENABLE_DETECTION)))
         self.record_chk = QCheckBox()
-        self.record_chk.setChecked(bool(cam.get("enable_recording", DEFAULT_ENABLE_RECORDING)))
-        self.hours_edit = QLineEdit(cam.get("detection_hours", DEFAULT_DETECTION_HOURS))
-        self.visible_edit = QLineEdit(",".join(cam.get("visible_classes", VISIBLE_CLASSES)))
-        self.record_edit = QLineEdit(",".join(cam.get("record_classes", RECORD_CLASSES)))
-        self.path_edit = QLineEdit(cam.get("record_path", DEFAULT_RECORD_PATH))
+        self.hours_edit = QLineEdit()
+        self.visible_edit = QLineEdit()
+        self.record_edit = QLineEdit()
+        self.path_edit = QLineEdit()
         self.btn_path = QPushButton("Wybierz")
         self.pre_spin = QSpinBox()
         self.pre_spin.setRange(0, 60)
-        self.pre_spin.setValue(int(cam.get("pre_seconds", DEFAULT_PRE_SECONDS)))
         self.post_spin = QSpinBox()
         self.post_spin.setRange(0, 60)
-        self.post_spin.setValue(int(cam.get("post_seconds", DEFAULT_POST_SECONDS)))
 
         path_layout = QHBoxLayout()
         path_layout.addWidget(self.path_edit)
@@ -1519,6 +1509,8 @@ class CameraSettingsDialog(QDialog):
         self.test_btn.clicked.connect(self._test_rtsp)
 
         self.result_camera = None
+        if camera:
+            self.load_camera(camera)
 
     def _choose_path(self):
         d = QFileDialog.getExistingDirectory(self, "Wybierz folder nagrań", self.path_edit.text() or DEFAULT_RECORD_PATH)
@@ -1538,6 +1530,23 @@ class CameraSettingsDialog(QDialog):
         else:
             self.test_status.setText("⚠️ Błąd")
             self.test_status.setStyleSheet("color:#f80;")
+
+    def load_camera(self, cam):
+        cam = cam or {}
+        self.name_edit.setText(cam.get("name", ""))
+        self.rtsp_edit.setText(cam.get("rtsp", ""))
+        self.model_combo.setCurrentText(cam.get("model", DEFAULT_MODEL))
+        self.fps_spin.setValue(int(cam.get("fps", DEFAULT_FPS)))
+        self.conf_spin.setValue(float(cam.get("confidence_threshold", DEFAULT_CONFIDENCE_THRESHOLD)))
+        self.draw_chk.setChecked(bool(cam.get("draw_overlays", DEFAULT_DRAW_OVERLAYS)))
+        self.detect_chk.setChecked(bool(cam.get("enable_detection", DEFAULT_ENABLE_DETECTION)))
+        self.record_chk.setChecked(bool(cam.get("enable_recording", DEFAULT_ENABLE_RECORDING)))
+        self.hours_edit.setText(cam.get("detection_hours", DEFAULT_DETECTION_HOURS))
+        self.visible_edit.setText(",".join(cam.get("visible_classes", VISIBLE_CLASSES)))
+        self.record_edit.setText(",".join(cam.get("record_classes", RECORD_CLASSES)))
+        self.path_edit.setText(cam.get("record_path", DEFAULT_RECORD_PATH))
+        self.pre_spin.setValue(int(cam.get("pre_seconds", DEFAULT_PRE_SECONDS)))
+        self.post_spin.setValue(int(cam.get("post_seconds", DEFAULT_POST_SECONDS)))
 
     def accept(self):
         name = self.name_edit.text().strip()
@@ -1606,6 +1615,61 @@ class RemoveCameraDialog(QDialog):
         self.accept()
 
 
+# --- Dialog zarządzania kamerami ---
+class CameraSettingsDialog(QDialog):
+    def __init__(self, cameras, start_cb, stop_cb, test_cb, settings_cb, delete_cb, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Zarządzanie kamerami")
+        self.cameras = cameras
+        self.start_cb = start_cb
+        self.stop_cb = stop_cb
+        self.test_cb = test_cb
+        self.settings_cb = settings_cb
+        self.delete_cb = delete_cb
+
+        v = QVBoxLayout(self)
+        self.combo = QComboBox()
+        for cam in cameras:
+            self.combo.addItem(cam.get("name", ""))
+        v.addWidget(self.combo)
+
+        btns = QHBoxLayout()
+        self.btn_start = QPushButton("Start")
+        self.btn_stop = QPushButton("Stop")
+        self.btn_test = QPushButton("Test połączenia")
+        self.btn_copy = QPushButton("Kopiuj RTSP")
+        self.btn_settings = QPushButton("Ustawienia…")
+        self.btn_delete = QPushButton("Usuń")
+        for b in (self.btn_start, self.btn_stop, self.btn_test, self.btn_copy, self.btn_settings, self.btn_delete):
+            btns.addWidget(b)
+        v.addLayout(btns)
+
+        self.form = SingleCameraDialog(self, cameras[0] if cameras else None)
+        self.form.setWindowFlags(Qt.Widget)
+        self.form.btn_ok.hide()
+        self.form.btn_cancel.hide()
+        v.addWidget(self.form)
+
+        self.combo.currentIndexChanged.connect(self._on_idx_change)
+        self.btn_start.clicked.connect(lambda: self.start_cb(self.combo.currentIndex()))
+        self.btn_stop.clicked.connect(lambda: self.stop_cb(self.combo.currentIndex()))
+        self.btn_test.clicked.connect(lambda: self.test_cb(self.combo.currentIndex()))
+        self.btn_copy.clicked.connect(self._copy_rtsp)
+        self.btn_settings.clicked.connect(lambda: self.settings_cb(self.combo.currentIndex()))
+        self.btn_delete.clicked.connect(lambda: self.delete_cb(self.combo.currentIndex()))
+
+        self._on_idx_change(self.combo.currentIndex())
+
+    def _on_idx_change(self, idx):
+        if 0 <= idx < len(self.cameras):
+            self.form.load_camera(self.cameras[idx])
+
+    def _copy_rtsp(self):
+        idx = self.combo.currentIndex()
+        if 0 <= idx < len(self.cameras):
+            QApplication.clipboard().setText(self.cameras[idx]["rtsp"], QClipboard.Clipboard)
+            QMessageBox.information(self, "Skopiowano", "Adres RTSP skopiowany do schowka.")
+
 # --- Dialog listy kamer ---
 class CameraListDialog(QDialog):
     camera_selected = pyqtSignal(int)
@@ -1653,7 +1717,6 @@ class MainWindow(QMainWindow):
         self.output_dir = self.cameras[0].get("record_path", DEFAULT_RECORD_PATH) if self.cameras else DEFAULT_RECORD_PATH
 
         self.camera_list = CameraListWidget(self.cameras)
-        self.camera_list.request_context.connect(self._show_camera_context_menu)
         self.camera_list.hide()
 
         self.camera_grid = CameraGridWidget(self.cameras)
@@ -1698,6 +1761,11 @@ class MainWindow(QMainWindow):
         btn_settings.setIconSize(QSize(50, 50))
         btn_settings.clicked.connect(self.open_settings)
 
+        btn_cam_ctrl = QToolButton()
+        btn_cam_ctrl.setIcon(QIcon(str(ICON_DIR / "sliders.svg")))
+        btn_cam_ctrl.setIconSize(QSize(50, 50))
+        btn_cam_ctrl.clicked.connect(self.open_camera_settings)
+
         btn_fullscreen = QToolButton()
         btn_fullscreen.setIcon(QIcon(str(ICON_DIR / "window-fullscreen.svg")))
         btn_fullscreen.setIconSize(QSize(50, 50))
@@ -1714,7 +1782,7 @@ QToolButton:hover { background: #ff6666; }  # jasnoczerwone tło po najechaniu
 QToolButton:focus { outline: none; }
         """
 
-        for btn in (btn_cameras, btn_recordings, btn_settings, btn_fullscreen):
+        for btn in (btn_cameras, btn_recordings, btn_settings, btn_cam_ctrl, btn_fullscreen):
             btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
             btn.setAutoRaise(True)
             btn.setStyleSheet(btn_style)
@@ -1723,6 +1791,7 @@ QToolButton:focus { outline: none; }
         controls_layout.addWidget(btn_cameras)
         controls_layout.addWidget(btn_recordings)
         controls_layout.addWidget(btn_settings)
+        controls_layout.addWidget(btn_cam_ctrl)
         controls_layout.addWidget(btn_fullscreen)
         controls_layout.addStretch()
 
@@ -1780,6 +1849,18 @@ QToolButton:focus { outline: none; }
             self.showFullScreen()
             self._is_fullscreen = True
 
+    def open_camera_settings(self):
+        dlg = CameraSettingsDialog(
+            self.cameras,
+            start_cb=self.start_camera,
+            stop_cb=self.stop_camera,
+            test_cb=self.test_camera,
+            settings_cb=self.camera_settings,
+            delete_cb=self.delete_camera,
+            parent=self,
+        )
+        dlg.exec_()
+
     # --- Alerty ---
     def on_new_alert(self, alert: dict):
         self.alert_list.add_alert(alert)
@@ -1789,39 +1870,7 @@ QToolButton:focus { outline: none; }
         self.log_window.add_entry("detection", "rozpoczęto nagrywanie")
 
 
-    # --- MENU KONTEKSTOWE KAMERY ---
-    def _show_camera_context_menu(self, row: int, global_pos: QPoint):
-        if row < 0 or row >= len(self.cameras):
-            return
-        cam = self.cameras[row]
-        menu = QMenu(self)
-
-        running = row < len(self.workers) and isinstance(self.workers[row], CameraWorker) and self.workers[row].isRunning()
-        act_start = menu.addAction("Start") if not running else None
-        act_stop = menu.addAction("Stop") if running else None
-        menu.addSeparator()
-        act_test = menu.addAction("Test połączenia")
-        act_copy = menu.addAction("Kopiuj RTSP")
-        menu.addSeparator()
-        act_settings = menu.addAction("Ustawienia…")
-        act_del = menu.addAction("Usuń…")
-
-        action = menu.exec_(global_pos)
-        if action is None:
-            return
-        if action == act_start:
-            self.start_camera(row)
-        elif action == act_stop:
-            self.stop_camera(row)
-        elif action == act_test:
-            self.test_camera(row)
-        elif action == act_copy:
-            QApplication.clipboard().setText(cam["rtsp"], QClipboard.Clipboard)
-            QMessageBox.information(self, "Skopiowano", "Adres RTSP skopiowany do schowka.")
-        elif action == act_settings:
-            self.camera_settings(row)
-        elif action == act_del:
-            self.delete_camera(row)
+    # --- Zarządzanie kamerami ---
 
     def start_camera(self, idx: int):
         if idx < 0 or idx >= len(self.cameras):
@@ -1904,7 +1953,7 @@ QToolButton:focus { outline: none; }
 
     def camera_settings(self, idx: int):
         cam = self.cameras[idx]
-        dlg = CameraSettingsDialog(self, cam)
+        dlg = SingleCameraDialog(self, cam)
         if dlg.exec_():
             new_data = dlg.result_camera
             if new_data["name"] != cam["name"] and any(c["name"] == new_data["name"] for c in self.cameras):
