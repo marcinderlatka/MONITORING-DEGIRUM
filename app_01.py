@@ -11,6 +11,7 @@ import re
 from collections import deque
 from glob import glob
 import argparse
+from contextlib import suppress
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QListWidget, QListWidgetItem,
@@ -205,6 +206,13 @@ class CameraWorker(QThread):
         # hot-reload
         self.restart_requested = False
 
+    def _safe_release_writer(self):
+        """Release the video writer if it exists, suppressing attribute errors."""
+        if self.video_writer:
+            with suppress(AttributeError):
+                self.video_writer.release()
+            self.video_writer = None
+
     # hot reload API
     def set_confidence(self, thr: float):
         self.confidence_threshold = float(thr)
@@ -363,9 +371,7 @@ class CameraWorker(QThread):
                         if self.recording:
                             self.frames_since_last_detection += 1
                             if self.frames_since_last_detection >= int(self.post_seconds * self.fps):
-                                if self.video_writer:
-                                    self.video_writer.release()
-                                    self.video_writer = None
+                                self._safe_release_writer()
                                 self.recording = False
 
                     if self.recording and self.video_writer:
@@ -396,9 +402,7 @@ class CameraWorker(QThread):
             QThread.msleep(300)
 
         # sprzątanie
-        if self.video_writer:
-            self.video_writer.release()
-            self.video_writer = None
+        self._safe_release_writer()
 
     def stop(self):
         """Request the worker thread to stop and wait for completion.
@@ -413,9 +417,7 @@ class CameraWorker(QThread):
         """
         self.stop_signal = True
         # zwolnij zasoby nagrywania jak najszybciej
-        if self.video_writer:
-            self.video_writer.release()
-            self.video_writer = None
+        self._safe_release_writer()
         if self.isRunning() and not self.wait(2000):
             # wątek nadal żyje – wymuś zakończenie, aby GUI nie
             # zawiesiło się podczas operacji usuwania
