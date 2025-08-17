@@ -760,21 +760,31 @@ class LogEntryWidget(QFrame):
             "application": "#4aa3ff",
             "detection": "#4caf50",
             "settings": "#ff8800",
+            "error": "#ff4444",
         }
         self.setStyleSheet(
-            "QFrame{border:1px solid white; background:rgba(0,0,0,0.4);}" 
+            "QFrame{border:none; background:rgba(0,0,0,0.4);}" 
         )
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 5, 10, 5)
-        layout.setAlignment(Qt.AlignCenter)
-        title = QLabel(group.capitalize())
-        title.setAlignment(Qt.AlignCenter)
-        title.setStyleSheet(f"color:{colors.get(group, '#fff')}; font-weight:600;")
-        msg = QLabel(text)
-        msg.setAlignment(Qt.AlignCenter)
-        msg.setStyleSheet("color:white;")
-        layout.addWidget(title)
-        layout.addWidget(msg)
+        layout.setAlignment(Qt.AlignLeft)
+
+        self.group_label = QLabel(group.capitalize())
+        self.group_label.setAlignment(Qt.AlignLeft)
+        color = colors.get(group, "#fff")
+        self.group_label.setStyleSheet(
+            f"color:{color}; font-weight:600; border-bottom: 1px solid {color};"
+        )
+        self.group_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
+        self.msg_label = QLabel(text)
+        self.msg_label.setAlignment(Qt.AlignLeft)
+        self.msg_label.setWordWrap(True)
+        self.msg_label.setStyleSheet("color:white;")
+        self.msg_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
+        layout.addWidget(self.group_label)
+        layout.addWidget(self.msg_label)
 
 
 class LogWindow(QListWidget):
@@ -786,11 +796,12 @@ class LogWindow(QListWidget):
         self.setStyleSheet("QListWidget{background:transparent; border:none;}")
 
     def add_entry(self, group: str, text: str):
-        widget = LogEntryWidget(group, text)
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S (%A)")
+        widget = LogEntryWidget(group, f"{ts}: {text}")
         item = QListWidgetItem(self)
-        item.setSizeHint(widget.sizeHint())
         self.addItem(item)
         self.setItemWidget(item, widget)
+        item.setSizeHint(widget.sizeHint())
         self.scrollToItem(item)
         if self.count() > 200:
             self.takeItem(0)
@@ -953,8 +964,14 @@ class VideoPlayerDialog(QDialog):
         try:
             cv2.imwrite(out, self.current_frame)
             QMessageBox.information(self, "Zapisano", f"Kadr zapisany jako: {os.path.basename(out)}")
+            parent = self.parent()
+            if parent is not None and hasattr(parent, "log_window"):
+                parent.log_window.add_entry("application", f"wyeksportowano kadr {os.path.basename(out)}")
         except Exception as e:
             QMessageBox.warning(self, "Błąd", str(e))
+            parent = self.parent()
+            if parent is not None and hasattr(parent, "log_window"):
+                parent.log_window.add_entry("error", f"kadr: {e}")
 
     def toggle_fullscreen(self):
         if self.isFullScreen():
@@ -1836,6 +1853,7 @@ QToolButton:focus { outline: none; }
             QMessageBox.No
         ) != QMessageBox.Yes:
             return
+        self.log_window.add_entry("application", "restart aplikacji")
         try:
             self.stop_all()
         except Exception:
@@ -1852,6 +1870,7 @@ QToolButton:focus { outline: none; }
             self._is_fullscreen = True
 
     def open_camera_settings(self):
+        self.log_window.add_entry("settings", "otwarto ustawienia kamer")
         dlg = CameraSettingsDialog(
             self.cameras,
             start_cb=self.start_camera,
@@ -1891,6 +1910,7 @@ QToolButton:focus { outline: none; }
             )
         except Exception as e:
             QMessageBox.warning(self, "Model", f"Nie udało się załadować modelu '{model_name}': {e}")
+            self.log_window.add_entry("error", f"model {model_name}: {e}")
             return
         w = CameraWorker(camera=cam, model=model, index=idx)
         w.frame_signal.connect(self.update_frame)
@@ -1899,6 +1919,7 @@ QToolButton:focus { outline: none; }
         w.status_signal.connect(self._worker_status)
         w.start()
         self.workers[idx] = w
+        self.log_window.add_entry("application", f"uruchomiono kamerę {cam.get('name', idx)}")
 
     def stop_camera(self, idx: int):
         if 0 <= idx < len(self.workers):
@@ -1906,6 +1927,8 @@ QToolButton:focus { outline: none; }
             if isinstance(w, CameraWorker):
                 w.stop()
                 self.workers[idx] = None
+                cam = self.cameras[idx]
+                self.log_window.add_entry("application", f"zatrzymano kamerę {cam.get('name', idx)}")
 
 
     def _worker_status(self, text: str, idx: int):
@@ -1932,6 +1955,8 @@ QToolButton:focus { outline: none; }
         else:
             cause = str(msg)
         self._last_error[idx] = cause
+        cam_name = self.cameras[idx]["name"] if idx < len(self.cameras) else str(idx)
+        self.log_window.add_entry("error", f"{cam_name}: {cause}")
         if "Brak sygnału" in cause:
             self.log_window.add_entry("application", "brak sygnału RTSP")
         if idx == self.camera_list.currentRow():
@@ -1952,6 +1977,7 @@ QToolButton:focus { outline: none; }
             cfg["cameras"] = self.cameras
             save_config(cfg)
             self.restart_workers_and_ui()
+            self.log_window.add_entry("settings", f"dodano kamerę {data.get('name')}")
 
     def camera_settings(self, idx: int):
         cam = self.cameras[idx]
@@ -1969,6 +1995,7 @@ QToolButton:focus { outline: none; }
             self.camera_list.rebuild(self.cameras)
             self.camera_grid.rebuild(self.cameras)
             self.camera_list.setCurrentRow(idx)
+            self.log_window.add_entry("settings", f"zapisano ustawienia kamery {new_data.get('name')}")
             if model_changed:
                 self.log_window.add_entry("settings", "zmieniono model")
 
@@ -2176,15 +2203,18 @@ QToolButton:focus { outline: none; }
 
 
     def open_video_file(self, filepath: str):
+        self.log_window.add_entry("application", f"odtworzono nagranie {os.path.basename(filepath)}")
         dlg = VideoPlayerDialog(filepath, self)
         dlg.exec_()
 
     def open_recordings_browser(self):
+        self.log_window.add_entry("application", "otwarto przeglądarkę nagrań")
         dlg = RecordingsBrowserDialog(self.output_dir, self.cameras, self)
         dlg.open_video.connect(self.open_video_file)
         dlg.exec_()
 
     def open_camera_list_dialog(self):
+        self.log_window.add_entry("application", "otwarto listę kamer")
         dlg = CameraListDialog(self.camera_grid, self)
         dlg.camera_selected.connect(lambda idx: self.camera_list.setCurrentRow(idx))
         dlg.exec_()
