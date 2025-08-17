@@ -766,6 +766,8 @@ class LogEntryWidget(QFrame):
         colors = {
             "application": "#4aa3ff",
             "detection": "#4caf50",
+            "detection object": "#4caf50",
+            "detection recording": "#4caf50",
             "settings": "#ff8800",
             "error": "#ff4444",
         }
@@ -801,6 +803,8 @@ class LogWindow(QListWidget):
         self.setFrameShape(QFrame.NoFrame)
         self.setSpacing(8)
         self.setStyleSheet("QListWidget{background:transparent; border:none;}")
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
     def add_entry(self, group: str, text: str):
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S (%A)")
@@ -1895,13 +1899,13 @@ QToolButton:focus { outline: none; }
         self.alert_mem.add(alert)
         cam = alert.get("camera", "kamera")
         label = alert.get("label", "obiekt")
-        self.log_window.add_entry("detection", f"{cam}: wykryto obiekt ({label})")
+        self.log_window.add_entry("detection object", f"{cam}: wykryto obiekt ({label})")
 
     def on_record_event(self, event: str, filepath: str, cam_name: str):
         if event == "start":
-            self.log_window.add_entry("detection", f"kamera {cam_name} rozpoczęła nagrywanie: {filepath}")
+            self.log_window.add_entry("detection recording", f"kamera {cam_name} rozpoczęła nagrywanie: {filepath}")
         elif event == "stop":
-            self.log_window.add_entry("detection", f"kamera {cam_name} zakończyła nagrywanie: {filepath}")
+            self.log_window.add_entry("detection recording", f"kamera {cam_name} zakończyła nagrywanie: {filepath}")
 
     # --- Zarządzanie kamerami ---
 
