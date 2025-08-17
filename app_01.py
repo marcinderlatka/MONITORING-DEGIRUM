@@ -678,19 +678,6 @@ class AlertListWidget(QWidget):
         self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         layout.addWidget(self.list)
 
-        self.menu_btn = QToolButton(self)
-        self.menu_btn.setAutoRaise(True)
-        self.menu_btn.setIcon(self.style().standardIcon(QStyle.SP_MessageBoxWarning))
-        self.menu_btn.setIconSize(QSize(24,24))
-        self.menu_btn.setPopupMode(QToolButton.InstantPopup)
-        menu = QMenu(self.menu_btn)
-        menu.addAction("Wczytaj ponownie", self.reload)
-        menu.addAction("Eksport do CSV", self.export_csv)
-        menu.addAction("Wyczyść pamięć", self.clear)
-        self.menu_btn.setMenu(menu)
-        self.menu_btn.setFixedSize(32,32)
-        self.menu_btn.raise_()
-
         self.list.itemDoubleClicked.connect(self._open_selected)
 
         self.load_from_history(self.mem.items)
@@ -752,12 +739,6 @@ class AlertListWidget(QWidget):
                                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes:
             self.mem.clear()
             self.list.clear()
-
-    def resizeEvent(self, e):
-        super().resizeEvent(e)
-        x = self.list.x() + self.list.width() - self.menu_btn.width() - 8
-        y = self.list.y() + (self.list.height() - self.menu_btn.height()) // 2
-        self.menu_btn.move(x, y)
 
 
 class LogEntryWidget(QFrame):
@@ -1796,6 +1777,17 @@ class MainWindow(QMainWindow):
         btn_cam_ctrl.setIconSize(QSize(50, 50))
         btn_cam_ctrl.clicked.connect(self.open_camera_settings)
 
+        btn_alerts = QToolButton()
+        btn_alerts.setIcon(QIcon(str(ICON_DIR / "exclamation-square.svg")))
+        btn_alerts.setIconSize(QSize(50, 50))
+        btn_alerts.setPopupMode(QToolButton.MenuButtonPopup)
+        alerts_menu = QMenu(btn_alerts)
+        alerts_menu.addAction("Wczytaj ponownie", lambda: self.alert_list.reload())
+        alerts_menu.addAction("Eksport do CSV", lambda: self.alert_list.export_csv())
+        alerts_menu.addAction("Wyczyść pamięć", lambda: self.alert_list.clear())
+        btn_alerts.setMenu(alerts_menu)
+        btn_alerts.clicked.connect(self.toggle_alert_list)
+
         btn_fullscreen = QToolButton()
         btn_fullscreen.setIcon(QIcon(str(ICON_DIR / "window-fullscreen.svg")))
         btn_fullscreen.setIconSize(QSize(50, 50))
@@ -1812,7 +1804,7 @@ QToolButton:hover { background: #ff6666; }  # jasnoczerwone tło po najechaniu
 QToolButton:focus { outline: none; }
         """
 
-        for btn in (btn_cameras, btn_recordings, btn_settings, btn_cam_ctrl, btn_fullscreen):
+        for btn in (btn_cameras, btn_recordings, btn_settings, btn_cam_ctrl, btn_alerts, btn_fullscreen):
             btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
             btn.setAutoRaise(True)
             btn.setStyleSheet(btn_style)
@@ -1822,6 +1814,7 @@ QToolButton:focus { outline: none; }
         controls_layout.addWidget(btn_recordings)
         controls_layout.addWidget(btn_settings)
         controls_layout.addWidget(btn_cam_ctrl)
+        controls_layout.addWidget(btn_alerts)
         controls_layout.addWidget(btn_fullscreen)
         controls_layout.addStretch()
 
@@ -1879,6 +1872,9 @@ QToolButton:focus { outline: none; }
         else:
             self.showFullScreen()
             self._is_fullscreen = True
+
+    def toggle_alert_list(self):
+        self.alert_list.setVisible(not self.alert_list.isVisible())
 
     def open_camera_settings(self):
         self.log_window.add_entry("settings", "otwarto ustawienia kamer")
