@@ -12,6 +12,7 @@ from collections import deque
 from glob import glob
 import argparse
 from contextlib import suppress
+import threading
 import simpleaudio as sa
 
 from PyQt5.QtWidgets import (
@@ -1853,6 +1854,19 @@ class MainWindow(QMainWindow):
         self.last_detected_label = ""
         self.sound_enabled = True
 
+        # Precompute alert sound once
+        self.alert_wave = None
+        try:
+            fs = 44100
+            t = np.linspace(0, 1, fs, False)
+            tone = np.sin(2 * np.pi * 880 * t)
+            pulse = (np.sin(2 * np.pi * 5 * t) > 0).astype(float)
+            envelope = np.linspace(1, 0, fs)
+            audio = (tone * pulse * envelope * 0.5 * 32767).astype(np.int16)
+            self.alert_wave = sa.WaveObject(audio, 1, 2, fs)
+        except Exception as e:
+            print(f"Failed to initialize alert sound: {e}")
+
         main_widget = QWidget()
         main_widget.setStyleSheet("background-color: black;")
         main_vlayout = QVBoxLayout(main_widget)
@@ -2020,13 +2034,16 @@ QToolButton:focus { outline: none; }
         self.log_window.add_entry("application", f"{state} powiadomienia dźwiękowe")
 
     def play_alert_sound(self):
-        fs = 44100
-        t = np.linspace(0, 1, fs, False)
-        tone = np.sin(2*np.pi*880*t)
-        pulse = (np.sin(2*np.pi*5*t) > 0).astype(float)
-        envelope = np.linspace(1, 0, fs)
-        audio = (tone * pulse * envelope * 0.5 * 32767).astype(np.int16)
-        sa.play_buffer(audio, 1, 2, fs)
+        if not self.alert_wave:
+            return
+
+        def _play():
+            try:
+                self.alert_wave.play()
+            except Exception as e:
+                print(f"Alert sound playback failed: {e}")
+
+        threading.Thread(target=_play, daemon=True).start()
 
     def open_alert_dialog(self):
         dlg = AlertDialog(self)
