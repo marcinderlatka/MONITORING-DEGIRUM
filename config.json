@@ -1,4 +1,6 @@
 {
+    "log_history_path": "log_history.json",
+    "log_retention_hours": 48,
     "cameras": [
         {
             "name": "Kamera 1",
