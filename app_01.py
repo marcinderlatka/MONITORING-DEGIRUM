@@ -795,28 +795,29 @@ class LogEntryWidget(QFrame):
         camera: str = "",
         action: str = "",
         detected: str = "",
+        recording: str = "",
     ):
         super().__init__()
+        self.group = group
         colors = {
             "application": "#4aa3ff",
             "detection": "#4caf50",
             "detection object": "#4caf50",
-            "detection recording": "#4caf50",
             "settings": "#ff8800",
             "error": "#ff4444",
         }
         self.setStyleSheet(
-            "QFrame{border:none; background:rgba(0,0,0,0.4);}" 
+            "QFrame{border:none; background:rgba(0,0,0,0.4);}"
         )
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 5, 10, 5)
         layout.setAlignment(Qt.AlignLeft)
 
-        self.group_label = QLabel(group.capitalize())
+        self.group_label = QLabel(group.upper())
         self.group_label.setAlignment(Qt.AlignLeft)
         color = colors.get(group, "#fff")
         self.group_label.setStyleSheet(
-            f"color:{color}; font-weight:600; border-bottom: 1px solid {color};"
+            f"color:{color}; font-size:15px; font-weight:600; border-bottom:1px solid {color};"
         )
         self.group_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
@@ -826,17 +827,62 @@ class LogEntryWidget(QFrame):
             lbl = QLabel(text)
             lbl.setAlignment(Qt.AlignLeft)
             lbl.setWordWrap(True)
-            lbl.setStyleSheet(f"color:{color};")
+            lbl.setStyleSheet(f"color:{color}; font-size:15px;")
             lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
             return lbl
 
-        layout.addWidget(make_label(ts, "white"))
+        date_str = ts
+        time_str = ""
+        try:
+            dt = datetime.datetime.strptime(ts, "%Y-%m-%d %H:%M:%S %A")
+            date_str = dt.strftime("%Y-%m-%d %A")
+            time_str = dt.strftime("%H:%M:%S")
+        except Exception:
+            pass
+        layout.addWidget(make_label(date_str, "white"))
+        if time_str:
+            layout.addWidget(make_label(time_str, "#ff8800"))
         if camera:
             layout.addWidget(make_label(camera, "#4aa3ff"))
         if action:
             layout.addWidget(make_label(action, "#ff8800"))
         if detected:
-            layout.addWidget(make_label(detected, "#4caf50"))
+            layout.addWidget(make_label(f"Detection: {detected.upper()}", "#4caf50"))
+
+        rec_layout = QHBoxLayout()
+        self.rec_dot = QLabel()
+        self.rec_dot.setFixedSize(10, 10)
+        self.rec_dot.setStyleSheet("background:red; border-radius:5px;")
+        self.rec_text = QLabel()
+        self.rec_text.setStyleSheet("color:red; font-size:15px;")
+        rec_layout.addWidget(self.rec_dot)
+        rec_layout.addWidget(self.rec_text)
+        rec_layout.setAlignment(Qt.AlignLeft)
+        self.rec_dot.hide()
+        self.rec_text.hide()
+        layout.addLayout(rec_layout)
+
+        self._blink_timer = QTimer(self)
+        self._blink_timer.timeout.connect(lambda: self.rec_dot.setVisible(not self.rec_dot.isVisible()))
+
+        if recording == "started":
+            self.start_recording()
+        elif recording == "finished":
+            self.finish_recording()
+
+    def start_recording(self):
+        self.rec_text.setText("Recording started")
+        self.rec_dot.show()
+        self.rec_text.show()
+        self.rec_dot.setVisible(True)
+        self._blink_timer.start(500)
+
+    def finish_recording(self):
+        self.rec_text.setText("Recording finished")
+        self.rec_dot.show()
+        self.rec_text.show()
+        self._blink_timer.stop()
+        self.rec_dot.setVisible(True)
 
 
 class LogWindow(QListWidget):
@@ -864,6 +910,7 @@ class LogWindow(QListWidget):
             entry.get("camera", ""),
             entry.get("action", ""),
             entry.get("detected", ""),
+            entry.get("recording", ""),
         )
         item = QListWidgetItem(self)
         self.addItem(item)
@@ -915,6 +962,7 @@ class LogWindow(QListWidget):
             "action": action,
             "detected": detected,
             "timestamp": ts,
+            "recording": "",
         }
         self.history.append(entry)
 
@@ -936,6 +984,26 @@ class LogWindow(QListWidget):
                 json.dump(self.history, f, indent=2)
         except Exception as e:
             print("Nie udało się zapisać historii logów:", e)
+
+    def update_last_detection_recording(self, status: str):
+        for i in range(len(self.history) - 1, -1, -1):
+            if self.history[i].get("group") == "detection object":
+                self.history[i]["recording"] = status
+                break
+        for idx in range(self.count() - 1, -1, -1):
+            item = self.item(idx)
+            widget = self.itemWidget(item)
+            if isinstance(widget, LogEntryWidget) and widget.group == "detection object":
+                if status == "started":
+                    widget.start_recording()
+                elif status == "finished":
+                    widget.finish_recording()
+                break
+        try:
+            with open(self.log_path, "w") as f:
+                json.dump(self.history, f, indent=2)
+        except Exception:
+            pass
 
 
 # --- ODTWARZACZ WIDEO ---
@@ -2078,27 +2146,16 @@ QToolButton:focus { outline: none; }
         cam = alert.get("camera", "kamera")
         label = alert.get("label", "obiekt")
         self.last_detected_label = label
-        self.log_window.add_entry("detection object", cam, "", f"wykryto {label}")
+        self.log_window.add_entry("detection object", cam, "", label)
         if self.sound_enabled:
             self.play_alert_sound()
             self.log_window.add_entry("detection sound", cam, "", "odtworzono powiadomienie dźwiękowe")
 
     def on_record_event(self, event: str, filepath: str, cam_name: str):
-        det_info = f"wykryto {self.last_detected_label}" if self.last_detected_label else ""
         if event == "start":
-            self.log_window.add_entry(
-                "detection recording",
-                cam_name,
-                "rozpoczęto nagrywanie",
-                det_info,
-            )
+            self.log_window.update_last_detection_recording("started")
         elif event == "stop":
-            self.log_window.add_entry(
-                "detection recording",
-                cam_name,
-                "zakończono nagrywanie",
-                det_info,
-            )
+            self.log_window.update_last_detection_recording("finished")
 
     # --- Zarządzanie kamerami ---
 
