@@ -802,17 +802,16 @@ class LogEntryWidget(QFrame):
         colors = {
             "application": "#4aa3ff",
             "detection": "#4caf50",
-            "detection object": "#4caf50",
-            "settings": "#ff8800",
             "error": "#ff4444",
         }
         self.setStyleSheet(
-            "QFrame{border:none; background:rgba(0,0,0,0.4);}"
+            "QFrame{border:none; background:rgba(0,0,0,0.4);}" 
         )
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 5, 10, 5)
         layout.setAlignment(Qt.AlignLeft)
 
+        # Tytuł grupy
         self.group_label = QLabel(group.upper())
         self.group_label.setAlignment(Qt.AlignLeft)
         color = colors.get(group, "#fff")
@@ -820,10 +819,16 @@ class LogEntryWidget(QFrame):
             f"color:{color}; font-size:15px; font-weight:600; border-bottom:1px solid {color};"
         )
         self.group_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-
         layout.addWidget(self.group_label)
 
-        def make_label(text: str, color: str) -> QLabel:
+        def make_title(text: str) -> QLabel:
+            lbl = QLabel(f"{text}:")
+            lbl.setAlignment(Qt.AlignLeft)
+            lbl.setStyleSheet("color:white; font-size:15px; font-weight:600;")
+            lbl.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
+            return lbl
+
+        def make_value(text: str, color: str) -> QLabel:
             lbl = QLabel(text)
             lbl.setAlignment(Qt.AlignLeft)
             lbl.setWordWrap(True)
@@ -831,47 +836,72 @@ class LogEntryWidget(QFrame):
             lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
             return lbl
 
+        def add_row(title: str, widgets):
+            row = QHBoxLayout()
+            row.addWidget(make_title(title))
+            if not isinstance(widgets, (list, tuple)):
+                widgets = [widgets]
+            for w in widgets:
+                row.addWidget(w)
+            row.setAlignment(Qt.AlignLeft)
+            layout.addLayout(row)
+
         date_str = ts
         time_str = ""
+        weekday_str = ""
         try:
             dt = datetime.datetime.strptime(ts, "%Y-%m-%d %H:%M:%S %A")
-            date_str = dt.strftime("%Y-%m-%d %A")
+            date_str = dt.strftime("%Y-%m-%d")
             time_str = dt.strftime("%H:%M:%S")
+            weekday_str = dt.strftime("%A").upper()
         except Exception:
             pass
-        layout.addWidget(make_label(date_str, "white"))
+
+        add_row("Data", [make_value(date_str, "#4aa3ff"), make_value(weekday_str, "#ff8800")])
         if time_str:
-            layout.addWidget(make_label(time_str, "#ff8800"))
+            add_row("Godzina", make_value(time_str, "#ff8800"))
         if camera:
-            layout.addWidget(make_label(camera, "#4aa3ff"))
-        if action:
-            layout.addWidget(make_label(action, "#ff8800"))
+            add_row("Kamera", make_value(camera, "#4aa3ff"))
         if detected:
-            layout.addWidget(make_label(f"Detection: {detected.upper()}", "#4caf50"))
+            add_row("Obiekt", make_value(detected.upper(), "#4caf50"))
+        if group != "detection" and action:
+            add_row("Akcja", make_value(action, "#ff8800"))
 
-        rec_layout = QHBoxLayout()
-        self.rec_dot = QLabel()
-        self.rec_dot.setFixedSize(10, 10)
-        self.rec_dot.setStyleSheet("background:red; border-radius:5px;")
-        self.rec_text = QLabel()
-        self.rec_text.setStyleSheet("color:red; font-size:15px;")
-        rec_layout.addWidget(self.rec_dot)
-        rec_layout.addWidget(self.rec_text)
-        rec_layout.setAlignment(Qt.AlignLeft)
-        self.rec_dot.hide()
-        self.rec_text.hide()
-        layout.addLayout(rec_layout)
+        if group == "detection":
+            action_row = QHBoxLayout()
+            action_row.addWidget(make_title("Akcja"))
+            self.rec_dot = QLabel()
+            self.rec_dot.setFixedSize(10, 10)
+            self.rec_text = QLabel()
+            action_row.addWidget(self.rec_dot)
+            action_row.addWidget(self.rec_text)
+            action_row.setAlignment(Qt.AlignLeft)
+            layout.addLayout(action_row)
+            self.rec_dot.hide()
+            self.rec_text.hide()
 
-        self._blink_timer = QTimer(self)
-        self._blink_timer.timeout.connect(lambda: self.rec_dot.setVisible(not self.rec_dot.isVisible()))
+            self._blink_timer = QTimer(self)
+            self._blink_timer.timeout.connect(
+                lambda: self.rec_dot.setVisible(not self.rec_dot.isVisible())
+            )
 
-        if recording == "started":
-            self.start_recording()
-        elif recording == "finished":
-            self.finish_recording()
+            if recording == "started":
+                self.start_recording()
+            elif recording == "finished":
+                self.finish_recording()
+            elif recording == "det_started":
+                self.start_detection()
+            elif recording == "det_finished":
+                self.finish_detection()
+        else:
+            self.rec_dot = QLabel()
+            self.rec_text = QLabel()
+            self._blink_timer = QTimer(self)
 
     def start_recording(self):
         self.rec_text.setText("Recording started")
+        self.rec_text.setStyleSheet("color:red; font-size:15px;")
+        self.rec_dot.setStyleSheet("background:red; border-radius:5px;")
         self.rec_dot.show()
         self.rec_text.show()
         self.rec_dot.setVisible(True)
@@ -879,6 +909,26 @@ class LogEntryWidget(QFrame):
 
     def finish_recording(self):
         self.rec_text.setText("Recording finished")
+        self.rec_text.setStyleSheet("color:red; font-size:15px;")
+        self.rec_dot.setStyleSheet("background:red; border-radius:5px;")
+        self.rec_dot.show()
+        self.rec_text.show()
+        self._blink_timer.stop()
+        self.rec_dot.setVisible(True)
+
+    def start_detection(self):
+        self.rec_text.setText("Detection started")
+        self.rec_text.setStyleSheet("color:green; font-size:15px;")
+        self.rec_dot.setStyleSheet("background:green; border-radius:5px;")
+        self.rec_dot.show()
+        self.rec_text.show()
+        self.rec_dot.setVisible(True)
+        self._blink_timer.start(500)
+
+    def finish_detection(self):
+        self.rec_text.setText("Detection finished")
+        self.rec_text.setStyleSheet("color:green; font-size:15px;")
+        self.rec_dot.setStyleSheet("background:green; border-radius:5px;")
         self.rec_dot.show()
         self.rec_text.show()
         self._blink_timer.stop()
@@ -937,7 +987,10 @@ class LogWindow(QListWidget):
 
         cutoff = datetime.datetime.now() - datetime.timedelta(hours=self.retention_hours)
         filtered = []
+        allowed = {"detection", "error", "application"}
         for entry in self.history:
+            if entry.get("group") not in allowed:
+                continue
             ts_str = entry.get("timestamp")
             try:
                 ts_dt = datetime.datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S %A")
@@ -955,6 +1008,12 @@ class LogWindow(QListWidget):
         action: str = "",
         detected: str = "",
     ):
+        if group == "detection object":
+            group = "detection"
+        allowed = {"detection", "error", "application"}
+        if group not in allowed:
+            return
+
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S %A")
         entry = {
             "group": group,
@@ -987,17 +1046,22 @@ class LogWindow(QListWidget):
 
     def update_last_detection_recording(self, status: str):
         for i in range(len(self.history) - 1, -1, -1):
-            if self.history[i].get("group") == "detection object":
+            if self.history[i].get("group") == "detection":
                 self.history[i]["recording"] = status
                 break
         for idx in range(self.count() - 1, -1, -1):
             item = self.item(idx)
             widget = self.itemWidget(item)
-            if isinstance(widget, LogEntryWidget) and widget.group == "detection object":
+            if isinstance(widget, LogEntryWidget) and widget.group == "detection":
                 if status == "started":
                     widget.start_recording()
                 elif status == "finished":
                     widget.finish_recording()
+                elif status == "det_started":
+                    widget.start_detection()
+                    QTimer.singleShot(2000, lambda: self.update_last_detection_recording("det_finished"))
+                elif status == "det_finished":
+                    widget.finish_detection()
                 break
         try:
             with open(self.log_path, "w") as f:
@@ -2146,10 +2210,12 @@ QToolButton:focus { outline: none; }
         cam = alert.get("camera", "kamera")
         label = alert.get("label", "obiekt")
         self.last_detected_label = label
-        self.log_window.add_entry("detection object", cam, "", label)
+        self.log_window.add_entry("detection", cam, "", label)
+        cam_cfg = next((c for c in self.cameras if c.get("name") == cam), {})
+        if not cam_cfg.get("enable_recording", True):
+            self.log_window.update_last_detection_recording("det_started")
         if self.sound_enabled:
             self.play_alert_sound()
-            self.log_window.add_entry("detection sound", cam, "", "odtworzono powiadomienie dźwiękowe")
 
     def on_record_event(self, event: str, filepath: str, cam_name: str):
         if event == "start":
