@@ -15,6 +15,7 @@ from contextlib import suppress
 import base64
 import io
 import wave
+import uuid
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QListWidget, QListWidgetItem,
@@ -790,6 +791,7 @@ class AlertDialog(QDialog):
 class LogEntryWidget(QFrame):
     def __init__(
         self,
+        entry_id: str,
         group: str,
         ts: str,
         camera: str = "",
@@ -799,6 +801,7 @@ class LogEntryWidget(QFrame):
     ):
         super().__init__()
         self.group = group
+        self.entry_id = entry_id
         colors = {
             "application": "#4aa3ff",
             "detection": "#4caf50",
@@ -821,30 +824,13 @@ class LogEntryWidget(QFrame):
         self.group_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         layout.addWidget(self.group_label)
 
-        def make_title(text: str) -> QLabel:
-            lbl = QLabel(f"{text}:")
-            lbl.setAlignment(Qt.AlignLeft)
-            lbl.setStyleSheet("color:white; font-size:15px; font-weight:600;")
-            lbl.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
-            return lbl
-
-        def make_value(text: str, color: str) -> QLabel:
+        def add_line(text: str, color: str):
             lbl = QLabel(text)
             lbl.setAlignment(Qt.AlignLeft)
             lbl.setWordWrap(True)
             lbl.setStyleSheet(f"color:{color}; font-size:15px;")
             lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-            return lbl
-
-        def add_row(title: str, widgets):
-            row = QHBoxLayout()
-            row.addWidget(make_title(title))
-            if not isinstance(widgets, (list, tuple)):
-                widgets = [widgets]
-            for w in widgets:
-                row.addWidget(w)
-            row.setAlignment(Qt.AlignLeft)
-            layout.addLayout(row)
+            layout.addWidget(lbl)
 
         date_str = ts
         time_str = ""
@@ -857,19 +843,20 @@ class LogEntryWidget(QFrame):
         except Exception:
             pass
 
-        add_row("Data", [make_value(date_str, "#4aa3ff"), make_value(weekday_str, "#ff8800")])
+        if weekday_str:
+            add_line(weekday_str, "#ff8800")
         if time_str:
-            add_row("Godzina", make_value(time_str, "#ff8800"))
+            add_line(time_str, "#ff8800")
+        add_line(date_str, "#4aa3ff")
         if camera:
-            add_row("Kamera", make_value(camera, "#4aa3ff"))
+            add_line(camera, "#4aa3ff")
         if detected:
-            add_row("Obiekt", make_value(detected.upper(), "#4caf50"))
+            add_line(detected.upper(), "#4caf50")
         if group != "detection" and action:
-            add_row("Akcja", make_value(action, "#ff8800"))
+            add_line(action, "#ff8800")
 
         if group == "detection":
             action_row = QHBoxLayout()
-            action_row.addWidget(make_title("Akcja"))
             self.rec_dot = QLabel()
             self.rec_dot.setFixedSize(10, 10)
             self.rec_text = QLabel()
@@ -955,6 +942,7 @@ class LogWindow(QListWidget):
 
     def _add_widget_entry(self, entry: dict):
         widget = LogEntryWidget(
+            entry.get("id", ""),
             entry.get("group", ""),
             entry.get("timestamp", ""),
             entry.get("camera", ""),
@@ -1007,15 +995,17 @@ class LogWindow(QListWidget):
         camera: str = "",
         action: str = "",
         detected: str = "",
-    ):
+    ) -> str:
         if group == "detection object":
             group = "detection"
         allowed = {"detection", "error", "application"}
         if group not in allowed:
-            return
+            return ""
 
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S %A")
+        entry_id = uuid.uuid4().hex
         entry = {
+            "id": entry_id,
             "group": group,
             "camera": camera,
             "action": action,
@@ -1043,23 +1033,24 @@ class LogWindow(QListWidget):
                 json.dump(self.history, f, indent=2)
         except Exception as e:
             print("Nie udało się zapisać historii logów:", e)
+        return entry_id
 
-    def update_last_detection_recording(self, status: str):
-        for i in range(len(self.history) - 1, -1, -1):
-            if self.history[i].get("group") == "detection":
-                self.history[i]["recording"] = status
+    def update_recording_by_id(self, entry_id: str, status: str):
+        for entry in self.history:
+            if entry.get("id") == entry_id:
+                entry["recording"] = status
                 break
         for idx in range(self.count() - 1, -1, -1):
             item = self.item(idx)
             widget = self.itemWidget(item)
-            if isinstance(widget, LogEntryWidget) and widget.group == "detection":
+            if isinstance(widget, LogEntryWidget) and widget.entry_id == entry_id:
                 if status == "started":
                     widget.start_recording()
                 elif status == "finished":
                     widget.finish_recording()
                 elif status == "det_started":
                     widget.start_detection()
-                    QTimer.singleShot(2000, lambda: self.update_last_detection_recording("det_finished"))
+                    QTimer.singleShot(2000, lambda: self.update_recording_by_id(entry_id, "det_finished"))
                 elif status == "det_finished":
                     widget.finish_detection()
                 break
@@ -1987,6 +1978,7 @@ class MainWindow(QMainWindow):
         self.alert_mem = AlertMemory(ALERTS_HISTORY_PATH, max_items=5000)
         self.last_detected_label = ""
         self.sound_enabled = True
+        self.last_detection_ids = {}
 
         # Precompute alert sound once
         self.alert_sound = QSoundEffect()
@@ -2210,18 +2202,22 @@ QToolButton:focus { outline: none; }
         cam = alert.get("camera", "kamera")
         label = alert.get("label", "obiekt")
         self.last_detected_label = label
-        self.log_window.add_entry("detection", cam, "", label)
+        log_id = self.log_window.add_entry("detection", cam, "", label)
+        self.last_detection_ids[cam] = log_id
         cam_cfg = next((c for c in self.cameras if c.get("name") == cam), {})
         if not cam_cfg.get("enable_recording", True):
-            self.log_window.update_last_detection_recording("det_started")
+            self.log_window.update_recording_by_id(log_id, "det_started")
         if self.sound_enabled:
             self.play_alert_sound()
 
     def on_record_event(self, event: str, filepath: str, cam_name: str):
+        log_id = self.last_detection_ids.get(cam_name)
+        if not log_id:
+            return
         if event == "start":
-            self.log_window.update_last_detection_recording("started")
+            self.log_window.update_recording_by_id(log_id, "started")
         elif event == "stop":
-            self.log_window.update_last_detection_recording("finished")
+            self.log_window.update_recording_by_id(log_id, "finished")
 
     # --- Zarządzanie kamerami ---
 
