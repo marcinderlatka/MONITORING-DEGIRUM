@@ -215,6 +215,7 @@ class CameraWorker(QThread):
         self.video_writer = None
         self.output_file = None
         self.frames_since_last_detection = 0
+        self.detection_active = False
         self.stop_signal = False
 
         self.prerecord_buffer = deque(maxlen=int(self.pre_seconds * self.fps))
@@ -338,60 +339,61 @@ class CameraWorker(QThread):
                                 best_score = confidence
                                 best_label = label
 
-                    # Nagrywanie (pre + post)
-                    if detected and self.enable_recording:
-                        if not self.recording:
-                            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                            self.output_file = os.path.join(self.output_dir, f"nagranie_{self.camera['name']}_{timestamp}.mp4")
-                            h, w = self.frame.shape[:2]
-                            self.video_writer = degirum_tools.VideoWriter(self.output_file, w, h, self.fps)
-                            # pre-bufor
-                            for bf in list(self.prerecord_buffer):
-                                self.video_writer.write(bf)
-                            self.recording = True
-                            self.frames_since_last_detection = 0
-                            self.record_signal.emit("start", self.output_file)
-
-                            thumb_path = self.output_file + ".jpg"
-                            try:
-                                cv2.imwrite(thumb_path, self.frame)
-                            except Exception as ex:
-                                print("Nie zapisano miniatury:", ex)
-
+                    # Detection and recording handling
+                    if detected:
+                        if not self.detection_active:
                             alert = {
                                 "camera": self.camera["name"],
                                 "label": best_label or "object",
                                 "confidence": float(best_score),
                                 "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                 "frame": self.frame.copy(),
-                                "filepath": self.output_file,
-                                "thumb": thumb_path,
+                                "filepath": "",
+                                "thumb": "",
                             }
+                            if self.enable_recording:
+                                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                                self.output_file = os.path.join(self.output_dir, f"nagranie_{self.camera['name']}_{timestamp}.mp4")
+                                h, w = self.frame.shape[:2]
+                                self.video_writer = degirum_tools.VideoWriter(self.output_file, w, h, self.fps)
+                                for bf in list(self.prerecord_buffer):
+                                    self.video_writer.write(bf)
+                                self.recording = True
+                                self.frames_since_last_detection = 0
+                                self.record_signal.emit("start", self.output_file)
+                                thumb_path = self.output_file + ".jpg"
+                                try:
+                                    cv2.imwrite(thumb_path, self.frame)
+                                except Exception as ex:
+                                    print("Nie zapisano miniatury:", ex)
+                                alert["filepath"] = self.output_file
+                                alert["thumb"] = thumb_path
+                                meta = {
+                                    "camera": alert["camera"],
+                                    "label": alert["label"],
+                                    "confidence": alert["confidence"],
+                                    "time": alert["time"],
+                                    "file": self.output_file,
+                                    "thumb": thumb_path,
+                                }
+                                try:
+                                    with open(self.output_file + ".json", "w") as f:
+                                        json.dump(meta, f, indent=2)
+                                except Exception as ex:
+                                    print("Nie zapisano metadanych:", ex)
                             self.alert_signal.emit(alert)
-
-                            meta = {
-                                "camera": alert["camera"],
-                                "label": alert["label"],
-                                "confidence": alert["confidence"],
-                                "time": alert["time"],
-                                "file": self.output_file,
-                                "thumb": thumb_path,
-                            }
-                            try:
-                                with open(self.output_file + ".json", "w") as f:
-                                    json.dump(meta, f, indent=2)
-                            except Exception as ex:
-                                print("Nie zapisano metadanych:", ex)
-
+                            self.detection_active = True
                         else:
-                            self.frames_since_last_detection = 0
+                            if self.enable_recording and self.recording:
+                                self.frames_since_last_detection = 0
                     else:
-                        if self.recording:
+                        if self.enable_recording and self.recording:
                             self.frames_since_last_detection += 1
                             if self.frames_since_last_detection >= int(self.post_seconds * self.fps):
                                 self._safe_release_writer()
                                 self.record_signal.emit("stop", self.output_file or "")
                                 self.recording = False
+                        self.detection_active = False
 
                     if self.recording and self.video_writer:
                         self.video_writer.write(self.frame)
@@ -832,22 +834,14 @@ class LogEntryWidget(QFrame):
             lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
             layout.addWidget(lbl)
 
-        date_str = ts
-        time_str = ""
-        weekday_str = ""
+        ts_line = ts
         try:
-            dt = datetime.datetime.strptime(ts, "%Y-%m-%d %H:%M:%S %A")
-            date_str = dt.strftime("%Y-%m-%d")
-            time_str = dt.strftime("%H:%M:%S")
-            weekday_str = dt.strftime("%A").upper()
+            dt = datetime.datetime.strptime(ts, "%A %H:%M:%S %Y-%m-%d")
+            ts_line = dt.strftime("%A %H:%M:%S %Y-%m-%d")
         except Exception:
             pass
 
-        if weekday_str:
-            add_line(weekday_str, "#ff8800")
-        if time_str:
-            add_line(time_str, "#ff8800")
-        add_line(date_str, "#4aa3ff")
+        add_line(ts_line, "#ff8800")
         if camera:
             add_line(camera, "#4aa3ff")
         if detected:
@@ -981,7 +975,7 @@ class LogWindow(QListWidget):
                 continue
             ts_str = entry.get("timestamp")
             try:
-                ts_dt = datetime.datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S %A")
+                ts_dt = datetime.datetime.strptime(ts_str, "%A %H:%M:%S %Y-%m-%d")
             except Exception:
                 continue
             if ts_dt >= cutoff:
@@ -1002,7 +996,7 @@ class LogWindow(QListWidget):
         if group not in allowed:
             return ""
 
-        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S %A")
+        ts = datetime.datetime.now().strftime("%A %H:%M:%S %Y-%m-%d")
         entry_id = uuid.uuid4().hex
         entry = {
             "id": entry_id,
@@ -1019,7 +1013,7 @@ class LogWindow(QListWidget):
         filtered = []
         for e in self.history:
             try:
-                ts_dt = datetime.datetime.strptime(e.get("timestamp", ""), "%Y-%m-%d %H:%M:%S %A")
+                ts_dt = datetime.datetime.strptime(e.get("timestamp", ""), "%A %H:%M:%S %Y-%m-%d")
             except Exception:
                 continue
             if ts_dt >= cutoff:
@@ -1979,6 +1973,7 @@ class MainWindow(QMainWindow):
         self.last_detected_label = ""
         self.sound_enabled = True
         self.last_detection_ids = {}
+        self.active_recording_ids = {}
 
         # Precompute alert sound once
         self.alert_sound = QSoundEffect()
@@ -2211,13 +2206,16 @@ QToolButton:focus { outline: none; }
             self.play_alert_sound()
 
     def on_record_event(self, event: str, filepath: str, cam_name: str):
-        log_id = self.last_detection_ids.get(cam_name)
-        if not log_id:
-            return
         if event == "start":
-            self.log_window.update_recording_by_id(log_id, "started")
+            log_id = self.last_detection_ids.get(cam_name)
+            if log_id:
+                self.active_recording_ids[cam_name] = log_id
+                self.log_window.update_recording_by_id(log_id, "started")
         elif event == "stop":
-            self.log_window.update_recording_by_id(log_id, "finished")
+            log_id = self.active_recording_ids.get(cam_name)
+            if log_id:
+                self.log_window.update_recording_by_id(log_id, "finished")
+                self.active_recording_ids.pop(cam_name, None)
 
     # --- Zarządzanie kamerami ---
 
