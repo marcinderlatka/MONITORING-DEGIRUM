@@ -825,15 +825,37 @@ class LogEntryWidget(QFrame):
         layout.setContentsMargins(10, 5, 10, 5)
         layout.setAlignment(Qt.AlignLeft)
 
-        # Tytuł grupy
+        color = colors.get(group, "#fff")
+
+        dt = None
+        try:
+            dt = datetime.datetime.strptime(ts, "%A %H:%M:%S %Y-%m-%d")
+        except Exception:
+            pass
+
+        # Nagłówek z tytułem i datą
+        header_widget = QWidget()
+        header_layout = QHBoxLayout(header_widget)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setAlignment(Qt.AlignLeft)
+        header_widget.setStyleSheet(f"border-bottom:1px solid {color};")
+
         self.group_label = QLabel(group.upper())
         self.group_label.setAlignment(Qt.AlignLeft)
-        color = colors.get(group, "#fff")
         self.group_label.setStyleSheet(
-            f"color:{color}; font-size:15px; font-weight:600; border-bottom:1px solid {color};"
+            f"color:{color}; font-size:15px; font-weight:600;"
         )
-        self.group_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        layout.addWidget(self.group_label)
+        self.group_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        header_layout.addWidget(self.group_label)
+
+        date_str = dt.strftime("%Y-%m-%d") if dt else ""
+        self.date_label = QLabel(date_str)
+        self.date_label.setAlignment(Qt.AlignLeft)
+        self.date_label.setStyleSheet(f"color:{color}; font-size:15px;")
+        header_layout.addWidget(self.date_label)
+        header_layout.addStretch()
+
+        layout.addWidget(header_widget)
 
         def add_line(text: str, color: str):
             lbl = QLabel(text)
@@ -843,14 +865,20 @@ class LogEntryWidget(QFrame):
             lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
             layout.addWidget(lbl)
 
-        ts_line = ts
-        try:
-            dt = datetime.datetime.strptime(ts, "%A %H:%M:%S %Y-%m-%d")
-            ts_line = dt.strftime("%A %H:%M:%S %Y-%m-%d")
-        except Exception:
-            pass
+        # Wiersz z godziną i dniem tygodnia
+        time_weekday_layout = QHBoxLayout()
+        time_label = QLabel(dt.strftime("%H:%M:%S") if dt else ts)
+        time_label.setAlignment(Qt.AlignLeft)
+        time_label.setStyleSheet("color:#ff8800; font-size:15px;")
+        weekday_str = dt.strftime("%A").capitalize() if dt else ""
+        weekday_label = QLabel(weekday_str)
+        weekday_label.setAlignment(Qt.AlignRight)
+        weekday_label.setStyleSheet("color:#ff8800; font-size:15px;")
+        time_weekday_layout.addWidget(time_label)
+        time_weekday_layout.addStretch()
+        time_weekday_layout.addWidget(weekday_label)
+        layout.addLayout(time_weekday_layout)
 
-        add_line(ts_line, "#ff8800")
         if camera:
             add_line(camera, "#4aa3ff")
         if detected:
