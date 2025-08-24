@@ -5,6 +5,7 @@
         {
             "name": "Kamera 1",
             "rtsp": "rtsp://admin:IBLTSQ@192.168.8.165:554",
+            "type": "rtsp",
             "model": "yolov5nu_silu_coco--640x640_float_tflite_multidevice_1",
             "fps": 1,
             "confidence_threshold": 0.5,

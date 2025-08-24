@@ -79,10 +79,29 @@ def _fill_camera_defaults(cam):
         "record_path": DEFAULT_RECORD_PATH,
         "pre_seconds": DEFAULT_PRE_SECONDS,
         "post_seconds": DEFAULT_POST_SECONDS,
+        "type": "rtsp",
     }
     for k, v in defaults.items():
         cam.setdefault(k, v)
     return cam
+
+
+def list_usb_cameras():
+    """Zwróć listę dostępnych kamer USB jako pary (index, nazwa)."""
+    devices = []
+    for dev in sorted(glob("/dev/video*")):
+        try:
+            idx = int(os.path.basename(dev).replace("video", ""))
+        except ValueError:
+            continue
+        name_path = f"/sys/class/video4linux/video{idx}/name"
+        try:
+            with open(name_path, "r") as f:
+                name = f.read().strip()
+        except Exception:
+            name = f"Kamera {idx}"
+        devices.append((idx, name))
+    return devices
 
 
 def load_config():
@@ -288,9 +307,15 @@ class CameraWorker(QThread):
             try:
                 self.status_signal.emit("Łączenie…", self.index)
                 connected = False
+                src = self.camera.get("rtsp")
+                if self.camera.get("type") == "usb":
+                    try:
+                        src = int(src)
+                    except Exception:
+                        pass
                 for inference_result in degirum_tools.predict_stream(
                     self.model,
-                    self.camera["rtsp"],
+                    src,
                     fps=self.fps,
                     analyzers=False
                 ):
@@ -1713,7 +1738,7 @@ class AddCameraWizard(QDialog):
                     self.btn_next.setText("Dalej")
                 return
         name, url = self.build_rtsp()
-        self.result_data = {"name": name, "rtsp": url}
+        self.result_data = {"name": name, "rtsp": url, "type": "rtsp"}
         self.accept()
 
     def prev_step(self):
@@ -1738,6 +1763,71 @@ class AddCameraWizard(QDialog):
             self.test_status.setStyleSheet("color:#f80;")
 
 
+# --- Dodawanie kamery USB ---
+class AddUsbCameraDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Dodaj kamerę USB")
+        self.resize(400, 200)
+
+        form = QFormLayout(self)
+        self.name_edit = QLineEdit()
+        self.device_combo = QComboBox()
+        for idx, name in list_usb_cameras():
+            self.device_combo.addItem(f"{name} ({idx})", idx)
+        if self.device_combo.count() == 0:
+            self.device_combo.addItem("Brak kamer", -1)
+
+        self.test_btn = QPushButton("Testuj")
+        self.test_status = QLabel("")
+        test_layout = QHBoxLayout()
+        test_layout.addWidget(self.test_btn)
+        test_layout.addWidget(self.test_status)
+
+        btns = QHBoxLayout()
+        self.btn_ok = QPushButton("OK")
+        self.btn_cancel = QPushButton("Anuluj")
+        btns.addStretch(1)
+        btns.addWidget(self.btn_cancel)
+        btns.addWidget(self.btn_ok)
+
+        form.addRow("Nazwa", self.name_edit)
+        form.addRow("Urządzenie", self.device_combo)
+        form.addRow(test_layout)
+        form.addRow(btns)
+
+        self.btn_ok.clicked.connect(self.accept)
+        self.btn_cancel.clicked.connect(self.reject)
+        self.test_btn.clicked.connect(self._test_device)
+
+        self.result_data = None
+
+    def _test_device(self):
+        idx = self.device_combo.currentData()
+        if idx is None or idx < 0:
+            return
+        self.test_status.setText("Testuję...")
+        self.test_status.setStyleSheet("color:#ccc;")
+        cap = cv2.VideoCapture(int(idx))
+        ok, _ = cap.read()
+        cap.release()
+        if ok:
+            self.test_status.setText("✅ OK")
+            self.test_status.setStyleSheet("color:#0f0;")
+        else:
+            self.test_status.setText("⚠️ Błąd")
+            self.test_status.setStyleSheet("color:#f80;")
+
+    def accept(self):
+        name = self.name_edit.text().strip()
+        idx = self.device_combo.currentData()
+        if not name or idx is None or idx < 0:
+            QMessageBox.warning(self, "Błąd", "Podaj nazwę i wybierz urządzenie.")
+            return
+        self.result_data = {"name": name, "rtsp": int(idx), "type": "usb"}
+        super().accept()
+
+
 # --- Ustawienia pojedynczej kamery ---
 class SingleCameraDialog(QDialog):
     def __init__(self, parent=None, camera=None):
@@ -1748,7 +1838,17 @@ class SingleCameraDialog(QDialog):
         form = QFormLayout(self)
 
         self.name_edit = QLineEdit()
+        self.type_combo = QComboBox()
+        self.type_combo.addItems(["rtsp", "usb"])
         self.rtsp_edit = QLineEdit()
+        self.device_combo = QComboBox()
+        for idx, name in list_usb_cameras():
+            self.device_combo.addItem(f"{name} ({idx})", idx)
+        self.source_stack = QStackedWidget()
+        self.source_stack.addWidget(self.rtsp_edit)
+        self.source_stack.addWidget(self.device_combo)
+        self.type_combo.currentTextChanged.connect(self._on_type_change)
+
         self.model_combo = QComboBox()
         try:
             models = [d for d in os.listdir(MODELS_PATH) if os.path.isdir(os.path.join(MODELS_PATH, d))]
@@ -1780,7 +1880,8 @@ class SingleCameraDialog(QDialog):
         path_layout.addWidget(self.btn_path)
 
         form.addRow("Nazwa", self.name_edit)
-        form.addRow("RTSP", self.rtsp_edit)
+        form.addRow("Typ źródła", self.type_combo)
+        form.addRow("Adres/Urządzenie", self.source_stack)
         form.addRow("Model detekcji", self.model_combo)
         form.addRow("FPS", self.fps_spin)
         form.addRow("Próg pewności", self.conf_spin)
@@ -1810,22 +1911,34 @@ class SingleCameraDialog(QDialog):
         self.btn_ok.clicked.connect(self.accept)
         self.btn_cancel.clicked.connect(self.reject)
         self.btn_path.clicked.connect(self._choose_path)
-        self.test_btn.clicked.connect(self._test_rtsp)
+        self.test_btn.clicked.connect(self._test_source)
 
         self.result_camera = None
         if camera:
             self.load_camera(camera)
+        else:
+            self._on_type_change(self.type_combo.currentText())
 
     def _choose_path(self):
         d = QFileDialog.getExistingDirectory(self, "Wybierz folder nagrań", self.path_edit.text() or DEFAULT_RECORD_PATH)
         if d:
             self.path_edit.setText(d)
 
-    def _test_rtsp(self):
-        url = self.rtsp_edit.text().strip()
+    def _on_type_change(self, value):
+        if value == "usb":
+            self.source_stack.setCurrentWidget(self.device_combo)
+        else:
+            self.source_stack.setCurrentWidget(self.rtsp_edit)
+
+    def _test_source(self):
         self.test_status.setText("Testuję...")
         self.test_status.setStyleSheet("color:#ccc;")
-        cap = cv2.VideoCapture(url)
+        if self.type_combo.currentText() == "usb":
+            idx = self.device_combo.currentData()
+            cap = cv2.VideoCapture(int(idx))
+        else:
+            url = self.rtsp_edit.text().strip()
+            cap = cv2.VideoCapture(url)
         ok, _ = cap.read()
         cap.release()
         if ok:
@@ -1838,7 +1951,18 @@ class SingleCameraDialog(QDialog):
     def load_camera(self, cam):
         cam = cam or {}
         self.name_edit.setText(cam.get("name", ""))
-        self.rtsp_edit.setText(cam.get("rtsp", ""))
+        src_type = cam.get("type", "rtsp")
+        self.type_combo.setCurrentText(src_type)
+        if src_type == "usb":
+            idx = int(cam.get("rtsp", 0))
+            # select matching device if present
+            i = self.device_combo.findData(idx)
+            if i >= 0:
+                self.device_combo.setCurrentIndex(i)
+            self.source_stack.setCurrentWidget(self.device_combo)
+        else:
+            self.rtsp_edit.setText(str(cam.get("rtsp", "")))
+            self.source_stack.setCurrentWidget(self.rtsp_edit)
         self.model_combo.setCurrentText(cam.get("model", DEFAULT_MODEL))
         self.fps_spin.setValue(int(cam.get("fps", DEFAULT_FPS)))
         self.conf_spin.setValue(float(cam.get("confidence_threshold", DEFAULT_CONFIDENCE_THRESHOLD)))
@@ -1854,13 +1978,20 @@ class SingleCameraDialog(QDialog):
 
     def accept(self):
         name = self.name_edit.text().strip()
-        url = self.rtsp_edit.text().strip()
-        if not name or not url:
-            QMessageBox.warning(self, "Błąd", "Nazwa i adres RTSP są wymagane")
-            return
+        if self.type_combo.currentText() == "usb":
+            url = int(self.device_combo.currentData())
+            if not name:
+                QMessageBox.warning(self, "Błąd", "Nazwa jest wymagana")
+                return
+        else:
+            url = self.rtsp_edit.text().strip()
+            if not name or not url:
+                QMessageBox.warning(self, "Błąd", "Nazwa i adres RTSP są wymagane")
+                return
         cam = {
             "name": name,
             "rtsp": url,
+            "type": self.type_combo.currentText(),
             "model": self.model_combo.currentText(),
             "fps": int(self.fps_spin.value()),
             "confidence_threshold": float(self.conf_spin.value()),
@@ -1971,7 +2102,7 @@ class CameraSettingsDialog(QDialog):
     def _copy_rtsp(self):
         idx = self.combo.currentIndex()
         if 0 <= idx < len(self.cameras):
-            QApplication.clipboard().setText(self.cameras[idx]["rtsp"], QClipboard.Clipboard)
+            QApplication.clipboard().setText(str(self.cameras[idx]["rtsp"]), QClipboard.Clipboard)
             QMessageBox.information(self, "Skopiowano", "Adres RTSP skopiowany do schowka.")
 
 # --- Dialog listy kamer ---
@@ -2364,6 +2495,21 @@ QToolButton:focus { outline: none; }
             self.restart_workers_and_ui()
             self.log_window.add_entry("settings", f"dodano kamerę {data.get('name')}")
 
+    def add_usb_camera(self):
+        dlg = AddUsbCameraDialog(self)
+        if dlg.exec_():
+            data = dlg.result_data
+            _fill_camera_defaults(data)
+            cfg = load_config()
+            if any(c["name"] == data["name"] for c in self.cameras):
+                QMessageBox.warning(self, "Duplikat", f"Kamera o nazwie '{data['name']}' już istnieje.")
+                return
+            self.cameras.append(data)
+            cfg["cameras"] = self.cameras
+            save_config(cfg)
+            self.restart_workers_and_ui()
+            self.log_window.add_entry("settings", f"dodano kamerę {data.get('name')}")
+
     def camera_settings(self, idx: int):
         cam = self.cameras[idx]
         dlg = SingleCameraDialog(self, cam)
@@ -2449,6 +2595,11 @@ QToolButton:focus { outline: none; }
 
     def test_camera(self, idx: int):
         url = self.cameras[idx]["rtsp"]
+        if self.cameras[idx].get("type") == "usb":
+            try:
+                url = int(url)
+            except Exception:
+                pass
         cap = cv2.VideoCapture(url)
         ok, _ = cap.read()
         cap.release()
@@ -2625,15 +2776,17 @@ class SettingsHub(QDialog):
 
         layout = QVBoxLayout(self)
 
-        btn_add_cam = QPushButton("Dodaj kamerę")
+        btn_add_cam = QPushButton("Dodaj kamerę RTSP")
+        btn_add_usb = QPushButton("Dodaj kamerę USB")
         btn_remove_cam = QPushButton("Usuń kamerę")
         btn_restart = QPushButton("Restart aplikacji")
         btn_close = QPushButton("Zamknij")
 
-        for b in [btn_add_cam, btn_remove_cam, btn_restart, btn_close]:
+        for b in [btn_add_cam, btn_add_usb, btn_remove_cam, btn_restart, btn_close]:
             layout.addWidget(b)
 
         btn_add_cam.clicked.connect(parent.add_camera_wizard)
+        btn_add_usb.clicked.connect(parent.add_usb_camera)
         btn_remove_cam.clicked.connect(parent.remove_camera_dialog)
         btn_restart.clicked.connect(parent.restart_app)
         btn_close.clicked.connect(self.accept)

@@ -1,6 +1,6 @@
 # MONITORING-RTSP
 
-Aplikacja PyQt5 do monitoringu strumieni RTSP z wykorzystaniem modeli DeGirum. 
+Aplikacja PyQt5 do monitoringu strumieni RTSP oraz lokalnych kamer USB z wykorzystaniem modeli DeGirum.
 Program umożliwia podgląd obrazu z wielu kamer, wykrywanie obiektów oraz nagrywanie fragmentów wideo z pre/post‑recordingiem.
 
 ## Wymagania
@@ -19,7 +19,8 @@ Opcja `--windowed` uruchamia aplikację w oknie, brak opcji – w trybie pełnoe
 Plik konfiguracyjny zawiera wyłącznie listę kamer. Każda kamera przechowuje pełny zestaw parametrów:
 
 * `name` – nazwa kamery
-* `rtsp` – adres strumienia RTSP
+* `rtsp` – adres strumienia RTSP lub numer urządzenia lokalnego
+* `type` – rodzaj źródła (`rtsp` lub `usb`)
 * `model` – nazwa modelu DeGirum
 * `record_path` – katalog nagrań
 * `confidence_threshold` – próg pewności wykrycia
@@ -37,6 +38,7 @@ Przykładowa kamera:
 {
   "name": "Kamera 1",
   "rtsp": "rtsp://admin:IBLTSQ@192.168.8.165:554",
+  "type": "rtsp",
   "model": "yolov5nu_silu_coco--640x640_float_tflite_multidevice_1",
   "fps": 1,
   "confidence_threshold": 0.5,
@@ -49,6 +51,15 @@ Przykładowa kamera:
   "record_path": "./nagrania",
   "pre_seconds": 5,
   "post_seconds": 5
+}
+```
+
+Przykładowa kamera USB:
+```json
+{
+  "name": "Kamera USB",
+  "rtsp": 0,
+  "type": "usb"
 }
 ```
 
