@@ -360,7 +360,6 @@ class CameraWorker(QThread):
                                     self.video_writer.write(bf)
                                 self.recording = True
                                 self.frames_since_last_detection = 0
-                                self.record_signal.emit("start", self.output_file)
                                 thumb_path = self.output_file + ".jpg"
                                 try:
                                     cv2.imwrite(thumb_path, self.frame)
@@ -382,6 +381,10 @@ class CameraWorker(QThread):
                                 except Exception as ex:
                                     print("Nie zapisano metadanych:", ex)
                             self.alert_signal.emit(alert)
+                            # Recording start must be signaled after the alert so that the
+                            # corresponding log entry exists when the GUI handles it.
+                            if self.enable_recording:
+                                self.record_signal.emit("start", self.output_file)
                             self.detection_active = True
                         else:
                             if self.enable_recording and self.recording:
@@ -1974,6 +1977,8 @@ class MainWindow(QMainWindow):
         self.sound_enabled = True
         self.last_detection_ids = {}
         self.active_recording_ids = {}
+        # Starts that arrive before their log entry is created
+        self.pending_record_starts = {}
 
         # Precompute alert sound once
         self.alert_sound = QSoundEffect()
@@ -2192,6 +2197,10 @@ QToolButton:focus { outline: none; }
 
     # --- Alerty ---
     def on_new_alert(self, alert: dict):
+        """Handle an incoming detection alert and align recording state.
+
+        A start signal for the same camera may have been received earlier and
+        is stored in ``pending_record_starts`` until a log ID is available."""
         self.alert_list.add_alert(alert)
         self.alert_mem.add(alert)
         cam = alert.get("camera", "kamera")
@@ -2199,6 +2208,11 @@ QToolButton:focus { outline: none; }
         self.last_detected_label = label
         log_id = self.log_window.add_entry("detection", cam, "", label)
         self.last_detection_ids[cam] = log_id
+        # If a recording start came before this alert, finalize the association now
+        if cam in self.pending_record_starts:
+            self.active_recording_ids[cam] = log_id
+            self.log_window.update_recording_by_id(log_id, "started")
+            self.pending_record_starts.pop(cam, None)
         cam_cfg = next((c for c in self.cameras if c.get("name") == cam), {})
         if not cam_cfg.get("enable_recording", True):
             self.log_window.update_recording_by_id(log_id, "det_started")
@@ -2206,16 +2220,26 @@ QToolButton:focus { outline: none; }
             self.play_alert_sound()
 
     def on_record_event(self, event: str, filepath: str, cam_name: str):
+        """Process recording start/stop signals.
+
+        The worker may emit a start before :meth:`on_new_alert` creates the
+        corresponding log entry. Such starts are stored in
+        ``pending_record_starts`` and resolved when the alert arrives.
+        """
         if event == "start":
             log_id = self.last_detection_ids.get(cam_name)
             if log_id:
                 self.active_recording_ids[cam_name] = log_id
                 self.log_window.update_recording_by_id(log_id, "started")
+            else:
+                # Start arrived before alert; remember it until log ID exists
+                self.pending_record_starts[cam_name] = filepath
         elif event == "stop":
-            log_id = self.active_recording_ids.get(cam_name)
+            log_id = self.active_recording_ids.pop(cam_name, None)
             if log_id:
                 self.log_window.update_recording_by_id(log_id, "finished")
-                self.active_recording_ids.pop(cam_name, None)
+            # Clear any pending start for this camera
+            self.pending_record_starts.pop(cam_name, None)
 
     # --- Zarządzanie kamerami ---
 
