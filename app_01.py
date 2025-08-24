@@ -420,6 +420,12 @@ class CameraWorker(QThread):
                     msg = str(e)
                 self.error_signal.emit(msg, self.index)
 
+            # ensure any ongoing recording is properly finalized before reconnecting
+            if self.recording:
+                self.record_signal.emit("stop", self.output_file or "")
+                self._safe_release_writer()
+                self.recording = False
+
             if self.stop_signal:
                 break
             # krótka pauza zanim spróbujemy ponownie (autoreconnect)
