@@ -9,6 +9,8 @@ import datetime
 import numpy as np
 import re
 from collections import deque
+from queue import Queue, Empty
+from threading import Lock
 from glob import glob
 import argparse
 from contextlib import suppress
@@ -62,6 +64,7 @@ DEFAULT_DETECTION_HOURS = "00:00-23:59"
 DEFAULT_RECORD_PATH = "./nagrania"
 DEFAULT_PRE_SECONDS = 5
 DEFAULT_POST_SECONDS = 5
+DEFAULT_LOST_SECONDS = 10
 
 # --- UTIL: Konfiguracja ---
 def _fill_camera_defaults(cam):
@@ -79,6 +82,7 @@ def _fill_camera_defaults(cam):
         "record_path": DEFAULT_RECORD_PATH,
         "pre_seconds": DEFAULT_PRE_SECONDS,
         "post_seconds": DEFAULT_POST_SECONDS,
+        "lost_seconds": DEFAULT_LOST_SECONDS,
         "type": "rtsp",
     }
     for k, v in defaults.items():
@@ -201,6 +205,39 @@ class AlertMemory:
 
 
 # --- BACKEND: Wątek kamery (AI + pre/post record + alerty) ---
+class RecordingThread(QThread):
+    def __init__(self, filepath, width, height, fps):
+        super().__init__()
+        self.filepath = filepath
+        self.width = width
+        self.height = height
+        self.fps = fps
+        self.queue = Queue()
+        self._stop = False
+        self.writer = None
+
+    def run(self):
+        self.writer = degirum_tools.VideoWriter(self.filepath, self.width, self.height, self.fps)
+        while not self._stop or not self.queue.empty():
+            try:
+                frame = self.queue.get(timeout=0.1)
+                self.writer.write(frame)
+            except Empty:
+                pass
+        if self.writer:
+            with suppress(AttributeError):
+                self.writer.release()
+            self.writer = None
+
+    def write(self, frame):
+        if not self._stop:
+            self.queue.put(frame)
+
+    def stop(self):
+        self._stop = True
+        self.wait()
+
+
 class CameraWorker(QThread):
     frame_signal = pyqtSignal(object, int)  # (np.ndarray BGR, index)
     alert_signal = pyqtSignal(object)       # dict z klatką i metadanymi
@@ -231,11 +268,14 @@ class CameraWorker(QThread):
         os.makedirs(self.output_dir, exist_ok=True)
 
         self.recording = False
-        self.video_writer = None
+        self.record_thread = None
         self.output_file = None
-        self.frames_since_last_detection = 0
         self.detection_active = False
         self.stop_signal = False
+        self.lost_seconds = int(self.camera.get("lost_seconds", DEFAULT_LOST_SECONDS))
+        self.record_lock = Lock()
+        self.no_detection_frames = 0
+        self.post_countdown_frames = 0
 
         self.prerecord_buffer = deque(maxlen=int(self.pre_seconds * self.fps))
         self.frame = None
@@ -243,12 +283,19 @@ class CameraWorker(QThread):
         # hot-reload
         self.restart_requested = False
 
-    def _safe_release_writer(self):
-        """Release the video writer if it exists, suppressing attribute errors."""
-        if self.video_writer:
-            with suppress(AttributeError):
-                self.video_writer.release()
-            self.video_writer = None
+    def _stop_recording(self):
+        """Stop the recording thread and release related resources."""
+        if self.record_thread:
+            self.record_thread.stop()
+            self.record_thread = None
+        if self.recording:
+            self.record_signal.emit("stop", self.output_file or "")
+        self.recording = False
+        self.output_file = None
+        if self.record_lock.locked():
+            self.record_lock.release()
+        self.no_detection_frames = 0
+        self.post_countdown_frames = 0
 
     # hot reload API
     def set_confidence(self, thr: float):
@@ -376,15 +423,17 @@ class CameraWorker(QThread):
                                 "filepath": "",
                                 "thumb": "",
                             }
-                            if self.enable_recording:
+                            if self.enable_recording and self.record_lock.acquire(blocking=False):
                                 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                                 self.output_file = os.path.join(self.output_dir, f"nagranie_{self.camera['name']}_{timestamp}.mp4")
                                 h, w = self.frame.shape[:2]
-                                self.video_writer = degirum_tools.VideoWriter(self.output_file, w, h, self.fps)
+                                self.record_thread = RecordingThread(self.output_file, w, h, self.fps)
+                                self.record_thread.start()
                                 for bf in list(self.prerecord_buffer):
-                                    self.video_writer.write(bf)
+                                    self.record_thread.write(bf)
                                 self.recording = True
-                                self.frames_since_last_detection = 0
+                                self.no_detection_frames = 0
+                                self.post_countdown_frames = 0
                                 thumb_path = self.output_file + ".jpg"
                                 try:
                                     cv2.imwrite(thumb_path, self.frame)
@@ -405,26 +454,25 @@ class CameraWorker(QThread):
                                         json.dump(meta, f, indent=2)
                                 except Exception as ex:
                                     print("Nie zapisano metadanych:", ex)
-                            self.alert_signal.emit(alert)
-                            # Recording start must be signaled after the alert so that the
-                            # corresponding log entry exists when the GUI handles it.
-                            if self.enable_recording:
                                 self.record_signal.emit("start", self.output_file)
+                            self.alert_signal.emit(alert)
                             self.detection_active = True
                         else:
-                            if self.enable_recording and self.recording:
-                                self.frames_since_last_detection = 0
+                            if self.recording:
+                                self.no_detection_frames = 0
+                                self.post_countdown_frames = 0
                     else:
-                        if self.enable_recording and self.recording:
-                            self.frames_since_last_detection += 1
-                            if self.frames_since_last_detection >= int(self.post_seconds * self.fps):
-                                self._safe_release_writer()
-                                self.record_signal.emit("stop", self.output_file or "")
-                                self.recording = False
+                        if self.recording:
+                            if self.no_detection_frames < int(self.lost_seconds * self.fps):
+                                self.no_detection_frames += 1
+                            else:
+                                self.post_countdown_frames += 1
+                                if self.post_countdown_frames >= int(self.post_seconds * self.fps):
+                                    self._stop_recording()
                         self.detection_active = False
 
-                    if self.recording and self.video_writer:
-                        self.video_writer.write(self.frame)
+                    if self.recording and self.record_thread:
+                        self.record_thread.write(self.frame)
 
                     self.frame_signal.emit(self.frame, self.index)
 
@@ -447,9 +495,7 @@ class CameraWorker(QThread):
 
             # ensure any ongoing recording is properly finalized before reconnecting
             if self.recording:
-                self.record_signal.emit("stop", self.output_file or "")
-                self._safe_release_writer()
-                self.recording = False
+                self._stop_recording()
 
             if self.stop_signal:
                 break
@@ -458,8 +504,7 @@ class CameraWorker(QThread):
 
         # sprzątanie
         if self.recording:
-            self.record_signal.emit("stop", self.output_file or "")
-        self._safe_release_writer()
+            self._stop_recording()
 
     def stop(self):
         """Request the worker thread to stop and wait for completion.
@@ -474,9 +519,7 @@ class CameraWorker(QThread):
         """
         self.stop_signal = True
         # zwolnij zasoby nagrywania jak najszybciej
-        if self.recording:
-            self.record_signal.emit("stop", self.output_file or "")
-        self._safe_release_writer()
+        self._stop_recording()
         if self.isRunning() and not self.wait(2000):
             # wątek nadal żyje – wymuś zakończenie, aby GUI nie
             # zawiesiło się podczas operacji usuwania
@@ -1872,6 +1915,8 @@ class SingleCameraDialog(QDialog):
         self.btn_path = QPushButton("Wybierz")
         self.pre_spin = QSpinBox()
         self.pre_spin.setRange(0, 60)
+        self.lost_spin = QSpinBox()
+        self.lost_spin.setRange(0, 60)
         self.post_spin = QSpinBox()
         self.post_spin.setRange(0, 60)
 
@@ -1893,6 +1938,7 @@ class SingleCameraDialog(QDialog):
         form.addRow("Klasy nagrywane", self.record_edit)
         form.addRow("Folder nagrań", path_layout)
         form.addRow("Pre seconds", self.pre_spin)
+        form.addRow("Lost seconds", self.lost_spin)
         form.addRow("Post seconds", self.post_spin)
 
         # test rtsp
@@ -1974,6 +2020,7 @@ class SingleCameraDialog(QDialog):
         self.record_edit.setText(",".join(cam.get("record_classes", RECORD_CLASSES)))
         self.path_edit.setText(cam.get("record_path", DEFAULT_RECORD_PATH))
         self.pre_spin.setValue(int(cam.get("pre_seconds", DEFAULT_PRE_SECONDS)))
+        self.lost_spin.setValue(int(cam.get("lost_seconds", DEFAULT_LOST_SECONDS)))
         self.post_spin.setValue(int(cam.get("post_seconds", DEFAULT_POST_SECONDS)))
 
     def accept(self):
@@ -2003,6 +2050,7 @@ class SingleCameraDialog(QDialog):
             "record_classes": [c.strip() for c in self.record_edit.text().split(",") if c.strip()],
             "record_path": self.path_edit.text().strip() or DEFAULT_RECORD_PATH,
             "pre_seconds": int(self.pre_spin.value()),
+            "lost_seconds": int(self.lost_spin.value()),
             "post_seconds": int(self.post_spin.value()),
         }
         self.result_camera = cam
@@ -2544,6 +2592,7 @@ QToolButton:focus { outline: none; }
                     w.visible_classes = list(new_data.get("visible_classes", VISIBLE_CLASSES))
                     w.record_classes = list(new_data.get("record_classes", RECORD_CLASSES))
                     w.pre_seconds = int(new_data.get("pre_seconds", DEFAULT_PRE_SECONDS))
+                    w.lost_seconds = int(new_data.get("lost_seconds", DEFAULT_LOST_SECONDS))
                     w.post_seconds = int(new_data.get("post_seconds", DEFAULT_POST_SECONDS))
                     w.prerecord_buffer = deque(maxlen=int(w.pre_seconds * w.fps))
                     w.output_dir = os.path.join(new_data.get("record_path", DEFAULT_RECORD_PATH), new_data.get("name"))
