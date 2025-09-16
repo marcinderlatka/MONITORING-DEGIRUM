@@ -294,6 +294,7 @@ class CameraWorker(QThread):
         self.output_file = None
         if self.record_lock.locked():
             self.record_lock.release()
+        self.detection_active = False
         self.no_detection_frames = 0
         self.post_countdown_frames = 0
 
@@ -414,6 +415,8 @@ class CameraWorker(QThread):
                     # Detection and recording handling
                     if detected:
                         if not self.detection_active:
+                            self.no_detection_frames = 0
+                            self.post_countdown_frames = 0
                             alert = {
                                 "camera": self.camera["name"],
                                 "label": best_label or "object",
@@ -423,53 +426,69 @@ class CameraWorker(QThread):
                                 "filepath": "",
                                 "thumb": "",
                             }
-                            if self.enable_recording and self.record_lock.acquire(blocking=False):
-                                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                                self.output_file = os.path.join(self.output_dir, f"nagranie_{self.camera['name']}_{timestamp}.mp4")
-                                h, w = self.frame.shape[:2]
-                                self.record_thread = RecordingThread(self.output_file, w, h, self.fps)
-                                self.record_thread.start()
-                                for bf in list(self.prerecord_buffer):
-                                    self.record_thread.write(bf)
-                                self.recording = True
-                                self.no_detection_frames = 0
-                                self.post_countdown_frames = 0
-                                thumb_path = self.output_file + ".jpg"
-                                try:
-                                    cv2.imwrite(thumb_path, self.frame)
-                                except Exception as ex:
-                                    print("Nie zapisano miniatury:", ex)
-                                alert["filepath"] = self.output_file
-                                alert["thumb"] = thumb_path
-                                meta = {
-                                    "camera": alert["camera"],
-                                    "label": alert["label"],
-                                    "confidence": alert["confidence"],
-                                    "time": alert["time"],
-                                    "file": self.output_file,
-                                    "thumb": thumb_path,
-                                }
-                                try:
-                                    with open(self.output_file + ".json", "w") as f:
-                                        json.dump(meta, f, indent=2)
-                                except Exception as ex:
-                                    print("Nie zapisano metadanych:", ex)
-                                self.record_signal.emit("start", self.output_file)
-                            self.alert_signal.emit(alert)
+                            emit_alert = True
+                            if self.enable_recording:
+                                if self.record_lock.acquire(blocking=False):
+                                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                                    self.output_file = os.path.join(self.output_dir, f"nagranie_{self.camera['name']}_{timestamp}.mp4")
+                                    h, w = self.frame.shape[:2]
+                                    self.record_thread = RecordingThread(self.output_file, w, h, self.fps)
+                                    self.record_thread.start()
+                                    for bf in list(self.prerecord_buffer):
+                                        self.record_thread.write(bf)
+                                    self.recording = True
+                                    self.no_detection_frames = 0
+                                    self.post_countdown_frames = 0
+                                    thumb_path = self.output_file + ".jpg"
+                                    try:
+                                        cv2.imwrite(thumb_path, self.frame)
+                                    except Exception as ex:
+                                        print("Nie zapisano miniatury:", ex)
+                                    alert["filepath"] = self.output_file
+                                    alert["thumb"] = thumb_path
+                                    meta = {
+                                        "camera": alert["camera"],
+                                        "label": alert["label"],
+                                        "confidence": alert["confidence"],
+                                        "time": alert["time"],
+                                        "file": self.output_file,
+                                        "thumb": thumb_path,
+                                    }
+                                    try:
+                                        with open(self.output_file + ".json", "w") as f:
+                                            json.dump(meta, f, indent=2)
+                                    except Exception as ex:
+                                        print("Nie zapisano metadanych:", ex)
+                                    self.record_signal.emit("start", self.output_file)
+                                else:
+                                    emit_alert = False
+                            if emit_alert:
+                                self.alert_signal.emit(alert)
                             self.detection_active = True
                         else:
-                            if self.recording:
-                                self.no_detection_frames = 0
-                                self.post_countdown_frames = 0
+                            self.no_detection_frames = 0
+                            self.post_countdown_frames = 0
                     else:
-                        if self.recording:
-                            if self.no_detection_frames < int(self.lost_seconds * self.fps):
-                                self.no_detection_frames += 1
+                        if self.detection_active:
+                            if self.recording:
+                                if self.no_detection_frames < int(self.lost_seconds * self.fps):
+                                    self.no_detection_frames += 1
+                                else:
+                                    self.post_countdown_frames += 1
+                                    if self.post_countdown_frames >= int(self.post_seconds * self.fps):
+                                        self._stop_recording()
                             else:
-                                self.post_countdown_frames += 1
-                                if self.post_countdown_frames >= int(self.post_seconds * self.fps):
-                                    self._stop_recording()
-                        self.detection_active = False
+                                if self.no_detection_frames < int(self.lost_seconds * self.fps):
+                                    self.no_detection_frames += 1
+                                else:
+                                    self.post_countdown_frames += 1
+                                    if self.post_countdown_frames >= int(self.post_seconds * self.fps):
+                                        self.detection_active = False
+                                        self.no_detection_frames = 0
+                                        self.post_countdown_frames = 0
+                        else:
+                            self.no_detection_frames = 0
+                            self.post_countdown_frames = 0
 
                     if self.recording and self.record_thread:
                         self.record_thread.write(self.frame)
