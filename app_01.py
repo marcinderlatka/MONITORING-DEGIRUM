@@ -580,13 +580,22 @@ class CameraListWidgetItem(QWidget):
         self.icon_label.setFixedSize(self.thumb_w, self.thumb_h)
         self.icon_label.setFrameShape(QFrame.NoFrame)
         self.icon_label.setStyleSheet("background: transparent; border: none;")
+        self._placeholder = QPixmap(self.thumb_w, self.thumb_h)
+        self._placeholder.fill(Qt.black)
+        self.icon_label.setPixmap(self._placeholder)
         root.addWidget(self.icon_label, alignment=Qt.AlignCenter)
 
     def set_thumbnail(self, frame):
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        image = cv2.resize(rgb, (self.thumb_w, self.thumb_h), interpolation=cv2.INTER_AREA)
-        qimg = QImage(image.data, self.thumb_w, self.thumb_h, image.strides[0], QImage.Format_RGB888)
-        self.icon_label.setPixmap(QPixmap.fromImage(qimg))
+        if not isinstance(frame, np.ndarray) or frame.size == 0:
+            self.icon_label.setPixmap(self._placeholder)
+            return
+        try:
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            image = cv2.resize(rgb, (self.thumb_w, self.thumb_h), interpolation=cv2.INTER_AREA)
+            qimg = QImage(image.data, self.thumb_w, self.thumb_h, image.strides[0], QImage.Format_RGB888)
+            self.icon_label.setPixmap(QPixmap.fromImage(qimg))
+        except (cv2.error, ValueError, TypeError):
+            self.icon_label.setPixmap(self._placeholder)
 
 class CameraListWidget(QListWidget):
     request_context = pyqtSignal(int, QPoint)
@@ -659,12 +668,22 @@ class CameraGridItem(QWidget):
         layout.addWidget(self.name_label)
 
         self._pixmap = None
+        self._placeholder = QPixmap(320, 180)
+        self._placeholder.fill(Qt.black)
+        self.frame_label.setPixmap(self._placeholder)
 
     def set_frame(self, frame):
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        h, w, ch = rgb.shape
-        qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
-        self._pixmap = QPixmap.fromImage(qimg)
+        if not isinstance(frame, np.ndarray) or frame.size == 0:
+            self._pixmap = self._placeholder
+            self._update_pixmap()
+            return
+        try:
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w, ch = rgb.shape
+            qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
+            self._pixmap = QPixmap.fromImage(qimg)
+        except (cv2.error, ValueError, TypeError):
+            self._pixmap = self._placeholder
         self._update_pixmap()
 
     def _update_pixmap(self):
@@ -2891,6 +2910,22 @@ QToolButton:focus { outline: none; }
         self._render_current()
 
     def update_frame(self, frame, index):
+        is_valid = (
+            isinstance(frame, np.ndarray)
+            and frame.size > 0
+            and frame.ndim >= 2
+            and frame.shape[0] > 0
+            and frame.shape[1] > 0
+        )
+        if not is_valid:
+            self._last_status[index] = "Brak sygnału (pusta klatka)"
+            self._last_error[index] = "Brak sygnału (pusta klatka)"
+            self._last_frame.pop(index, None)
+            self._last_fps_text[index] = ""
+            if index == self.camera_list.currentRow():
+                self._render_current()
+            return
+
         self.camera_list.update_thumbnail(index, frame)
         self.camera_grid.update_frame(index, frame)
 
