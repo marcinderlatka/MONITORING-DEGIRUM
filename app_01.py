@@ -1554,6 +1554,7 @@ class RecordingsScanWorker(QObject, QRunnable):
         self._camera_dirs = list(camera_dirs)
         self._abort = False
         self._history_meta = self._load_history_metadata(history_path)
+        self._seen_abs_paths = set()
 
     def stop(self):
         self._abort = True
@@ -1565,6 +1566,7 @@ class RecordingsScanWorker(QObject, QRunnable):
             self.scanFinished.emit()
 
     def _scan(self):
+        self._seen_abs_paths.clear()
         pattern = re.compile(r"^nagranie_.*\.mp4$", re.IGNORECASE)
         for cam_name, cam_dir in self._camera_dirs:
             if self._abort:
@@ -1583,14 +1585,57 @@ class RecordingsScanWorker(QObject, QRunnable):
                         path = os.path.join(root, name)
                         if not os.path.isfile(path):
                             continue
+                        abs_path = os.path.abspath(path)
+                        if abs_path in self._seen_abs_paths:
+                            continue
+                        self._seen_abs_paths.add(abs_path)
                         meta = self._build_meta(cam_name, path)
                         if self._abort:
                             break
                         self.recordFound.emit(meta)
             except FileNotFoundError:
                 continue
+        if self._abort:
+            return
+        self._emit_catalog_entries()
 
-    def _build_meta(self, cam_name, mp4):
+    def _emit_catalog_entries(self):
+        for item in load_recordings_catalog():
+            if self._abort:
+                break
+            if not isinstance(item, dict):
+                continue
+            path = item.get("filepath") or item.get("file")
+            if not path:
+                continue
+            abs_path = os.path.abspath(path)
+            if abs_path in self._seen_abs_paths:
+                continue
+            cam_name = item.get("camera") or self._camera_name_for_path(path)
+            meta = self._build_meta(cam_name, path, overrides=item)
+            self._seen_abs_paths.add(abs_path)
+            self.recordFound.emit(meta)
+
+    def _camera_name_for_path(self, path):
+        try:
+            abs_path = os.path.abspath(path)
+        except Exception:
+            return ""
+        for name, directory in self._camera_dirs:
+            if not directory:
+                continue
+            try:
+                abs_dir = os.path.abspath(directory)
+            except Exception:
+                continue
+            if abs_path == abs_dir:
+                return name
+            prefix = abs_dir.rstrip(os.sep) + os.sep
+            if abs_path.startswith(prefix):
+                return name
+        return ""
+
+    def _build_meta(self, cam_name, mp4, overrides=None):
         meta_path = mp4 + ".json"
         meta = {
             "camera": cam_name,
@@ -1605,7 +1650,6 @@ class RecordingsScanWorker(QObject, QRunnable):
                 with open(meta_path, "r") as f:
                     m = json.load(f)
                     meta.update(m)
-                meta["file"] = mp4
             except Exception:
                 pass
         elif hist_meta:
@@ -1620,25 +1664,6 @@ class RecordingsScanWorker(QObject, QRunnable):
                     meta["time"] = dt.strftime("%Y-%m-%d %H:%M:%S")
                 except Exception:
                     pass
-        timestamp = None
-        time_value = meta.get("time")
-        if time_value:
-            try:
-                timestamp = datetime.datetime.strptime(time_value, "%Y-%m-%d %H:%M:%S").timestamp()
-            except Exception:
-                timestamp = None
-        if timestamp is None:
-            try:
-                file_ts = float(os.path.getmtime(mp4))
-            except Exception:
-                file_ts = 0.0
-            timestamp = file_ts
-            if not time_value:
-                try:
-                    ts = datetime.datetime.fromtimestamp(file_ts)
-                    meta["time"] = ts.strftime("%Y-%m-%d %H:%M:%S")
-                except Exception:
-                    meta["time"] = ""
         if hist_meta:
             meta.setdefault("thumb", hist_meta.get("thumb", ""))
             meta.setdefault("camera", hist_meta.get("camera", cam_name))
@@ -1651,6 +1676,67 @@ class RecordingsScanWorker(QObject, QRunnable):
                     meta["confidence"] = float(hist_meta.get("confidence", meta.get("confidence", 0.0)))
                 except Exception:
                     pass
+        overrides = overrides or {}
+        path_override = overrides.get("filepath") or overrides.get("file")
+        if path_override:
+            meta["file"] = path_override
+        camera_override = overrides.get("camera")
+        if camera_override:
+            meta["camera"] = camera_override
+        label_override = overrides.get("label")
+        if label_override:
+            meta["label"] = label_override
+        if "confidence" in overrides and overrides.get("confidence") is not None:
+            try:
+                meta["confidence"] = float(overrides.get("confidence"))
+            except Exception:
+                pass
+        time_override = overrides.get("time")
+        if time_override:
+            meta["time"] = time_override
+        thumb_override = overrides.get("thumb")
+        if thumb_override:
+            meta["thumb"] = thumb_override
+        if "timestamp" in overrides and overrides.get("timestamp") is not None:
+            try:
+                meta["timestamp"] = float(overrides.get("timestamp"))
+            except Exception:
+                pass
+
+        meta.setdefault("camera", cam_name)
+        meta["file"] = meta.get("file") or mp4
+        meta["filepath"] = meta.get("file")
+        meta["label"] = meta.get("label") or "unknown"
+        try:
+            meta["confidence"] = float(meta.get("confidence", 0.0))
+        except Exception:
+            meta["confidence"] = 0.0
+
+        timestamp = meta.get("timestamp")
+        if timestamp is not None:
+            try:
+                timestamp = float(timestamp)
+            except Exception:
+                timestamp = None
+        if timestamp is None:
+            time_value = meta.get("time")
+            if time_value:
+                try:
+                    timestamp = datetime.datetime.strptime(time_value, "%Y-%m-%d %H:%M:%S").timestamp()
+                except Exception:
+                    timestamp = None
+            if timestamp is None:
+                try:
+                    file_ts = float(os.path.getmtime(mp4))
+                except Exception:
+                    file_ts = 0.0
+                timestamp = file_ts
+                if not meta.get("time"):
+                    try:
+                        ts = datetime.datetime.fromtimestamp(file_ts)
+                        meta["time"] = ts.strftime("%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        meta["time"] = ""
         meta["timestamp"] = float(timestamp)
         return meta
 
