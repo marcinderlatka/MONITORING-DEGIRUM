@@ -1487,10 +1487,11 @@ class VideoPlayerDialog(QDialog):
 class ThumbnailLoader(QObject, QRunnable):
     thumbnailReady = pyqtSignal(QImage)
 
-    def __init__(self, filepath: str):
+    def __init__(self, filepath: str, thumb_path: str = ""):
         QObject.__init__(self)
         QRunnable.__init__(self)
         self._filepath = filepath or ""
+        self._thumb_path = thumb_path or ""
 
     def run(self):
         qimg = self._load_thumbnail()
@@ -1499,18 +1500,27 @@ class ThumbnailLoader(QObject, QRunnable):
         self.thumbnailReady.emit(qimg)
 
     def _load_thumbnail(self):
-        if not self._filepath:
+        if not self._filepath and not self._thumb_path:
             return None
-        jpg = self._filepath + ".jpg"
-        try:
-            if os.path.exists(jpg):
-                img = cv2.imread(jpg)
-                if img is not None:
-                    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                    h, w, ch = rgb.shape
-                    return QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy()
-        except Exception:
-            pass
+
+        thumb_candidates = []
+        if self._thumb_path:
+            thumb_candidates.append(self._thumb_path)
+        if self._filepath:
+            thumb_candidates.append(self._filepath + ".jpg")
+
+        for candidate in thumb_candidates:
+            if not candidate:
+                continue
+            try:
+                if os.path.exists(candidate):
+                    img = cv2.imread(candidate)
+                    if img is not None:
+                        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                        h, w, ch = rgb.shape
+                        return QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy()
+            except Exception:
+                continue
         if os.path.exists(self._filepath):
             cap = None
             try:
@@ -1740,7 +1750,7 @@ class RecordingItemWidget(QWidget):
 
         self.checkbox.toggled.connect(self._on_checkbox_toggled)
 
-        self._loader = ThumbnailLoader(meta.get("file", ""))
+        self._loader = ThumbnailLoader(meta.get("file", ""), meta.get("thumb", ""))
         self._loader.thumbnailReady.connect(self._apply_thumbnail)
         self._thread_pool.start(self._loader)
 
