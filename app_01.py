@@ -1441,11 +1441,12 @@ class RecordingsScanWorker(QObject, QRunnable):
     recordFound = pyqtSignal(dict)
     scanFinished = pyqtSignal()
 
-    def __init__(self, camera_dirs):
+    def __init__(self, camera_dirs, history_path=ALERTS_HISTORY_PATH):
         QObject.__init__(self)
         QRunnable.__init__(self)
         self._camera_dirs = list(camera_dirs)
         self._abort = False
+        self._history_meta = self._load_history_metadata(history_path)
 
     def stop(self):
         self._abort = True
@@ -1464,16 +1465,18 @@ class RecordingsScanWorker(QObject, QRunnable):
             if not cam_dir or not os.path.isdir(cam_dir):
                 continue
             try:
-                with os.scandir(cam_dir) as entries:
-                    for entry in entries:
+                for root, _dirs, files in os.walk(cam_dir):
+                    if self._abort:
+                        break
+                    for name in files:
                         if self._abort:
                             break
-                        if not entry.is_file():
-                            continue
-                        name = entry.name
                         if not pattern.match(name):
                             continue
-                        meta = self._build_meta(cam_name, entry.path)
+                        path = os.path.join(root, name)
+                        if not os.path.isfile(path):
+                            continue
+                        meta = self._build_meta(cam_name, path)
                         if self._abort:
                             break
                         self.recordFound.emit(meta)
@@ -1489,6 +1492,7 @@ class RecordingsScanWorker(QObject, QRunnable):
             "time": None,
             "file": mp4,
         }
+        hist_meta = self._history_meta.get(os.path.abspath(mp4))
         if os.path.exists(meta_path):
             try:
                 with open(meta_path, "r") as f:
@@ -1497,6 +1501,8 @@ class RecordingsScanWorker(QObject, QRunnable):
                 meta["file"] = mp4
             except Exception:
                 pass
+        elif hist_meta:
+            meta.update(hist_meta)
         else:
             base = os.path.basename(mp4)
             m = re.search(r"_(\d{8})_(\d{6})\.mp4$", base)
@@ -1526,7 +1532,45 @@ class RecordingsScanWorker(QObject, QRunnable):
                     meta["time"] = ts.strftime("%Y-%m-%d %H:%M:%S")
                 except Exception:
                     meta["time"] = ""
+        if hist_meta:
+            meta.setdefault("thumb", hist_meta.get("thumb", ""))
+            meta.setdefault("camera", hist_meta.get("camera", cam_name))
+            if not meta.get("label") or meta.get("label") == "unknown":
+                meta["label"] = hist_meta.get("label", meta.get("label"))
+            if not meta.get("time"):
+                meta["time"] = hist_meta.get("time")
+            if not meta.get("confidence"):
+                try:
+                    meta["confidence"] = float(hist_meta.get("confidence", meta.get("confidence", 0.0)))
+                except Exception:
+                    pass
         meta["timestamp"] = float(timestamp)
+        return meta
+
+    def _load_history_metadata(self, history_path):
+        if not history_path:
+            return {}
+        meta = {}
+        try:
+            if os.path.exists(history_path):
+                with open(history_path, "r") as f:
+                    items = json.load(f)
+                if isinstance(items, list):
+                    for item in items:
+                        if not isinstance(item, dict):
+                            continue
+                        fp = item.get("filepath") or item.get("file")
+                        if not fp:
+                            continue
+                        meta[os.path.abspath(fp)] = {
+                            "camera": item.get("camera", ""),
+                            "label": item.get("label", "unknown"),
+                            "confidence": item.get("confidence", 0.0),
+                            "time": item.get("time", ""),
+                            "thumb": item.get("thumb", ""),
+                        }
+        except Exception as e:
+            print("Nie udało się wczytać historii alertów dla nagrań:", e)
         return meta
 
 
@@ -1592,11 +1636,12 @@ class RecordingItemWidget(QWidget):
 class RecordingsBrowserDialog(QDialog):
     open_video = pyqtSignal(str)
 
-    def __init__(self, camera_dirs, parent=None):
+    def __init__(self, camera_dirs, parent=None, history_path=ALERTS_HISTORY_PATH):
         super().__init__(parent)
         self.setWindowTitle("Nagrania – przeglądarka")
         self.resize(1100, 700)
         self.camera_dirs = list(camera_dirs)
+        self.history_path = history_path
 
         self.scan_pool = QThreadPool()
         self.thumbnail_pool = QThreadPool()
@@ -1707,7 +1752,7 @@ class RecordingsBrowserDialog(QDialog):
         self._visible_paths.clear()
         self.list.clear()
         self.refresh_btn.setEnabled(False)
-        worker = RecordingsScanWorker(self.camera_dirs)
+        worker = RecordingsScanWorker(self.camera_dirs, history_path=self.history_path)
         worker.recordFound.connect(self._on_record_found)
         worker.scanFinished.connect(self._on_scan_finished)
         self._scan_worker = worker
@@ -3127,7 +3172,7 @@ QToolButton:focus { outline: none; }
             record_root = cam.get("record_path") or DEFAULT_RECORD_PATH
             full_dir = os.path.join(record_root, name)
             camera_dirs.append((name, full_dir))
-        dlg = RecordingsBrowserDialog(camera_dirs, self)
+        dlg = RecordingsBrowserDialog(camera_dirs, self, history_path=ALERTS_HISTORY_PATH)
         dlg.open_video.connect(self.open_video_file)
         dlg.exec_()
 
