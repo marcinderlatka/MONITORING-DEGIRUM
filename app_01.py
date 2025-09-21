@@ -18,6 +18,7 @@ import base64
 import io
 import wave
 import uuid
+from bisect import bisect_left
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QListWidget, QListWidgetItem,
@@ -1456,17 +1457,28 @@ class RecordingsScanWorker(QObject, QRunnable):
             self.scanFinished.emit()
 
     def _scan(self):
+        pattern = re.compile(r"^nagranie_.*\.mp4$", re.IGNORECASE)
         for cam_name, cam_dir in self._camera_dirs:
             if self._abort:
                 break
             if not cam_dir or not os.path.isdir(cam_dir):
                 continue
-            files = sorted(glob(os.path.join(cam_dir, "nagranie_*.mp4")), reverse=True)
-            for mp4 in files:
-                if self._abort:
-                    break
-                meta = self._build_meta(cam_name, mp4)
-                self.recordFound.emit(meta)
+            try:
+                with os.scandir(cam_dir) as entries:
+                    for entry in entries:
+                        if self._abort:
+                            break
+                        if not entry.is_file():
+                            continue
+                        name = entry.name
+                        if not pattern.match(name):
+                            continue
+                        meta = self._build_meta(cam_name, entry.path)
+                        if self._abort:
+                            break
+                        self.recordFound.emit(meta)
+            except FileNotFoundError:
+                continue
 
     def _build_meta(self, cam_name, mp4):
         meta_path = mp4 + ".json"
@@ -1495,12 +1507,26 @@ class RecordingsScanWorker(QObject, QRunnable):
                     meta["time"] = dt.strftime("%Y-%m-%d %H:%M:%S")
                 except Exception:
                     pass
-        if not meta.get("time"):
+        timestamp = None
+        time_value = meta.get("time")
+        if time_value:
             try:
-                ts = datetime.datetime.fromtimestamp(os.path.getmtime(mp4))
-                meta["time"] = ts.strftime("%Y-%m-%d %H:%M:%S")
+                timestamp = datetime.datetime.strptime(time_value, "%Y-%m-%d %H:%M:%S").timestamp()
             except Exception:
-                meta["time"] = ""
+                timestamp = None
+        if timestamp is None:
+            try:
+                file_ts = float(os.path.getmtime(mp4))
+            except Exception:
+                file_ts = 0.0
+            timestamp = file_ts
+            if not time_value:
+                try:
+                    ts = datetime.datetime.fromtimestamp(file_ts)
+                    meta["time"] = ts.strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    meta["time"] = ""
+        meta["timestamp"] = float(timestamp)
         return meta
 
 
@@ -1654,6 +1680,9 @@ class RecordingsBrowserDialog(QDialog):
 
         # stan
         self.all_items = []
+        self._all_keys = []
+        self._known_paths = set()
+        self._closing = False
         # Opóźnione wczytywanie listy nagrań, aby okno otwierało się szybciej
         QTimer.singleShot(0, self._initial_load)
 
@@ -1671,7 +1700,10 @@ class RecordingsBrowserDialog(QDialog):
                 self._scan_worker.recordFound.disconnect(self._on_record_found)
             with suppress(TypeError):
                 self._scan_worker.scanFinished.disconnect(self._on_scan_finished)
+        self._closing = False
         self.all_items.clear()
+        self._all_keys.clear()
+        self._known_paths.clear()
         self._visible_paths.clear()
         self.list.clear()
         self.refresh_btn.setEnabled(False)
@@ -1682,16 +1714,50 @@ class RecordingsBrowserDialog(QDialog):
         self.scan_pool.start(worker)
 
     def _on_record_found(self, meta: dict):
-        self.all_items.append(meta)
-        if self._record_matches_filters(meta):
-            self._add_list_item(meta)
+        idx = self._insert_sorted_meta(meta)
+        if idx is None:
+            return
+        filters = self._current_filters()
+        if not self._record_matches_filters(meta, filters):
+            return
+        row = self._count_visible_before(idx, filters)
+        self._add_list_item(meta, row=row)
 
     def _on_scan_finished(self):
-        self.refresh_btn.setEnabled(True)
+        if not self._closing:
+            self.refresh_btn.setEnabled(True)
         self._scan_worker = None
 
     def _clear_selection(self):
         self.list.clearSelection()
+
+    def _meta_sort_key(self, meta):
+        try:
+            ts = float(meta.get("timestamp", 0.0))
+        except (TypeError, ValueError):
+            ts = 0.0
+        return (-ts, meta.get("file", ""))
+
+    def _insert_sorted_meta(self, meta):
+        path = meta.get("file")
+        if path and path in self._known_paths:
+            return None
+        key = self._meta_sort_key(meta)
+        idx = bisect_left(self._all_keys, key)
+        self._all_keys.insert(idx, key)
+        self.all_items.insert(idx, meta)
+        if path:
+            self._known_paths.add(path)
+        return idx
+
+    def _count_visible_before(self, idx, filters):
+        if idx is None:
+            return 0
+        count = 0
+        for meta in self.all_items[:idx]:
+            if self._record_matches_filters(meta, filters):
+                count += 1
+        return count
 
     def _current_filters(self):
         cam_sel = self.camera_filter.currentText()
@@ -1706,12 +1772,20 @@ class RecordingsBrowserDialog(QDialog):
         return cam_sel, cls_sel, qfrom, qto, text
 
     def meta_in_date_range(self, meta, qfrom: QDate, qto: QDate):
+        dt = None
         try:
-            dt = datetime.datetime.strptime(meta.get("time", ""), "%Y-%m-%d %H:%M:%S")
-            d = QDate(dt.year, dt.month, dt.day)
-            return (d >= qfrom) and (d <= qto)
+            ts = meta.get("timestamp")
+            if ts is not None:
+                dt = datetime.datetime.fromtimestamp(float(ts))
         except Exception:
-            return True
+            dt = None
+        if dt is None:
+            try:
+                dt = datetime.datetime.strptime(meta.get("time", ""), "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                return True
+        d = QDate(dt.year, dt.month, dt.day)
+        return (d >= qfrom) and (d <= qto)
 
     def _record_matches_filters(self, meta, filters=None):
         if filters is None:
@@ -1738,7 +1812,7 @@ class RecordingsBrowserDialog(QDialog):
             preselect = meta.get("file") in selected_paths
             self._add_list_item(meta, preselect)
 
-    def _add_list_item(self, meta, preselect=False):
+    def _add_list_item(self, meta, preselect=False, row=None):
         path = meta.get("file")
         if not path or path in self._visible_paths:
             return
@@ -1746,7 +1820,10 @@ class RecordingsBrowserDialog(QDialog):
         item = QListWidgetItem()
         item.setSizeHint(widget.sizeHint())
         item.setData(Qt.UserRole, path)
-        self.list.addItem(item)
+        if row is None or row >= self.list.count():
+            self.list.addItem(item)
+        else:
+            self.list.insertItem(row, item)
         self.list.setItemWidget(item, widget)
         self._visible_paths.add(path)
         widget.selectionToggled.connect(lambda checked, it=item: self._on_widget_toggled(it, checked))
@@ -1813,7 +1890,10 @@ class RecordingsBrowserDialog(QDialog):
                     errors.append(f"{os.path.basename(p)}: {e}")
             deleted += 1
         remaining = set(paths)
-        self.all_items = [m for m in self.all_items if m.get("file") not in remaining]
+        if remaining:
+            self.all_items = [m for m in self.all_items if m.get("file") not in remaining]
+            self._all_keys = [self._meta_sort_key(m) for m in self.all_items]
+            self._known_paths = {m.get("file") for m in self.all_items if m.get("file")}
         self.apply_filters()
         if errors:
             QMessageBox.warning(self, "Usunięto z błędami",
@@ -1839,15 +1919,15 @@ class RecordingsBrowserDialog(QDialog):
             super().keyPressEvent(e)
 
     def closeEvent(self, event):
-        if self._scan_worker is not None:
-            self._scan_worker.stop()
+        self._closing = True
+        worker = self._scan_worker
+        if worker is not None:
+            worker.stop()
             with suppress(TypeError):
-                self._scan_worker.recordFound.disconnect(self._on_record_found)
-            with suppress(TypeError):
-                self._scan_worker.scanFinished.disconnect(self._on_scan_finished)
-            self.scan_pool.waitForDone()
-            self._scan_worker = None
-        self.thumbnail_pool.waitForDone()
+                worker.recordFound.disconnect(self._on_record_found)
+        self._scan_worker = None
+        self.scan_pool.clear()
+        self.thumbnail_pool.clear()
         super().closeEvent(event)
 
 
