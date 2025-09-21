@@ -1206,6 +1206,8 @@ class LogWindow(QListWidget):
                     data = json.load(f)
                     if isinstance(data, list):
                         self.history = data
+                    else:
+                        self.history = []
         except Exception:
             self.history = []
 
