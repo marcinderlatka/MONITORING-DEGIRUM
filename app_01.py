@@ -1421,11 +1421,10 @@ class RecordingsScanWorker(QObject, QRunnable):
     recordFound = pyqtSignal(dict)
     scanFinished = pyqtSignal()
 
-    def __init__(self, base_dir: str, cameras: list):
+    def __init__(self, camera_dirs):
         QObject.__init__(self)
         QRunnable.__init__(self)
-        self._base_dir = base_dir
-        self._cameras = cameras
+        self._camera_dirs = list(camera_dirs)
         self._abort = False
 
     def stop(self):
@@ -1438,25 +1437,22 @@ class RecordingsScanWorker(QObject, QRunnable):
             self.scanFinished.emit()
 
     def _scan(self):
-        if not os.path.isdir(self._base_dir):
-            return
-        for cam in self._cameras:
+        for cam_name, cam_dir in self._camera_dirs:
             if self._abort:
                 break
-            cam_dir = os.path.join(self._base_dir, cam["name"])
-            if not os.path.isdir(cam_dir):
+            if not cam_dir or not os.path.isdir(cam_dir):
                 continue
             files = sorted(glob(os.path.join(cam_dir, "nagranie_*.mp4")), reverse=True)
             for mp4 in files:
                 if self._abort:
                     break
-                meta = self._build_meta(cam, mp4)
+                meta = self._build_meta(cam_name, mp4)
                 self.recordFound.emit(meta)
 
-    def _build_meta(self, cam, mp4):
+    def _build_meta(self, cam_name, mp4):
         meta_path = mp4 + ".json"
         meta = {
-            "camera": cam["name"],
+            "camera": cam_name,
             "label": "unknown",
             "confidence": 0.0,
             "time": None,
@@ -1551,12 +1547,11 @@ class RecordingItemWidget(QWidget):
 class RecordingsBrowserDialog(QDialog):
     open_video = pyqtSignal(str)
 
-    def __init__(self, base_dir, cameras, parent=None):
+    def __init__(self, camera_dirs, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Nagrania – przeglądarka")
         self.resize(1100, 700)
-        self.base_dir = base_dir
-        self.cameras = cameras
+        self.camera_dirs = list(camera_dirs)
 
         self.scan_pool = QThreadPool()
         self.thumbnail_pool = QThreadPool()
@@ -1569,8 +1564,8 @@ class RecordingsBrowserDialog(QDialog):
         filters = QHBoxLayout()
         self.camera_filter = QComboBox()
         self.camera_filter.addItem("Wszystkie kamery")
-        for cam in cameras:
-            self.camera_filter.addItem(cam["name"])
+        for name, _ in self.camera_dirs:
+            self.camera_filter.addItem(name)
 
         self.class_filter = QComboBox()
         self.class_filter.addItem("Wszystkie klasy")
@@ -1661,7 +1656,7 @@ class RecordingsBrowserDialog(QDialog):
         self._visible_paths.clear()
         self.list.clear()
         self.refresh_btn.setEnabled(False)
-        worker = RecordingsScanWorker(self.base_dir, self.cameras)
+        worker = RecordingsScanWorker(self.camera_dirs)
         worker.recordFound.connect(self._on_record_found)
         worker.scanFinished.connect(self._on_scan_finished)
         self._scan_worker = worker
@@ -3011,7 +3006,13 @@ QToolButton:focus { outline: none; }
 
     def open_recordings_browser(self):
         self.log_window.add_entry("application", "otwarto przeglądarkę nagrań")
-        dlg = RecordingsBrowserDialog(self.output_dir, self.cameras, self)
+        camera_dirs = []
+        for cam in self.cameras:
+            name = cam.get("name") or "camera"
+            record_root = cam.get("record_path") or DEFAULT_RECORD_PATH
+            full_dir = os.path.join(record_root, name)
+            camera_dirs.append((name, full_dir))
+        dlg = RecordingsBrowserDialog(camera_dirs, self)
         dlg.open_video.connect(self.open_video_file)
         dlg.exec_()
 
