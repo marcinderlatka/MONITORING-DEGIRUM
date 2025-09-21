@@ -50,6 +50,7 @@ os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = "/usr/lib/x86_64-linux-gnu/qt5/plugi
 CONFIG_PATH = "./config.json"
 MODELS_PATH = "./models"
 ALERTS_HISTORY_PATH = "./alerts_history.json"   # plik historii alertów
+RECORDINGS_CATALOG_PATH = "./recordings_catalog.json"  # plik katalogu nagrań
 LOG_HISTORY_PATH = "./log_history.json"        # plik historii logów
 LOG_RETENTION_HOURS = 48
 
@@ -206,6 +207,97 @@ class AlertMemory:
             return True, None
         except Exception as e:
             return False, str(e)
+
+
+def load_recordings_catalog(path=RECORDINGS_CATALOG_PATH):
+    """Wczytaj katalog nagrań jako listę słowników."""
+    if not path:
+        return []
+    try:
+        if not os.path.exists(path):
+            return []
+        with open(path, "r") as f:
+            data = json.load(f)
+        if not isinstance(data, list):
+            return []
+        cleaned = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            fp = item.get("filepath") or item.get("file")
+            if not fp:
+                continue
+            cleaned.append(item)
+        return cleaned
+    except Exception as e:
+        print("Nie udało się wczytać katalogu nagrań:", e)
+        return []
+
+
+def save_recordings_catalog(entries, path=RECORDINGS_CATALOG_PATH):
+    """Zapisz katalog nagrań."""
+    if path is None:
+        return
+    try:
+        with open(path, "w") as f:
+            json.dump(list(entries or []), f, indent=2)
+    except Exception as e:
+        print("Nie udało się zapisać katalogu nagrań:", e)
+
+
+def update_recordings_catalog(entry, path=RECORDINGS_CATALOG_PATH):
+    """Dodaj lub zaktualizuj wpis w katalogu nagrań."""
+    if not path:
+        return
+    filepath = entry.get("file") or entry.get("filepath")
+    if not filepath:
+        return
+    try:
+        catalog = load_recordings_catalog(path)
+        abs_target = os.path.abspath(filepath)
+        filtered = []
+        for item in catalog:
+            if not isinstance(item, dict):
+                continue
+            fp = item.get("filepath") or item.get("file")
+            if fp and os.path.abspath(fp) == abs_target:
+                continue
+            filtered.append(item)
+        new_entry = dict(entry)
+        new_entry.setdefault("filepath", filepath)
+        filtered.append(new_entry)
+        save_recordings_catalog(filtered, path)
+    except Exception as e:
+        print("Nie udało się zaktualizować katalogu nagrań:", e)
+
+
+def remove_from_recordings_catalog(paths, path=RECORDINGS_CATALOG_PATH):
+    """Usuń wskazane ścieżki z katalogu nagrań."""
+    if not path or not paths:
+        return False
+    try:
+        catalog = load_recordings_catalog(path)
+        if not catalog:
+            return False
+        targets = {os.path.abspath(p) for p in paths if p}
+        if not targets:
+            return False
+        remaining = []
+        removed = False
+        for item in catalog:
+            if not isinstance(item, dict):
+                continue
+            fp = item.get("filepath") or item.get("file")
+            if fp and os.path.abspath(fp) in targets:
+                removed = True
+                continue
+            remaining.append(item)
+        if removed:
+            save_recordings_catalog(remaining, path)
+        return removed
+    except Exception as e:
+        print("Nie udało się zaktualizować katalogu nagrań przy usuwaniu:", e)
+        return False
 
 
 # --- BACKEND: Wątek kamery (AI + pre/post record + alerty) ---
@@ -463,6 +555,9 @@ class CameraWorker(QThread):
                                             json.dump(meta, f, indent=2)
                                     except Exception as ex:
                                         print("Nie zapisano metadanych:", ex)
+                                    catalog_entry = dict(meta)
+                                    catalog_entry.setdefault("filepath", self.output_file)
+                                    update_recordings_catalog(catalog_entry)
                                     self.record_signal.emit("start", self.output_file)
                                 else:
                                     emit_alert = False
@@ -1571,6 +1666,38 @@ class RecordingsScanWorker(QObject, QRunnable):
                         }
         except Exception as e:
             print("Nie udało się wczytać historii alertów dla nagrań:", e)
+        for item in load_recordings_catalog():
+            if not isinstance(item, dict):
+                continue
+            fp = item.get("filepath") or item.get("file")
+            if not fp:
+                continue
+            key = os.path.abspath(fp)
+            existing = meta.get(key, {})
+            combined = dict(existing)
+            camera = item.get("camera")
+            if camera:
+                combined["camera"] = camera
+            label = item.get("label")
+            if label:
+                combined["label"] = label
+            if "confidence" in item:
+                try:
+                    combined["confidence"] = float(item.get("confidence", combined.get("confidence", 0.0)))
+                except Exception:
+                    pass
+            time_value = item.get("time")
+            if time_value:
+                combined["time"] = time_value
+            thumb = item.get("thumb")
+            if thumb:
+                combined["thumb"] = thumb
+            if "timestamp" in item:
+                try:
+                    combined["timestamp"] = float(item.get("timestamp"))
+                except Exception:
+                    pass
+            meta[key] = combined
         return meta
 
 
@@ -1934,6 +2061,7 @@ class RecordingsBrowserDialog(QDialog):
                 except Exception as e:
                     errors.append(f"{os.path.basename(p)}: {e}")
             deleted += 1
+        remove_from_recordings_catalog(paths)
         remaining = set(paths)
         if remaining:
             self.all_items = [m for m in self.all_items if m.get("file") not in remaining]
