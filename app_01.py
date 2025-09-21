@@ -26,7 +26,10 @@ from PyQt5.QtWidgets import (
     QComboBox, QMessageBox, QDateEdit, QLineEdit, QCheckBox, QStackedWidget,
     QSpinBox, QDoubleSpinBox, QToolButton, QStyle, QSizePolicy
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer, QDate, QPoint, QRect, QUrl
+from PyQt5.QtCore import (
+    Qt, QThread, pyqtSignal, QSize, QTimer, QDate, QPoint, QRect, QUrl,
+    QRunnable, QThreadPool, QObject
+)
 from PyQt5.QtGui import QImage, QPixmap, QClipboard, QPainter, QFont, QColor, QIcon
 from PyQt5 import QtSvg
 from PyQt5.QtMultimedia import QSoundEffect
@@ -1362,10 +1365,138 @@ class VideoPlayerDialog(QDialog):
 
 
 # --- Panel „Nagrania” (przeglądarka z filtrami + usuwanie) ---
+
+
+class ThumbnailLoader(QObject, QRunnable):
+    thumbnailReady = pyqtSignal(QImage)
+
+    def __init__(self, filepath: str):
+        QObject.__init__(self)
+        QRunnable.__init__(self)
+        self._filepath = filepath or ""
+
+    def run(self):
+        qimg = self._load_thumbnail()
+        if qimg is None:
+            qimg = QImage()
+        self.thumbnailReady.emit(qimg)
+
+    def _load_thumbnail(self):
+        if not self._filepath:
+            return None
+        jpg = self._filepath + ".jpg"
+        try:
+            if os.path.exists(jpg):
+                img = cv2.imread(jpg)
+                if img is not None:
+                    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                    h, w, ch = rgb.shape
+                    return QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy()
+        except Exception:
+            pass
+        if os.path.exists(self._filepath):
+            cap = None
+            try:
+                cap = cv2.VideoCapture(self._filepath)
+                if cap.isOpened():
+                    ok, frame = cap.read()
+                else:
+                    ok, frame = False, None
+            except Exception:
+                ok, frame = False, None
+            finally:
+                if cap is not None:
+                    cap.release()
+            if ok and frame is not None:
+                try:
+                    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    h, w, ch = rgb.shape
+                    return QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy()
+                except Exception:
+                    return None
+        return None
+
+
+class RecordingsScanWorker(QObject, QRunnable):
+    recordFound = pyqtSignal(dict)
+    scanFinished = pyqtSignal()
+
+    def __init__(self, base_dir: str, cameras: list):
+        QObject.__init__(self)
+        QRunnable.__init__(self)
+        self._base_dir = base_dir
+        self._cameras = cameras
+        self._abort = False
+
+    def stop(self):
+        self._abort = True
+
+    def run(self):
+        try:
+            self._scan()
+        finally:
+            self.scanFinished.emit()
+
+    def _scan(self):
+        if not os.path.isdir(self._base_dir):
+            return
+        for cam in self._cameras:
+            if self._abort:
+                break
+            cam_dir = os.path.join(self._base_dir, cam["name"])
+            if not os.path.isdir(cam_dir):
+                continue
+            files = sorted(glob(os.path.join(cam_dir, "nagranie_*.mp4")), reverse=True)
+            for mp4 in files:
+                if self._abort:
+                    break
+                meta = self._build_meta(cam, mp4)
+                self.recordFound.emit(meta)
+
+    def _build_meta(self, cam, mp4):
+        meta_path = mp4 + ".json"
+        meta = {
+            "camera": cam["name"],
+            "label": "unknown",
+            "confidence": 0.0,
+            "time": None,
+            "file": mp4,
+        }
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r") as f:
+                    m = json.load(f)
+                    meta.update(m)
+                meta["file"] = mp4
+            except Exception:
+                pass
+        else:
+            base = os.path.basename(mp4)
+            m = re.search(r"_(\d{8})_(\d{6})\.mp4$", base)
+            if m:
+                ds, ts = m.group(1), m.group(2)
+                try:
+                    dt = datetime.datetime.strptime(ds + ts, "%Y%m%d%H%M%S")
+                    meta["time"] = dt.strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    pass
+        if not meta.get("time"):
+            try:
+                ts = datetime.datetime.fromtimestamp(os.path.getmtime(mp4))
+                meta["time"] = ts.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                meta["time"] = ""
+        return meta
+
+
 class RecordingItemWidget(QWidget):
-    def __init__(self, meta: dict, thumb_size=(256, 144)):
+    selectionToggled = pyqtSignal(bool)
+
+    def __init__(self, meta: dict, thread_pool: QThreadPool = None, thumb_size=(256, 144)):
         super().__init__()
         self.meta = meta
+        self._thread_pool = thread_pool or QThreadPool.globalInstance()
+        self._thumb_size = thumb_size
         v = QVBoxLayout(self)
         v.setContentsMargins(6, 6, 6, 6)
         v.setAlignment(Qt.AlignCenter)
@@ -1373,6 +1504,9 @@ class RecordingItemWidget(QWidget):
         self.thumb = QLabel()
         self.thumb.setFixedSize(*thumb_size)
         self.thumb.setStyleSheet("border:1px solid #555; background:#111;")
+        placeholder = QPixmap(self.thumb.size())
+        placeholder.fill(Qt.black)
+        self.thumb.setPixmap(placeholder)
         v.addWidget(self.thumb)
 
         cam = meta.get("camera", "?")
@@ -1386,32 +1520,31 @@ class RecordingItemWidget(QWidget):
         self.meta_label.setStyleSheet("padding-top:6px; color:#000;")
         v.addWidget(self.meta_label)
 
-        self.load_thumbnail()
+        self.checkbox = QCheckBox("Zaznacz")
+        self.checkbox.setTristate(False)
+        v.addWidget(self.checkbox, alignment=Qt.AlignCenter)
 
-    def load_thumbnail(self):
-        file = self.meta.get("file", "")
-        jpg = file + ".jpg"
-        pix = None
-        if os.path.exists(jpg):
-            img = cv2.imread(jpg)
-            if img is not None:
-                rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                h, w, ch = rgb.shape
-                qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
-                pix = QPixmap.fromImage(qimg)
-        if pix is None and os.path.exists(file):
-            cap = cv2.VideoCapture(file)
-            ok, frame = cap.read()
-            cap.release()
-            if ok and frame is not None:
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                h, w, ch = rgb.shape
-                qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
-                pix = QPixmap.fromImage(qimg)
-        if pix is None:
-            p = QPixmap(self.thumb.size())
-            p.fill(Qt.black)
-            pix = p
+        self.checkbox.toggled.connect(self._on_checkbox_toggled)
+
+        self._loader = ThumbnailLoader(meta.get("file", ""))
+        self._loader.thumbnailReady.connect(self._apply_thumbnail)
+        self._thread_pool.start(self._loader)
+
+    def _on_checkbox_toggled(self, checked: bool):
+        self.selectionToggled.emit(checked)
+
+    def set_checked(self, checked: bool):
+        block = self.checkbox.blockSignals(True)
+        self.checkbox.setChecked(checked)
+        self.checkbox.blockSignals(block)
+
+    def is_checked(self):
+        return self.checkbox.isChecked()
+
+    def _apply_thumbnail(self, qimg: QImage):
+        if qimg is None or qimg.isNull():
+            return
+        pix = QPixmap.fromImage(qimg)
         self.thumb.setPixmap(pix.scaled(self.thumb.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
 
@@ -1424,6 +1557,11 @@ class RecordingsBrowserDialog(QDialog):
         self.resize(1100, 700)
         self.base_dir = base_dir
         self.cameras = cameras
+
+        self.scan_pool = QThreadPool()
+        self.thumbnail_pool = QThreadPool()
+        self._scan_worker = None
+        self._visible_paths = set()
 
         layout = QVBoxLayout(self)
 
@@ -1452,6 +1590,8 @@ class RecordingsBrowserDialog(QDialog):
 
         self.refresh_btn = QPushButton("Odśwież")
         self.delete_btn = QPushButton("Usuń zaznaczone")
+        self.select_all_btn = QPushButton("Zaznacz wszystko")
+        self.clear_selection_btn = QPushButton("Odznacz wszystko")
 
         filters.addWidget(QLabel("Kamera:"))
         filters.addWidget(self.camera_filter)
@@ -1467,6 +1607,8 @@ class RecordingsBrowserDialog(QDialog):
         filters.addWidget(self.search_text, 2)
         filters.addWidget(self.refresh_btn)
         filters.addWidget(self.delete_btn)
+        filters.addWidget(self.select_all_btn)
+        filters.addWidget(self.clear_selection_btn)
 
         layout.addLayout(filters)
 
@@ -1483,8 +1625,10 @@ class RecordingsBrowserDialog(QDialog):
         layout.addWidget(self.list, 1)
 
         # sygnały
-        self.refresh_btn.clicked.connect(self.apply_filters)
+        self.refresh_btn.clicked.connect(self.refresh)
         self.delete_btn.clicked.connect(self.delete_selected)
+        self.select_all_btn.clicked.connect(self.list.selectAll)
+        self.clear_selection_btn.clicked.connect(self._clear_selection)
         self.camera_filter.currentIndexChanged.connect(self.apply_filters)
         self.class_filter.currentIndexChanged.connect(self.apply_filters)
         self.date_from.dateChanged.connect(self.apply_filters)
@@ -1492,6 +1636,7 @@ class RecordingsBrowserDialog(QDialog):
         self.search_text.textChanged.connect(self.apply_filters)
         self.list.itemDoubleClicked.connect(self.open_selected)
         self.list.customContextMenuRequested.connect(self._context_menu)
+        self.list.itemSelectionChanged.connect(self._sync_selection_with_checkboxes)
 
         # stan
         self.all_items = []
@@ -1499,62 +1644,42 @@ class RecordingsBrowserDialog(QDialog):
         QTimer.singleShot(0, self._initial_load)
 
     def _initial_load(self):
-        """Skanuje pliki i stosuje filtry po zainicjowaniu okna."""
-        self.scan_files()
-        self.apply_filters()
+        """Uruchamia asynchroniczne skanowanie katalogu."""
+        self.refresh()
 
-    def scan_files(self):
+    def refresh(self):
+        self._start_scan_worker()
+
+    def _start_scan_worker(self):
+        if self._scan_worker is not None:
+            self._scan_worker.stop()
+            with suppress(TypeError):
+                self._scan_worker.recordFound.disconnect(self._on_record_found)
+            with suppress(TypeError):
+                self._scan_worker.scanFinished.disconnect(self._on_scan_finished)
         self.all_items.clear()
-        if not os.path.isdir(self.base_dir):
-            return
-        for cam in self.cameras:
-            cam_dir = os.path.join(self.base_dir, cam["name"])
-            if not os.path.isdir(cam_dir):
-                continue
-            for mp4 in sorted(glob(os.path.join(cam_dir, "nagranie_*.mp4")), reverse=True):
-                meta_path = mp4 + ".json"
-                meta = {
-                    "camera": cam["name"],
-                    "label": "unknown",
-                    "confidence": 0.0,
-                    "time": None,
-                    "file": mp4
-                }
-                if os.path.exists(meta_path):
-                    try:
-                        with open(meta_path, "r") as f:
-                            m = json.load(f)
-                            meta.update(m)
-                        meta["file"] = mp4
-                    except Exception:
-                        pass
-                else:
-                    base = os.path.basename(mp4)
-                    m = re.search(r"_(\d{8})_(\d{6})\.mp4$", base)
-                    if m:
-                        ds, ts = m.group(1), m.group(2)
-                        try:
-                            dt = datetime.datetime.strptime(ds + ts, "%Y%m%d%H%M%S")
-                            meta["time"] = dt.strftime("%Y-%m-%d %H:%M:%S")
-                        except Exception:
-                            pass
-                if not meta.get("time"):
-                    try:
-                        ts = datetime.datetime.fromtimestamp(os.path.getmtime(mp4))
-                        meta["time"] = ts.strftime("%Y-%m-%d %H:%M:%S")
-                    except Exception:
-                        meta["time"] = ""
-                self.all_items.append(meta)
+        self._visible_paths.clear()
+        self.list.clear()
+        self.refresh_btn.setEnabled(False)
+        worker = RecordingsScanWorker(self.base_dir, self.cameras)
+        worker.recordFound.connect(self._on_record_found)
+        worker.scanFinished.connect(self._on_scan_finished)
+        self._scan_worker = worker
+        self.scan_pool.start(worker)
 
-    def meta_in_date_range(self, meta, qfrom: QDate, qto: QDate):
-        try:
-            dt = datetime.datetime.strptime(meta.get("time", ""), "%Y-%m-%d %H:%M:%S")
-            d = QDate(dt.year, dt.month, dt.day)
-            return (d >= qfrom) and (d <= qto)
-        except Exception:
-            return True
+    def _on_record_found(self, meta: dict):
+        self.all_items.append(meta)
+        if self._record_matches_filters(meta):
+            self._add_list_item(meta)
 
-    def apply_filters(self):
+    def _on_scan_finished(self):
+        self.refresh_btn.setEnabled(True)
+        self._scan_worker = None
+
+    def _clear_selection(self):
+        self.list.clearSelection()
+
+    def _current_filters(self):
         cam_sel = self.camera_filter.currentText()
         if cam_sel == "Wszystkie kamery":
             cam_sel = None
@@ -1564,24 +1689,72 @@ class RecordingsBrowserDialog(QDialog):
         qfrom = self.date_from.date()
         qto = self.date_to.date()
         text = self.search_text.text().strip().lower()
+        return cam_sel, cls_sel, qfrom, qto, text
 
+    def meta_in_date_range(self, meta, qfrom: QDate, qto: QDate):
+        try:
+            dt = datetime.datetime.strptime(meta.get("time", ""), "%Y-%m-%d %H:%M:%S")
+            d = QDate(dt.year, dt.month, dt.day)
+            return (d >= qfrom) and (d <= qto)
+        except Exception:
+            return True
+
+    def _record_matches_filters(self, meta, filters=None):
+        if filters is None:
+            filters = self._current_filters()
+        cam_sel, cls_sel, qfrom, qto, text = filters
+        if cam_sel and meta.get("camera") != cam_sel:
+            return False
+        if cls_sel and meta.get("label") != cls_sel:
+            return False
+        if not self.meta_in_date_range(meta, qfrom, qto):
+            return False
+        if text and text not in os.path.basename(meta.get("file", "")).lower():
+            return False
+        return True
+
+    def apply_filters(self):
+        selected_paths = self._collect_checked_filepaths()
+        filters = self._current_filters()
         self.list.clear()
-        for meta in self.all_items:
-            if cam_sel and meta.get("camera") != cam_sel:
+        self._visible_paths.clear()
+        for meta in list(self.all_items):
+            if not self._record_matches_filters(meta, filters):
                 continue
-            if cls_sel and meta.get("label") != cls_sel:
-                continue
-            if not self.meta_in_date_range(meta, qfrom, qto):
-                continue
-            if text and text not in os.path.basename(meta.get("file", "")).lower():
-                continue
+            preselect = meta.get("file") in selected_paths
+            self._add_list_item(meta, preselect)
 
-            widget = RecordingItemWidget(meta)
-            item = QListWidgetItem()
-            item.setSizeHint(widget.sizeHint())
-            item.setData(Qt.UserRole, meta.get("file"))
-            self.list.addItem(item)
-            self.list.setItemWidget(item, widget)
+    def _add_list_item(self, meta, preselect=False):
+        path = meta.get("file")
+        if not path or path in self._visible_paths:
+            return
+        widget = RecordingItemWidget(meta, thread_pool=self.thumbnail_pool)
+        item = QListWidgetItem()
+        item.setSizeHint(widget.sizeHint())
+        item.setData(Qt.UserRole, path)
+        self.list.addItem(item)
+        self.list.setItemWidget(item, widget)
+        self._visible_paths.add(path)
+        widget.selectionToggled.connect(lambda checked, it=item: self._on_widget_toggled(it, checked))
+        if preselect:
+            item.setSelected(True)
+        self._update_widget_selection_from_item(item, widget)
+
+    def _update_widget_selection_from_item(self, item: QListWidgetItem, widget: RecordingItemWidget = None):
+        if widget is None:
+            widget = self.list.itemWidget(item)
+        if widget is not None:
+            widget.set_checked(item.isSelected())
+
+    def _on_widget_toggled(self, item: QListWidgetItem, checked: bool):
+        if item is None:
+            return
+        item.setSelected(checked)
+
+    def _sync_selection_with_checkboxes(self):
+        for idx in range(self.list.count()):
+            item = self.list.item(idx)
+            self._update_widget_selection_from_item(item)
 
     def open_selected(self, item: QListWidgetItem):
         fp = item.data(Qt.UserRole)
@@ -1591,8 +1764,20 @@ class RecordingsBrowserDialog(QDialog):
     def _selected_filepaths(self):
         return [i.data(Qt.UserRole) for i in self.list.selectedItems() if i.data(Qt.UserRole)]
 
+    def _collect_checked_filepaths(self):
+        paths = set(self._selected_filepaths())
+        for idx in range(self.list.count()):
+            item = self.list.item(idx)
+            path = item.data(Qt.UserRole)
+            if not path:
+                continue
+            widget = self.list.itemWidget(item)
+            if widget and widget.is_checked():
+                paths.add(path)
+        return list(paths)
+
     def delete_selected(self):
-        paths = self._selected_filepaths()
+        paths = self._collect_checked_filepaths()
         if not paths:
             QMessageBox.information(self, "Usuń nagrania", "Nie wybrano żadnych nagrań.")
             return
@@ -1613,7 +1798,8 @@ class RecordingsBrowserDialog(QDialog):
                 except Exception as e:
                     errors.append(f"{os.path.basename(p)}: {e}")
             deleted += 1
-        self.scan_files()
+        remaining = set(paths)
+        self.all_items = [m for m in self.all_items if m.get("file") not in remaining]
         self.apply_filters()
         if errors:
             QMessageBox.warning(self, "Usunięto z błędami",
@@ -1637,6 +1823,18 @@ class RecordingsBrowserDialog(QDialog):
             self.delete_selected()
         else:
             super().keyPressEvent(e)
+
+    def closeEvent(self, event):
+        if self._scan_worker is not None:
+            self._scan_worker.stop()
+            with suppress(TypeError):
+                self._scan_worker.recordFound.disconnect(self._on_record_found)
+            with suppress(TypeError):
+                self._scan_worker.scanFinished.disconnect(self._on_scan_finished)
+            self.scan_pool.waitForDone()
+            self._scan_worker = None
+        self.thumbnail_pool.waitForDone()
+        super().closeEvent(event)
 
 
 # --- Kreator dodawania/edycji kamery (RTSP krok-po-kroku) ---
