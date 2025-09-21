@@ -29,7 +29,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import (
     Qt, QThread, pyqtSignal, QSize, QTimer, QDate, QPoint, QRect, QUrl,
-    QRunnable, QThreadPool, QObject
+    QRunnable, QThreadPool, QObject, QSignalBlocker
 )
 from PyQt5.QtGui import QImage, QPixmap, QClipboard, QPainter, QFont, QColor, QIcon
 from PyQt5 import QtSvg
@@ -1908,6 +1908,7 @@ class RecordingsBrowserDialog(QDialog):
         self._add_list_item(meta, row=row)
 
     def _on_scan_finished(self):
+        self._update_date_filters_from_items()
         if not self._closing:
             self.refresh_btn.setEnabled(True)
         self._scan_worker = None
@@ -1955,7 +1956,7 @@ class RecordingsBrowserDialog(QDialog):
         text = self.search_text.text().strip().lower()
         return cam_sel, cls_sel, qfrom, qto, text
 
-    def meta_in_date_range(self, meta, qfrom: QDate, qto: QDate):
+    def _meta_to_qdate(self, meta):
         dt = None
         try:
             ts = meta.get("timestamp")
@@ -1967,9 +1968,37 @@ class RecordingsBrowserDialog(QDialog):
             try:
                 dt = datetime.datetime.strptime(meta.get("time", ""), "%Y-%m-%d %H:%M:%S")
             except Exception:
-                return True
-        d = QDate(dt.year, dt.month, dt.day)
+                return None
+        return QDate(dt.year, dt.month, dt.day)
+
+    def meta_in_date_range(self, meta, qfrom: QDate, qto: QDate):
+        d = self._meta_to_qdate(meta)
+        if d is None:
+            return True
         return (d >= qfrom) and (d <= qto)
+
+    def _update_date_filters_from_items(self):
+        if not self.all_items:
+            return
+        dates = [self._meta_to_qdate(meta) for meta in self.all_items]
+        dates = [d for d in dates if d is not None]
+        if not dates:
+            return
+        min_date = min(dates)
+        max_date = max(dates)
+        current_from = self.date_from.date()
+        current_to = self.date_to.date()
+        if current_from == min_date and current_to == max_date:
+            return
+        blocker_from = QSignalBlocker(self.date_from)
+        blocker_to = QSignalBlocker(self.date_to)
+        try:
+            self.date_from.setDate(min_date)
+            self.date_to.setDate(max_date)
+        finally:
+            del blocker_from
+            del blocker_to
+        self.apply_filters()
 
     def _record_matches_filters(self, meta, filters=None):
         if filters is None:
