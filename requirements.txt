@@ -1,0 +1,5 @@
+degirum>=0.8.0
+degirum-tools>=0.8.0
+numpy>=1.24
+opencv-python>=4.7
+PyQt5>=5.15
