@@ -19,7 +19,7 @@ from PyQt5.QtCore import (
     pyqtSignal,
     QObject,
 )
-from PyQt5.QtGui import QIcon, QImage, QPixmap, QPainter, QColor
+from PyQt5.QtGui import QIcon, QImage, QImageReader, QPixmap, QPainter, QColor
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -107,24 +107,11 @@ class ThumbnailWorker(QObject, QRunnable):
         image = self._load_image()
         self.thumbnail_ready.emit(self._entry.filepath, image)
 
-    def _load_image(self) -> QImage:
-        candidates = [self._entry.thumb_path]
-        base, _ext = os.path.splitext(self._entry.filepath)
-        candidates.append(base + ".jpg")
-        candidates.append(self._entry.filepath + ".jpg")
-        candidates.extend([
-            self._entry.filepath.replace(".mp4", suffix)
-            for suffix in ("_thumb.jpg", "_preview.jpg")
-        ])
-
-        for candidate in candidates:
-            if not candidate:
-                continue
-            if os.path.exists(candidate):
-                img = cv2.imread(candidate)
-                if img is None:
-                    continue
-                return self._to_qimage(img)
+    def _load_image(self) -> QImage | QPixmap:
+        for candidate in self._thumbnail_candidates():
+            image = self._load_thumbnail_file(candidate)
+            if image is not None:
+                return image
 
         if os.path.exists(self._entry.filepath):
             cap = cv2.VideoCapture(self._entry.filepath)
@@ -138,6 +125,58 @@ class ThumbnailWorker(QObject, QRunnable):
         placeholder = QImage(self._size.width(), self._size.height(), QImage.Format_RGB32)
         placeholder.fill(Qt.black)
         return placeholder
+
+    def _thumbnail_candidates(self) -> List[str]:
+        candidates: List[str] = []
+        if self._entry.thumb_path:
+            candidates.append(self._entry.thumb_path)
+
+        base, _ext = os.path.splitext(self._entry.filepath)
+        for suffix in (".jpg", ".jpeg", ".JPG", ".JPEG"):
+            candidates.append(f"{base}{suffix}")
+
+        for suffix in (".jpg", ".jpeg", ".JPG", ".JPEG"):
+            candidates.append(f"{self._entry.filepath}{suffix}")
+
+        for replacement in (
+            "_thumb.jpg",
+            "_thumb.jpeg",
+            "_preview.jpg",
+            "_preview.jpeg",
+            "_THUMB.JPG",
+            "_THUMB.JPEG",
+            "_PREVIEW.JPG",
+            "_PREVIEW.JPEG",
+        ):
+            candidates.append(self._entry.filepath.replace(".mp4", replacement))
+
+        seen: set[str] = set()
+        ordered: List[str] = []
+        for candidate in candidates:
+            if not candidate or candidate in seen:
+                continue
+            seen.add(candidate)
+            ordered.append(candidate)
+        return ordered
+
+    def _load_thumbnail_file(self, path: str) -> QImage | QPixmap | None:
+        if not os.path.exists(path):
+            return None
+
+        reader = QImageReader(path)
+        reader.setAutoTransform(True)
+        image = reader.read()
+        if not image.isNull():
+            return image
+
+        pixmap = QPixmap()
+        if pixmap.load(path):
+            return pixmap
+
+        img = cv2.imread(path)
+        if img is None:
+            return None
+        return self._to_qimage(img)
 
     def _extract_preview_frame(self, cap: cv2.VideoCapture) -> Any:
         """Pick a representative non-dark frame from the video if possible."""
