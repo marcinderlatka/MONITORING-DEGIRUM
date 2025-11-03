@@ -270,6 +270,7 @@ class RecordingsBrowserDialog(QDialog):
         self._row_lookup: Dict[str, int] = {}
         self._thumbnail_cache: Dict[str, QPixmap] = {}
         self._pending_thumbnails: set[str] = set()
+        self._thumbnail_workers: Dict[str, ThumbnailWorker] = {}
         self._class_options: Dict[str, str] = {
             cls.casefold(): cls for cls in VISIBLE_CLASSES
         }
@@ -371,6 +372,7 @@ class RecordingsBrowserDialog(QDialog):
         self._row_lookup.clear()
         self._thumbnail_cache.clear()
         self._pending_thumbnails.clear()
+        self._thumbnail_workers.clear()
         self.table.setRowCount(0)
         self.refresh_btn.setEnabled(False)
         self._min_date = None
@@ -657,12 +659,14 @@ class RecordingsBrowserDialog(QDialog):
         worker = ThumbnailWorker(entry, self._thumb_size)
         worker.thumbnail_ready.connect(self._apply_thumbnail)
         self._pending_thumbnails.add(entry.filepath)
+        self._thumbnail_workers[entry.filepath] = worker
         self.thumbnail_pool.start(worker)
 
     def _apply_thumbnail(self, filepath: str, image: QImage | QPixmap) -> None:
         pixmap = self._compose_thumbnail(image)
         self._thumbnail_cache[filepath] = pixmap
         self._pending_thumbnails.discard(filepath)
+        self._thumbnail_workers.pop(filepath, None)
         row = self._row_lookup.get(filepath)
         if row is None:
             return
