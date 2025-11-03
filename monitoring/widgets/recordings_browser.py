@@ -83,9 +83,9 @@ class RecordingsScanTask(QObject, QRunnable):
 
 
 class ThumbnailWorker(QObject, QRunnable):
-    """Asynchronously prepares preview pixmaps for recordings."""
+    """Asynchronously prepares preview images for recordings."""
 
-    thumbnail_ready = pyqtSignal(str, QPixmap)
+    thumbnail_ready = pyqtSignal(str, QImage)
 
     def __init__(self, entry: RecordingMetadata, target_size: QSize):
         super().__init__()
@@ -94,10 +94,10 @@ class ThumbnailWorker(QObject, QRunnable):
         self._size = target_size
 
     def run(self) -> None:  # pragma: no cover - exercised via GUI
-        pixmap = self._load_pixmap()
-        self.thumbnail_ready.emit(self._entry.filepath, pixmap)
+        image = self._load_image()
+        self.thumbnail_ready.emit(self._entry.filepath, image)
 
-    def _load_pixmap(self) -> QPixmap:
+    def _load_image(self) -> QImage:
         candidates = [self._entry.thumb_path]
         candidates.append(self._entry.filepath + ".jpg")
         candidates.extend([
@@ -120,7 +120,7 @@ class ThumbnailWorker(QObject, QRunnable):
                     rgb.strides[0],
                     QImage.Format_RGB888,
                 ).copy()
-                return QPixmap.fromImage(qimg).scaled(
+                return qimg.scaled(
                     self._size,
                     Qt.KeepAspectRatio,
                     Qt.SmoothTransformation,
@@ -141,13 +141,13 @@ class ThumbnailWorker(QObject, QRunnable):
                     rgb.strides[0],
                     QImage.Format_RGB888,
                 ).copy()
-                return QPixmap.fromImage(qimg).scaled(
+                return qimg.scaled(
                     self._size,
                     Qt.KeepAspectRatio,
                     Qt.SmoothTransformation,
                 )
 
-        placeholder = QPixmap(self._size)
+        placeholder = QImage(self._size.width(), self._size.height(), QImage.Format_RGB32)
         placeholder.fill(Qt.black)
         return placeholder
 
@@ -516,12 +516,15 @@ class RecordingsBrowserDialog(QDialog):
         else:
             self._request_thumbnail(entry)
 
-    def _placeholder_icon(self) -> QIcon:
-        if not hasattr(self, "_placeholder_pixmap"):
+    def _placeholder_pixmap(self) -> QPixmap:
+        if not hasattr(self, "_placeholder_pix"):
             pixmap = QPixmap(self._thumb_size)
             pixmap.fill(Qt.black)
-            setattr(self, "_placeholder_pixmap", pixmap)
-        return QIcon(getattr(self, "_placeholder_pixmap"))
+            setattr(self, "_placeholder_pix", pixmap)
+        return getattr(self, "_placeholder_pix")
+
+    def _placeholder_icon(self) -> QIcon:
+        return QIcon(self._placeholder_pixmap())
 
     def _request_thumbnail(self, entry: RecordingMetadata) -> None:
         if entry.filepath in self._pending_thumbnails or entry.filepath in self._thumbnail_cache:
@@ -531,7 +534,13 @@ class RecordingsBrowserDialog(QDialog):
         self._pending_thumbnails.add(entry.filepath)
         self.thumbnail_pool.start(worker)
 
-    def _apply_thumbnail(self, filepath: str, pixmap: QPixmap) -> None:
+    def _apply_thumbnail(self, filepath: str, image: QImage | QPixmap) -> None:
+        if isinstance(image, QImage):
+            pixmap = QPixmap.fromImage(image)
+        else:
+            pixmap = image
+        if pixmap.isNull():
+            pixmap = self._placeholder_pixmap()
         self._thumbnail_cache[filepath] = pixmap
         self._pending_thumbnails.discard(filepath)
         row = self._row_lookup.get(filepath)
