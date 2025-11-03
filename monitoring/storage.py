@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Iterable, List
 
-from .config import ALERTS_HISTORY_PATH, RECORDINGS_CATALOG_PATH
+from .config import ALERTS_HISTORY_PATH, RECORDINGS_CATALOG_PATH, BASE_DIR
 
 
 class AlertMemory:
@@ -80,7 +80,13 @@ def _normalise_catalog_entry(entry: dict) -> dict | None:
     if not filepath:
         return None
     item = dict(entry)
-    item.setdefault("filepath", filepath)
+
+    path = Path(filepath)
+    if not path.is_absolute():
+        path = (BASE_DIR / path).resolve()
+    item["filepath"] = str(path)
+    if "file" in item:
+        item["file"] = str(path)
     return item
 
 

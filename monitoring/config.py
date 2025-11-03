@@ -65,6 +65,12 @@ def fill_camera_defaults(camera: MutableMapping[str, object]) -> MutableMapping[
     }
     for key, value in defaults.items():
         camera.setdefault(key, value)
+
+    # ``record_path`` can be provided as a relative path in the configuration
+    # file.  Normalise it so the rest of the application always works with an
+    # absolute location rooted at :data:`BASE_DIR`.
+    record_path = _resolve_path(camera.get("record_path"), default=DEFAULT_RECORD_PATH)
+    camera["record_path"] = str(record_path)
     return camera
 
 
