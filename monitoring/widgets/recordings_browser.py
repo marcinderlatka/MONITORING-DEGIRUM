@@ -7,7 +7,18 @@ from contextlib import suppress
 from typing import Dict, List, Mapping, Sequence
 
 import cv2
-from PyQt5.QtCore import QDate, QPoint, QRunnable, QSize, Qt, QThreadPool, QTimer, pyqtSignal, QObject
+from PyQt5.QtCore import (
+    QDate,
+    QPoint,
+    QRunnable,
+    QSize,
+    Qt,
+    QThread,
+    QThreadPool,
+    QTimer,
+    pyqtSignal,
+    QObject,
+)
 from PyQt5.QtGui import QIcon, QImage, QPixmap
 from PyQt5.QtWidgets import (
     QAbstractItemView,
@@ -37,8 +48,8 @@ from ..recordings import (
 from ..storage import remove_from_recordings_catalog
 
 
-class RecordingsScanTask(QObject, QRunnable):
-    """Background task that discovers recordings on disk."""
+class RecordingsScanWorker(QObject):
+    """Background worker that discovers recordings on disk."""
 
     record_discovered = pyqtSignal(RecordingMetadata)
     finished = pyqtSignal()
@@ -48,9 +59,8 @@ class RecordingsScanTask(QObject, QRunnable):
         camera_dirs: Sequence[CameraDirectory],
         history_path: str | os.PathLike[str],
         history_items: Sequence[Mapping[str, object]] | Mapping[str, Mapping[str, object]] | None = None,
-    ):
+    ) -> None:
         super().__init__()
-        QRunnable.__init__(self)
         self._camera_dirs = list(camera_dirs)
         self._history_path = history_path
         self._history_items = history_items
@@ -183,9 +193,9 @@ class RecordingsBrowserDialog(QDialog):
         self._max_date: QDate | None = None
 
         self._thumb_size = QSize(256, 144)
-        self.scan_pool = QThreadPool()
+        self.scan_thread: QThread | None = None
+        self._scan_worker: RecordingsScanWorker | None = None
         self.thumbnail_pool = QThreadPool()
-        self._scan_task: RecordingsScanTask | None = None
 
         layout = QVBoxLayout(self)
         layout.addLayout(self._build_filters())
@@ -271,12 +281,7 @@ class RecordingsBrowserDialog(QDialog):
 
     # --------------------------------------------------------------- actions --
     def refresh(self) -> None:
-        if self._scan_task is not None:
-            self._scan_task.stop()
-            with suppress(TypeError):
-                self._scan_task.record_discovered.disconnect(self._on_entry_discovered)
-            with suppress(TypeError):
-                self._scan_task.finished.disconnect(self._on_scan_finished)
+        self._stop_scan_worker()
         self._entries.clear()
         self._entry_keys.clear()
         self._row_lookup.clear()
@@ -287,15 +292,22 @@ class RecordingsBrowserDialog(QDialog):
         self._min_date = None
         self._max_date = None
 
-        task = RecordingsScanTask(
+        worker = RecordingsScanWorker(
             self._camera_dirs,
             self._history_path,
             history_items=self._history_items,
         )
-        task.record_discovered.connect(self._on_entry_discovered)
-        task.finished.connect(self._on_scan_finished)
-        self._scan_task = task
-        self.scan_pool.start(task)
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        worker.record_discovered.connect(self._on_entry_discovered)
+        worker.finished.connect(self._handle_scan_finished)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.started.connect(worker.run)
+        thread.start()
+        self._scan_worker = worker
+        self.scan_thread = thread
 
     def delete_selected(self) -> None:
         paths = self._selected_paths()
@@ -363,8 +375,13 @@ class RecordingsBrowserDialog(QDialog):
 
     def _on_scan_finished(self) -> None:
         self.refresh_btn.setEnabled(True)
-        self._scan_task = None
         self._apply_filters()  # Ensure the latest data respects filters
+
+    def _handle_scan_finished(self) -> None:
+        try:
+            self._on_scan_finished()
+        finally:
+            self._clear_scan_worker()
 
     def _cell_double_clicked(self, row: int, column: int) -> None:
         item = self.table.item(row, 0)
@@ -565,13 +582,22 @@ class RecordingsBrowserDialog(QDialog):
 
     # ------------------------------------------------------------ lifecycle --
     def closeEvent(self, event):  # noqa: D401
-        if self._scan_task is not None:
-            self._scan_task.stop()
-            with suppress(TypeError):
-                self._scan_task.record_discovered.disconnect(self._on_entry_discovered)
-            with suppress(TypeError):
-                self._scan_task.finished.disconnect(self._on_scan_finished)
-        self._scan_task = None
-        self.scan_pool.clear()
+        self._stop_scan_worker(wait=True)
         self.thumbnail_pool.clear()
         super().closeEvent(event)
+
+    # --------------------------------------------------------- scan control --
+    def _stop_scan_worker(self, wait: bool = False) -> None:
+        worker = self._scan_worker
+        thread = self.scan_thread
+        if worker is None or thread is None:
+            return
+        worker.stop()
+        thread.quit()
+        if wait:
+            thread.wait()
+        self._clear_scan_worker()
+
+    def _clear_scan_worker(self) -> None:
+        self._scan_worker = None
+        self.scan_thread = None
