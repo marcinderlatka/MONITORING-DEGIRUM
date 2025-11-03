@@ -3,6 +3,7 @@
 import base64
 import csv
 from collections import deque
+from contextlib import suppress
 import datetime
 import io
 import json
