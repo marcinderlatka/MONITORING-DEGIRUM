@@ -127,17 +127,26 @@ class ThumbnailWorker(QObject, QRunnable):
         return placeholder
 
     def _thumbnail_candidates(self) -> List[str]:
+        def _resolve(path: str) -> List[str]:
+            if not path:
+                return []
+            resolved: List[str] = [path]
+            if not os.path.isabs(path):
+                resolved.append(os.path.join(os.path.dirname(self._entry.filepath), path))
+            return [os.path.abspath(p) for p in resolved]
+
         candidates: List[str] = []
         if self._entry.thumb_path:
-            candidates.append(self._entry.thumb_path)
+            candidates.extend(_resolve(self._entry.thumb_path))
 
         base, _ext = os.path.splitext(self._entry.filepath)
         for suffix in (".jpg", ".jpeg", ".JPG", ".JPEG"):
-            candidates.append(f"{base}{suffix}")
+            candidates.append(os.path.abspath(f"{base}{suffix}"))
 
         for suffix in (".jpg", ".jpeg", ".JPG", ".JPEG"):
-            candidates.append(f"{self._entry.filepath}{suffix}")
+            candidates.append(os.path.abspath(f"{self._entry.filepath}{suffix}"))
 
+        stem, ext = os.path.splitext(self._entry.filepath)
         for replacement in (
             "_thumb.jpg",
             "_thumb.jpeg",
@@ -148,7 +157,8 @@ class ThumbnailWorker(QObject, QRunnable):
             "_PREVIEW.JPG",
             "_PREVIEW.JPEG",
         ):
-            candidates.append(self._entry.filepath.replace(".mp4", replacement))
+            if ext:
+                candidates.append(os.path.abspath(f"{stem}{replacement}"))
 
         seen: set[str] = set()
         ordered: List[str] = []
