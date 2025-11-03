@@ -320,17 +320,18 @@ class ThumbnailLoader(QObject, QRunnable):
             thumb_candidates.append(self._filepath + ".jpg")
 
         for candidate in thumb_candidates:
-            if not candidate:
-                continue
-            try:
-                if os.path.exists(candidate):
-                    img = cv2.imread(candidate)
-                    if img is not None:
-                        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                        h, w, ch = rgb.shape
-                        return QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy()
-            except Exception:
-                continue
+            for resolved in self._candidate_paths(candidate):
+                if not resolved:
+                    continue
+                try:
+                    if os.path.exists(resolved):
+                        img = cv2.imread(resolved)
+                        if img is not None:
+                            rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                            h, w, ch = rgb.shape
+                            return QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy()
+                except Exception:
+                    continue
         if os.path.exists(self._filepath):
             cap = None
             try:
@@ -352,6 +353,16 @@ class ThumbnailLoader(QObject, QRunnable):
                 except Exception:
                     return None
         return None
+
+    def _candidate_paths(self, candidate: str):
+        if not candidate:
+            return []
+        paths = [candidate]
+        if not os.path.isabs(candidate) and self._filepath:
+            base = os.path.dirname(self._filepath)
+            if base:
+                paths.append(os.path.join(base, candidate))
+        return paths
 
 
 class RecordingsScanWorker(QObject, QRunnable):
@@ -616,6 +627,8 @@ class RecordingItemWidget(QWidget):
         self.meta = meta
         self._thread_pool = thread_pool or QThreadPool.globalInstance()
         self._thumb_size = thumb_size
+        self._video_path = meta.get("filepath") or meta.get("file") or ""
+        self._thumb_path = meta.get("thumb", "")
         v = QVBoxLayout(self)
         v.setContentsMargins(6, 6, 6, 6)
         v.setAlignment(Qt.AlignCenter)
@@ -632,7 +645,7 @@ class RecordingItemWidget(QWidget):
         lbl = meta.get("label", "object")
         conf = float(meta.get("confidence", 0.0)) * 100.0
         ts = meta.get("time", "--:--:--")
-        name = os.path.basename(meta.get("file", ""))
+        name = os.path.basename(self._video_path)
 
         self.meta_label = QLabel(f"{cam} | {ts}\n{lbl} ({conf:.1f}%)\n{name}")
         self.meta_label.setAlignment(Qt.AlignCenter)
@@ -645,9 +658,53 @@ class RecordingItemWidget(QWidget):
 
         self.checkbox.toggled.connect(self._on_checkbox_toggled)
 
-        self._loader = ThumbnailLoader(meta.get("file", ""), meta.get("thumb", ""))
-        self._loader.thumbnailReady.connect(self._apply_thumbnail)
-        self._thread_pool.start(self._loader)
+        self._loader = None
+        if not self._load_initial_thumbnail():
+            self._loader = ThumbnailLoader(self._video_path, self._thumb_path)
+            self._loader.thumbnailReady.connect(self._apply_thumbnail)
+            self._thread_pool.start(self._loader)
+
+    def _load_initial_thumbnail(self) -> bool:
+        frame = self.meta.get("frame")
+        if frame is not None:
+            self._apply_frame(frame)
+            return True
+
+        candidates = []
+        if self._thumb_path:
+            candidates.append(self._thumb_path)
+        if self._video_path:
+            candidates.append(self._video_path + ".jpg")
+
+        for candidate in candidates:
+            for resolved in self._resolve_candidate_paths(candidate):
+                if not resolved or not os.path.exists(resolved):
+                    continue
+                image = cv2.imread(resolved)
+                if image is None:
+                    continue
+                self._apply_frame(image)
+                return True
+        return False
+
+    def _resolve_candidate_paths(self, candidate: str):
+        if not candidate:
+            return []
+        paths = [candidate]
+        if not os.path.isabs(candidate) and self._video_path:
+            base = os.path.dirname(self._video_path)
+            if base:
+                paths.append(os.path.join(base, candidate))
+        return paths
+
+    def _apply_frame(self, frame):
+        try:
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        except Exception:
+            return
+        h, w, ch = rgb.shape
+        qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy()
+        self._apply_thumbnail(qimg)
 
     def _on_checkbox_toggled(self, checked: bool):
         self.selectionToggled.emit(checked)
@@ -917,11 +974,12 @@ class RecordingsBrowserDialog(QDialog):
         for meta in list(self.all_items):
             if not self._record_matches_filters(meta, filters):
                 continue
-            preselect = meta.get("file") in selected_paths
+            selected_path = meta.get("filepath") or meta.get("file")
+            preselect = selected_path in selected_paths if selected_path else False
             self._add_list_item(meta, preselect)
 
     def _add_list_item(self, meta, preselect=False, row=None):
-        path = meta.get("file")
+        path = meta.get("filepath") or meta.get("file")
         if not path or path in self._visible_paths:
             return
         widget = RecordingItemWidget(meta, thread_pool=self.thumbnail_pool)
@@ -957,6 +1015,10 @@ class RecordingsBrowserDialog(QDialog):
 
     def open_selected(self, item: QListWidgetItem):
         fp = item.data(Qt.UserRole)
+        if not fp:
+            widget = self.list.itemWidget(item)
+            if widget is not None:
+                fp = widget.meta.get("filepath") or widget.meta.get("file")
         if fp and os.path.exists(fp):
             self.open_video.emit(fp)
 
