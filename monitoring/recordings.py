@@ -14,7 +14,7 @@ import datetime as _dt
 import json
 import os
 from pathlib import Path
-from typing import Dict, Iterator, List, Mapping, MutableMapping, Optional, Sequence, Tuple
+from typing import Dict, Iterable, Iterator, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
 from .storage import load_recordings_catalog
 
@@ -40,25 +40,34 @@ class RecordingMetadata:
 CameraDirectory = Tuple[str, str]
 
 
-def load_history_metadata(history_path: Path | str) -> Dict[str, Dict[str, object]]:
+HistorySource = Path | str | Sequence[Mapping[str, object]] | Mapping[str, Mapping[str, object]]
+
+
+def _iter_history_items(payload: object) -> Iterable[Mapping[str, object]]:
+    if isinstance(payload, Mapping):
+        return (item for item in payload.values() if isinstance(item, Mapping))
+    if isinstance(payload, Sequence) and not isinstance(payload, (str, bytes, bytearray)):
+        return (item for item in payload if isinstance(item, Mapping))
+    return ()
+
+
+def load_history_metadata(history_path: HistorySource) -> Dict[str, Dict[str, object]]:
     """Load alert history metadata indexed by absolute file path."""
 
     metadata: Dict[str, Dict[str, object]] = {}
-    path = Path(history_path)
-    if not path.exists():
-        return metadata
 
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return metadata
+    if isinstance(history_path, (str, os.PathLike)):
+        path = Path(history_path)
+        if not path.exists():
+            return metadata
+        try:
+            payload: object = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return metadata
+    else:
+        payload = history_path
 
-    if not isinstance(payload, list):
-        return metadata
-
-    for item in payload:
-        if not isinstance(item, Mapping):
-            continue
+    for item in _iter_history_items(payload):
         fp = item.get("filepath") or item.get("file")
         if not fp:
             continue
