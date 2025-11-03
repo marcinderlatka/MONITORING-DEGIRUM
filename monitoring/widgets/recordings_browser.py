@@ -7,6 +7,7 @@ from contextlib import suppress
 from typing import Any, Dict, List, Mapping, Sequence
 
 import cv2
+import numpy as np
 from PyQt5.QtCore import (
     QDate,
     QPoint,
@@ -19,7 +20,7 @@ from PyQt5.QtCore import (
     pyqtSignal,
     QObject,
 )
-from PyQt5.QtGui import QIcon, QImage, QImageReader, QPixmap, QPainter, QColor
+from PyQt5.QtGui import QIcon, QImage, QPixmap, QPainter, QColor
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -95,7 +96,7 @@ class RecordingsScanWorker(QObject):
 class ThumbnailWorker(QObject, QRunnable):
     """Asynchronously prepares preview images for recordings."""
 
-    thumbnail_ready = pyqtSignal(str, QImage)
+    thumbnail_ready = pyqtSignal(str, object)
 
     def __init__(self, entry: RecordingMetadata, target_size: QSize):
         super().__init__()
@@ -104,10 +105,10 @@ class ThumbnailWorker(QObject, QRunnable):
         self._size = target_size
 
     def run(self) -> None:  # pragma: no cover - exercised via GUI
-        image = self._load_image()
-        self.thumbnail_ready.emit(self._entry.filepath, image)
+        frame = self._load_image()
+        self.thumbnail_ready.emit(self._entry.filepath, frame)
 
-    def _load_image(self) -> QImage | QPixmap:
+    def _load_image(self) -> np.ndarray | None:
         for candidate in self._thumbnail_candidates():
             image = self._load_thumbnail_file(candidate)
             if image is not None:
@@ -120,11 +121,9 @@ class ThumbnailWorker(QObject, QRunnable):
             finally:
                 cap.release()
             if frame is not None:
-                return self._to_qimage(frame)
+                return frame
 
-        placeholder = QImage(self._size.width(), self._size.height(), QImage.Format_RGB32)
-        placeholder.fill(Qt.black)
-        return placeholder
+        return None
 
     def _thumbnail_candidates(self) -> List[str]:
         def _resolve(path: str) -> List[str]:
@@ -169,11 +168,12 @@ class ThumbnailWorker(QObject, QRunnable):
             ordered.append(candidate)
         return ordered
 
-    def _load_thumbnail_file(self, path: str) -> QImage | QPixmap | None:
+    def _load_thumbnail_file(self, path: str) -> np.ndarray | None:
         if not os.path.exists(path):
             return None
 
         img = cv2.imread(path)
+        return img if img is not None else None
         if img is not None:
             return self._to_qimage(img)
 
@@ -229,21 +229,6 @@ class ThumbnailWorker(QObject, QRunnable):
     def _is_dark(frame: Any) -> bool:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         return float(cv2.mean(gray)[0]) < 12.0
-
-    def _to_qimage(self, frame: Any) -> QImage:
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        qimg = QImage(
-            rgb.data,
-            rgb.shape[1],
-            rgb.shape[0],
-            rgb.strides[0],
-            QImage.Format_RGB888,
-        ).copy()
-        return qimg.scaled(
-            self._size,
-            Qt.KeepAspectRatio,
-            Qt.SmoothTransformation,
-        )
 
 
 class RecordingsBrowserDialog(QDialog):
@@ -635,6 +620,14 @@ class RecordingsBrowserDialog(QDialog):
             setattr(self, "_placeholder_pix", pixmap)
         return getattr(self, "_placeholder_pix")
 
+    def _request_thumbnail(self, entry: RecordingMetadata) -> None:
+        if entry.filepath in self._pending_thumbnails or entry.filepath in self._thumbnail_cache:
+            return
+        worker = ThumbnailWorker(entry, self._thumb_size)
+        worker.thumbnail_ready.connect(self._apply_thumbnail)
+        self._pending_thumbnails.add(entry.filepath)
+        self._thumbnail_workers[entry.filepath] = worker
+        self.thumbnail_pool.start(worker)
     def _compose_thumbnail(self, source: QImage | QPixmap) -> QPixmap:
         if isinstance(source, QImage):
             pixmap = QPixmap.fromImage(source)
@@ -643,6 +636,12 @@ class RecordingsBrowserDialog(QDialog):
         if pixmap.isNull():
             return self._placeholder_pixmap()
 
+    def _pixmap_from_frame(self, frame: np.ndarray) -> QPixmap:
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        height, width, channels = rgb.shape
+        bytes_per_line = channels * width
+        qimg = QImage(rgb.data, width, height, bytes_per_line, QImage.Format_RGB888)
+        pixmap = QPixmap.fromImage(qimg)
         scaled = pixmap.scaled(
             self._thumb_size,
             Qt.KeepAspectRatio,
@@ -659,6 +658,12 @@ class RecordingsBrowserDialog(QDialog):
             painter.end()
         return canvas
 
+    def _apply_thumbnail(self, filepath: str, frame: object) -> None:
+        pixmap = self._placeholder_pixmap()
+        if isinstance(frame, QPixmap) and not frame.isNull():
+            pixmap = frame
+        elif isinstance(frame, np.ndarray) and frame.size:
+            pixmap = self._pixmap_from_frame(frame)
     def _request_thumbnail(self, entry: RecordingMetadata) -> None:
         if entry.filepath in self._pending_thumbnails or entry.filepath in self._thumbnail_cache:
             return
