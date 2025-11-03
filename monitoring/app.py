@@ -31,6 +31,7 @@ from PyQt5.QtCore import (
     QUrl,
     Qt,
     QTimer,
+    QSize,
     pyqtSignal,
 )
 from PyQt5.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPixmap, QClipboard
