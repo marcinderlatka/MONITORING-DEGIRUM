@@ -271,6 +271,7 @@ class RecordingsBrowserDialog(QDialog):
         self._thumbnail_cache: Dict[str, QPixmap] = {}
         self._pending_thumbnails: set[str] = set()
         self._thumbnail_workers: Dict[str, ThumbnailWorker] = {}
+        self._thumbnail_labels: Dict[str, QLabel] = {}
         self._class_options: Dict[str, str] = {
             cls.casefold(): cls for cls in VISIBLE_CLASSES
         }
@@ -373,6 +374,7 @@ class RecordingsBrowserDialog(QDialog):
         self._thumbnail_cache.clear()
         self._pending_thumbnails.clear()
         self._thumbnail_workers.clear()
+        self._thumbnail_labels.clear()
         self.table.setRowCount(0)
         self.refresh_btn.setEnabled(False)
         self._min_date = None
@@ -590,8 +592,15 @@ class RecordingsBrowserDialog(QDialog):
         thumb_item = QTableWidgetItem()
         thumb_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
         thumb_item.setData(Qt.UserRole, entry.filepath)
-        thumb_item.setIcon(self._placeholder_icon())
         self.table.setItem(row, 0, thumb_item)
+
+        thumb_label = QLabel()
+        thumb_label.setFixedSize(self._thumb_size)
+        thumb_label.setAlignment(Qt.AlignCenter)
+        thumb_label.setStyleSheet("border:1px solid #555; background:#111;")
+        thumb_label.setPixmap(self._placeholder_pixmap())
+        self.table.setCellWidget(row, 0, thumb_label)
+        self._thumbnail_labels[entry.filepath] = thumb_label
 
         time_item = QTableWidgetItem(entry.display_time)
         time_item.setData(Qt.UserRole, entry.filepath)
@@ -625,9 +634,6 @@ class RecordingsBrowserDialog(QDialog):
             pixmap.fill(QColor("#111111"))
             setattr(self, "_placeholder_pix", pixmap)
         return getattr(self, "_placeholder_pix")
-
-    def _placeholder_icon(self) -> QIcon:
-        return QIcon(self._placeholder_pixmap())
 
     def _compose_thumbnail(self, source: QImage | QPixmap) -> QPixmap:
         if isinstance(source, QImage):
@@ -671,9 +677,11 @@ class RecordingsBrowserDialog(QDialog):
         if row is None:
             return
         item = self.table.item(row, 0)
-        if item is None:
-            return
-        item.setIcon(QIcon(pixmap))
+        if item is not None:
+            item.setIcon(QIcon(pixmap))
+        label = self._thumbnail_labels.get(filepath)
+        if label is not None:
+            label.setPixmap(pixmap)
 
     def _apply_filters(self) -> None:
         if not self._entries:
@@ -683,6 +691,7 @@ class RecordingsBrowserDialog(QDialog):
 
         self.table.setRowCount(0)
         self._row_lookup.clear()
+        self._thumbnail_labels.clear()
         for entry in self._entries:
             if self._matches_filters(entry):
                 self._insert_row(entry)
