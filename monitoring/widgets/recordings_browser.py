@@ -163,6 +163,10 @@ class ThumbnailWorker(QObject, QRunnable):
         if not os.path.exists(path):
             return None
 
+        img = cv2.imread(path)
+        if img is not None:
+            return self._to_qimage(img)
+
         reader = QImageReader(path)
         reader.setAutoTransform(True)
         image = reader.read()
@@ -173,10 +177,7 @@ class ThumbnailWorker(QObject, QRunnable):
         if pixmap.load(path):
             return pixmap
 
-        img = cv2.imread(path)
-        if img is None:
-            return None
-        return self._to_qimage(img)
+        return None
 
     def _extract_preview_frame(self, cap: cv2.VideoCapture) -> Any:
         """Pick a representative non-dark frame from the video if possible."""
