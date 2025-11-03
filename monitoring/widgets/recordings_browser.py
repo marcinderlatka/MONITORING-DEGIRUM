@@ -174,6 +174,20 @@ class ThumbnailWorker(QObject, QRunnable):
 
         img = cv2.imread(path)
         return img if img is not None else None
+        if img is not None:
+            return self._to_qimage(img)
+
+        reader = QImageReader(path)
+        reader.setAutoTransform(True)
+        image = reader.read()
+        if not image.isNull():
+            return image
+
+        pixmap = QPixmap()
+        if pixmap.load(path):
+            return pixmap
+
+        return None
 
     def _extract_preview_frame(self, cap: cv2.VideoCapture) -> Any:
         """Pick a representative non-dark frame from the video if possible."""
@@ -614,6 +628,13 @@ class RecordingsBrowserDialog(QDialog):
         self._pending_thumbnails.add(entry.filepath)
         self._thumbnail_workers[entry.filepath] = worker
         self.thumbnail_pool.start(worker)
+    def _compose_thumbnail(self, source: QImage | QPixmap) -> QPixmap:
+        if isinstance(source, QImage):
+            pixmap = QPixmap.fromImage(source)
+        else:
+            pixmap = source
+        if pixmap.isNull():
+            return self._placeholder_pixmap()
 
     def _pixmap_from_frame(self, frame: np.ndarray) -> QPixmap:
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -643,6 +664,17 @@ class RecordingsBrowserDialog(QDialog):
             pixmap = frame
         elif isinstance(frame, np.ndarray) and frame.size:
             pixmap = self._pixmap_from_frame(frame)
+    def _request_thumbnail(self, entry: RecordingMetadata) -> None:
+        if entry.filepath in self._pending_thumbnails or entry.filepath in self._thumbnail_cache:
+            return
+        worker = ThumbnailWorker(entry, self._thumb_size)
+        worker.thumbnail_ready.connect(self._apply_thumbnail)
+        self._pending_thumbnails.add(entry.filepath)
+        self._thumbnail_workers[entry.filepath] = worker
+        self.thumbnail_pool.start(worker)
+
+    def _apply_thumbnail(self, filepath: str, image: QImage | QPixmap) -> None:
+        pixmap = self._compose_thumbnail(image)
         self._thumbnail_cache[filepath] = pixmap
         self._pending_thumbnails.discard(filepath)
         self._thumbnail_workers.pop(filepath, None)
