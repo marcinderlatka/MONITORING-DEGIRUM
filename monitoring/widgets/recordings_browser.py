@@ -19,7 +19,7 @@ from PyQt5.QtCore import (
     pyqtSignal,
     QObject,
 )
-from PyQt5.QtGui import QIcon, QImage, QPixmap
+from PyQt5.QtGui import QIcon, QImage, QPixmap, QPainter, QColor
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -570,12 +570,36 @@ class RecordingsBrowserDialog(QDialog):
     def _placeholder_pixmap(self) -> QPixmap:
         if not hasattr(self, "_placeholder_pix"):
             pixmap = QPixmap(self._thumb_size)
-            pixmap.fill(Qt.black)
+            pixmap.fill(QColor("#111111"))
             setattr(self, "_placeholder_pix", pixmap)
         return getattr(self, "_placeholder_pix")
 
     def _placeholder_icon(self) -> QIcon:
         return QIcon(self._placeholder_pixmap())
+
+    def _compose_thumbnail(self, source: QImage | QPixmap) -> QPixmap:
+        if isinstance(source, QImage):
+            pixmap = QPixmap.fromImage(source)
+        else:
+            pixmap = source
+        if pixmap.isNull():
+            return self._placeholder_pixmap()
+
+        scaled = pixmap.scaled(
+            self._thumb_size,
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        )
+        canvas = QPixmap(self._thumb_size)
+        canvas.fill(QColor("#111111"))
+        painter = QPainter(canvas)
+        try:
+            x = (self._thumb_size.width() - scaled.width()) // 2
+            y = (self._thumb_size.height() - scaled.height()) // 2
+            painter.drawPixmap(x, y, scaled)
+        finally:
+            painter.end()
+        return canvas
 
     def _request_thumbnail(self, entry: RecordingMetadata) -> None:
         if entry.filepath in self._pending_thumbnails or entry.filepath in self._thumbnail_cache:
@@ -586,12 +610,7 @@ class RecordingsBrowserDialog(QDialog):
         self.thumbnail_pool.start(worker)
 
     def _apply_thumbnail(self, filepath: str, image: QImage | QPixmap) -> None:
-        if isinstance(image, QImage):
-            pixmap = QPixmap.fromImage(image)
-        else:
-            pixmap = image
-        if pixmap.isNull():
-            pixmap = self._placeholder_pixmap()
+        pixmap = self._compose_thumbnail(image)
         self._thumbnail_cache[filepath] = pixmap
         self._pending_thumbnails.discard(filepath)
         row = self._row_lookup.get(filepath)
