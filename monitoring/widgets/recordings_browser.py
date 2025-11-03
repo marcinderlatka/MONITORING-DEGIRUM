@@ -176,7 +176,9 @@ class RecordingsBrowserDialog(QDialog):
         self._row_lookup: Dict[str, int] = {}
         self._thumbnail_cache: Dict[str, QPixmap] = {}
         self._pending_thumbnails: set[str] = set()
-        self._class_options: set[str] = set(VISIBLE_CLASSES)
+        self._class_options: Dict[str, str] = {
+            cls.casefold(): cls for cls in VISIBLE_CLASSES
+        }
         self._min_date: QDate | None = None
         self._max_date: QDate | None = None
 
@@ -205,7 +207,7 @@ class RecordingsBrowserDialog(QDialog):
         layout.addWidget(QLabel("Klasa:"))
         self.class_filter = QComboBox()
         self.class_filter.addItem("Wszystkie klasy")
-        for cls in sorted(self._class_options):
+        for cls in sorted(self._class_options.values(), key=str.casefold):
             self.class_filter.addItem(cls)
         layout.addWidget(self.class_filter)
 
@@ -404,9 +406,10 @@ class RecordingsBrowserDialog(QDialog):
     def _update_class_options(self, label: str) -> None:
         if not label:
             return
-        if label in self._class_options:
+        key = label.casefold()
+        if key in self._class_options:
             return
-        self._class_options.add(label)
+        self._class_options[key] = label
         self.class_filter.addItem(label)
 
     def _update_date_range(self, entry: RecordingMetadata) -> None:
@@ -432,10 +435,18 @@ class RecordingsBrowserDialog(QDialog):
 
     def _matches_filters(self, entry: RecordingMetadata) -> bool:
         camera_sel = self.camera_filter.currentText()
-        if camera_sel and camera_sel != "Wszystkie kamery" and entry.camera != camera_sel:
+        if (
+            camera_sel
+            and camera_sel != "Wszystkie kamery"
+            and entry.camera.casefold() != camera_sel.casefold()
+        ):
             return False
         class_sel = self.class_filter.currentText()
-        if class_sel and class_sel != "Wszystkie klasy" and entry.label != class_sel:
+        if (
+            class_sel
+            and class_sel != "Wszystkie klasy"
+            and entry.label.casefold() != class_sel.casefold()
+        ):
             return False
 
         qfrom = self.date_from.date()
