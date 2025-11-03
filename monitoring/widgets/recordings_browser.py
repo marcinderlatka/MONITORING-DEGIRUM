@@ -109,6 +109,8 @@ class ThumbnailWorker(QObject, QRunnable):
 
     def _load_image(self) -> QImage:
         candidates = [self._entry.thumb_path]
+        base, _ext = os.path.splitext(self._entry.filepath)
+        candidates.append(base + ".jpg")
         candidates.append(self._entry.filepath + ".jpg")
         candidates.extend([
             self._entry.filepath.replace(".mp4", suffix)
