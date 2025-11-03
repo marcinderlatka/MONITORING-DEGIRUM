@@ -377,7 +377,6 @@ class RecordingsScanWorker(QObject, QRunnable):
 
     def _scan(self):
         self._seen_abs_paths.clear()
-        pattern = re.compile(r"^nagranie_.*\.mp4$", re.IGNORECASE)
         for cam_name, cam_dir in self._camera_dirs:
             if self._abort:
                 break
@@ -390,7 +389,7 @@ class RecordingsScanWorker(QObject, QRunnable):
                     for name in files:
                         if self._abort:
                             break
-                        if not pattern.match(name):
+                        if not name.lower().endswith(".mp4"):
                             continue
                         path = os.path.join(root, name)
                         if not os.path.isfile(path):
