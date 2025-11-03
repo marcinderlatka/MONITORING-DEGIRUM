@@ -4,7 +4,7 @@ import datetime as _dt
 import os
 from bisect import bisect_left
 from contextlib import suppress
-from typing import Dict, List, Mapping, Sequence
+from typing import Any, Dict, List, Mapping, Sequence
 
 import cv2
 from PyQt5.QtCore import (
@@ -122,44 +122,76 @@ class ThumbnailWorker(QObject, QRunnable):
                 img = cv2.imread(candidate)
                 if img is None:
                     continue
-                rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                qimg = QImage(
-                    rgb.data,
-                    rgb.shape[1],
-                    rgb.shape[0],
-                    rgb.strides[0],
-                    QImage.Format_RGB888,
-                ).copy()
-                return qimg.scaled(
-                    self._size,
-                    Qt.KeepAspectRatio,
-                    Qt.SmoothTransformation,
-                )
+                return self._to_qimage(img)
 
         if os.path.exists(self._entry.filepath):
             cap = cv2.VideoCapture(self._entry.filepath)
             try:
-                ok, frame = cap.read()
+                frame = self._extract_preview_frame(cap)
             finally:
                 cap.release()
-            if ok and frame is not None:
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                qimg = QImage(
-                    rgb.data,
-                    rgb.shape[1],
-                    rgb.shape[0],
-                    rgb.strides[0],
-                    QImage.Format_RGB888,
-                ).copy()
-                return qimg.scaled(
-                    self._size,
-                    Qt.KeepAspectRatio,
-                    Qt.SmoothTransformation,
-                )
+            if frame is not None:
+                return self._to_qimage(frame)
 
         placeholder = QImage(self._size.width(), self._size.height(), QImage.Format_RGB32)
         placeholder.fill(Qt.black)
         return placeholder
+
+    def _extract_preview_frame(self, cap: cv2.VideoCapture) -> Any:
+        """Pick a representative non-dark frame from the video if possible."""
+
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        sample_indices: List[int] = []
+        if frame_count > 0:
+            sample_indices.extend(
+                sorted(
+                    {
+                        max(0, min(frame_count - 1, int(frame_count * ratio)))
+                        for ratio in (0.05, 0.15, 0.3, 0.5)
+                    }
+                )
+            )
+        sample_indices.append(0)
+
+        for index in sample_indices:
+            if index:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, index)
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                continue
+            if not self._is_dark(frame):
+                return frame
+
+        # Fallback: scan first few frames sequentially in case seeking failed.
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        for _ in range(30):
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                break
+            if not self._is_dark(frame):
+                return frame
+
+        return None
+
+    @staticmethod
+    def _is_dark(frame: Any) -> bool:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        return float(cv2.mean(gray)[0]) < 12.0
+
+    def _to_qimage(self, frame: Any) -> QImage:
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        qimg = QImage(
+            rgb.data,
+            rgb.shape[1],
+            rgb.shape[0],
+            rgb.strides[0],
+            QImage.Format_RGB888,
+        ).copy()
+        return qimg.scaled(
+            self._size,
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        )
 
 
 class RecordingsBrowserDialog(QDialog):
