@@ -1489,7 +1489,13 @@ QToolButton:focus { outline: none; }
             record_root = str(cam.get("record_path") or DEFAULT_RECORD_PATH)
             full_dir = os.path.join(record_root, name)
             camera_dirs.append((name, full_dir))
-        dlg = RecordingsBrowserDialog(camera_dirs, self, history_path=ALERTS_HISTORY_PATH)
+        history_items = [dict(item) for item in self.alert_mem.items]
+        dlg = RecordingsBrowserDialog(
+            camera_dirs,
+            self,
+            history_path=ALERTS_HISTORY_PATH,
+            history_items=history_items,
+        )
         dlg.open_video.connect(self.open_video_file)
         dlg.exec_()
 

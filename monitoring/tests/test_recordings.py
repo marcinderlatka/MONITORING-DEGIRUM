@@ -7,7 +7,11 @@ from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
-from monitoring.recordings import build_recording_metadata, camera_name_for_path
+from monitoring.recordings import (
+    build_recording_metadata,
+    camera_name_for_path,
+    load_history_metadata,
+)
 
 
 def test_build_recording_metadata_merges_sources(tmp_path):
@@ -54,3 +58,24 @@ def test_camera_name_for_path_handles_unknown(tmp_path):
 
     camera_dirs = [("CamA", str(tmp_path / "CamA"))]
     assert camera_name_for_path(camera_dirs, str(file_path)) == ""
+
+
+def test_load_history_metadata_accepts_preloaded_items(tmp_path):
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"")
+    snapshot = [
+        {
+            "filepath": str(video),
+            "camera": "Cam1",
+            "label": "car",
+            "confidence": 0.9,
+            "time": "2024-01-02 03:04:05",
+            "thumb": "thumb.jpg",
+        }
+    ]
+
+    metadata = load_history_metadata(snapshot)
+    key = os.path.abspath(str(video))
+    assert key in metadata
+    assert metadata[key]["camera"] == "Cam1"
+    assert metadata[key]["label"] == "car"

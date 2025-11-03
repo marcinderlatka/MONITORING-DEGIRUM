@@ -4,7 +4,7 @@ import datetime as _dt
 import os
 from bisect import bisect_left
 from contextlib import suppress
-from typing import Dict, List, Sequence
+from typing import Dict, List, Mapping, Sequence
 
 import cv2
 from PyQt5.QtCore import QDate, QPoint, QRunnable, QSize, Qt, QThreadPool, QTimer, pyqtSignal, QObject
@@ -43,11 +43,17 @@ class RecordingsScanTask(QObject, QRunnable):
     record_discovered = pyqtSignal(RecordingMetadata)
     finished = pyqtSignal()
 
-    def __init__(self, camera_dirs: Sequence[CameraDirectory], history_path: str | os.PathLike[str]):
+    def __init__(
+        self,
+        camera_dirs: Sequence[CameraDirectory],
+        history_path: str | os.PathLike[str],
+        history_items: Sequence[Mapping[str, object]] | Mapping[str, Mapping[str, object]] | None = None,
+    ):
         super().__init__()
         QRunnable.__init__(self)
         self._camera_dirs = list(camera_dirs)
         self._history_path = history_path
+        self._history_items = history_items
         self._abort = False
 
     def stop(self) -> None:
@@ -55,7 +61,8 @@ class RecordingsScanTask(QObject, QRunnable):
 
     def run(self) -> None:  # pragma: no cover - exercised via GUI
         try:
-            history = load_history_metadata(self._history_path)
+            history_source = self._history_items if self._history_items is not None else self._history_path
+            history = load_history_metadata(history_source)
             seen: set[str] = set()
             for path in walk_recordings(self._camera_dirs):
                 if self._abort:
@@ -155,6 +162,7 @@ class RecordingsBrowserDialog(QDialog):
         camera_dirs: Sequence[CameraDirectory],
         parent: QObject | None = None,
         history_path: str | os.PathLike[str] = ALERTS_HISTORY_PATH,
+        history_items: Sequence[Mapping[str, object]] | None = None,
     ):
         super().__init__(parent)
         self.setWindowTitle("Nagrania – przeglądarka")
@@ -162,6 +170,7 @@ class RecordingsBrowserDialog(QDialog):
 
         self._camera_dirs = list(camera_dirs)
         self._history_path = str(history_path)
+        self._history_items = [dict(item) for item in history_items] if history_items is not None else None
         self._entries: List[RecordingMetadata] = []
         self._entry_keys: List[tuple[float, str]] = []
         self._row_lookup: Dict[str, int] = {}
@@ -276,7 +285,11 @@ class RecordingsBrowserDialog(QDialog):
         self._min_date = None
         self._max_date = None
 
-        task = RecordingsScanTask(self._camera_dirs, self._history_path)
+        task = RecordingsScanTask(
+            self._camera_dirs,
+            self._history_path,
+            history_items=self._history_items,
+        )
         task.record_discovered.connect(self._on_entry_discovered)
         task.finished.connect(self._on_scan_finished)
         self._scan_task = task
