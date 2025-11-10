@@ -650,10 +650,12 @@ class RecordingsBrowserDialog(QDialog):
     def _pixmap_from_frame(self, frame: np.ndarray) -> QPixmap:
         if frame.size == 0:
             return self._placeholder_pixmap()
+
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        height, width, channels = rgb.shape
-        bytes_per_line = channels * width
-        qimg = QImage(rgb.data, width, height, bytes_per_line, QImage.Format_RGB888)
+        rgb = np.ascontiguousarray(rgb)
+        height, width, _channels = rgb.shape
+        bytes_per_line = int(rgb.strides[0])
+        qimg = QImage(rgb.data, width, height, bytes_per_line, QImage.Format_RGB888).copy()
         return self._pixmap_to_canvas(QPixmap.fromImage(qimg))
 
     def _compose_thumbnail(self, source: object) -> QPixmap:
