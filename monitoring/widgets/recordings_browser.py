@@ -178,9 +178,9 @@ class ThumbnailWorker(QObject, QRunnable):
         if not image.isNull():
             return image
 
-        pixmap = QPixmap()
-        if pixmap.load(path):
-            return pixmap
+        image = QImage()
+        if image.load(path):
+            return image
 
         img = cv2.imread(path)
         if img is not None:
