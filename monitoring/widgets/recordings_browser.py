@@ -650,6 +650,58 @@ class RecordingsBrowserDialog(QDialog):
         if fmt == QImage.Format_Invalid:
             return QImage()
 
+        def formats(*names: str) -> set[int]:
+            return {getattr(QImage, name) for name in names if hasattr(QImage, name)}
+
+        grayscale_formats = formats(
+            "Format_Indexed8",
+            "Format_Alpha8",
+            "Format_Grayscale8",
+            "Format_Grayscale16",
+            "Format_Mono",
+            "Format_MonoLSB",
+        )
+
+        rgba_like = formats(
+            "Format_ARGB32",
+            "Format_ARGB32_Premultiplied",
+            "Format_RGBA8888",
+            "Format_RGBA8888_Premultiplied",
+            "Format_RGBA64",
+            "Format_RGBA64_Premultiplied",
+            "Format_RGBX8888",
+            "Format_ARGB8565_Premultiplied",
+            "Format_ARGB6666_Premultiplied",
+            "Format_ARGB8555_Premultiplied",
+            "Format_ARGB4444_Premultiplied",
+            "Format_A2RGB30_Premultiplied",
+            "Format_A2BGR30_Premultiplied",
+        )
+
+        rgb_like = formats(
+            "Format_RGB888",
+            "Format_BGR888",
+            "Format_RGB16",
+            "Format_RGB555",
+            "Format_RGB666",
+            "Format_RGB444",
+            "Format_RGB30",
+            "Format_BGR30",
+        )
+
+        if fmt in grayscale_formats:
+            target = QImage.Format_Grayscale8
+        elif fmt in rgba_like:
+            target = QImage.Format_RGBA8888
+        elif fmt in rgb_like:
+            target = QImage.Format_RGB888
+        else:
+            target = QImage.Format_RGBA8888 if image.hasAlphaChannel() else QImage.Format_RGB888
+
+        if fmt == target:
+            return image.copy()
+
+        return image.convertToFormat(target)
         if fmt in (
             QImage.Format_RGB888,
             QImage.Format_RGB32,
@@ -732,6 +784,7 @@ class RecordingsBrowserDialog(QDialog):
             return QImage()
 
         return QImage()
+
 
     def _normalise_qimage(self, image: QImage) -> QImage:
         if image.isNull():
@@ -843,6 +896,10 @@ class RecordingsBrowserDialog(QDialog):
             if image.isNull():
                 return self._placeholder_pixmap()
             return self._scale_pixmap(QPixmap.fromImage(image))
+        if isinstance(source, QPixmap):
+            if source.isNull():
+                return self._placeholder_pixmap()
+            return self._scale_pixmap(source)
         if isinstance(source, QPixmap):
             if source.isNull():
                 return self._placeholder_pixmap()
