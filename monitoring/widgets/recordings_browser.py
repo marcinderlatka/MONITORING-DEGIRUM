@@ -20,7 +20,7 @@ from PyQt5.QtCore import (
     pyqtSignal,
     QObject,
 )
-from PyQt5.QtGui import QIcon, QImage, QPixmap, QPainter, QColor
+from PyQt5.QtGui import QIcon, QImage, QPixmap, QPainter, QColor, QImageReader
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -168,14 +168,9 @@ class ThumbnailWorker(QObject, QRunnable):
             ordered.append(candidate)
         return ordered
 
-    def _load_thumbnail_file(self, path: str) -> np.ndarray | None:
+    def _load_thumbnail_file(self, path: str) -> object | None:
         if not os.path.exists(path):
             return None
-
-        img = cv2.imread(path)
-        return img if img is not None else None
-        if img is not None:
-            return self._to_qimage(img)
 
         reader = QImageReader(path)
         reader.setAutoTransform(True)
@@ -186,6 +181,10 @@ class ThumbnailWorker(QObject, QRunnable):
         pixmap = QPixmap()
         if pixmap.load(path):
             return pixmap
+
+        img = cv2.imread(path)
+        if img is not None:
+            return img
 
         return None
 
@@ -628,20 +627,10 @@ class RecordingsBrowserDialog(QDialog):
         self._pending_thumbnails.add(entry.filepath)
         self._thumbnail_workers[entry.filepath] = worker
         self.thumbnail_pool.start(worker)
-    def _compose_thumbnail(self, source: QImage | QPixmap) -> QPixmap:
-        if isinstance(source, QImage):
-            pixmap = QPixmap.fromImage(source)
-        else:
-            pixmap = source
+
+    def _pixmap_to_canvas(self, pixmap: QPixmap) -> QPixmap:
         if pixmap.isNull():
             return self._placeholder_pixmap()
-
-    def _pixmap_from_frame(self, frame: np.ndarray) -> QPixmap:
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        height, width, channels = rgb.shape
-        bytes_per_line = channels * width
-        qimg = QImage(rgb.data, width, height, bytes_per_line, QImage.Format_RGB888)
-        pixmap = QPixmap.fromImage(qimg)
         scaled = pixmap.scaled(
             self._thumb_size,
             Qt.KeepAspectRatio,
@@ -658,22 +647,25 @@ class RecordingsBrowserDialog(QDialog):
             painter.end()
         return canvas
 
-    def _apply_thumbnail(self, filepath: str, frame: object) -> None:
-        pixmap = self._placeholder_pixmap()
-        if isinstance(frame, QPixmap) and not frame.isNull():
-            pixmap = frame
-        elif isinstance(frame, np.ndarray) and frame.size:
-            pixmap = self._pixmap_from_frame(frame)
-    def _request_thumbnail(self, entry: RecordingMetadata) -> None:
-        if entry.filepath in self._pending_thumbnails or entry.filepath in self._thumbnail_cache:
-            return
-        worker = ThumbnailWorker(entry, self._thumb_size)
-        worker.thumbnail_ready.connect(self._apply_thumbnail)
-        self._pending_thumbnails.add(entry.filepath)
-        self._thumbnail_workers[entry.filepath] = worker
-        self.thumbnail_pool.start(worker)
+    def _pixmap_from_frame(self, frame: np.ndarray) -> QPixmap:
+        if frame.size == 0:
+            return self._placeholder_pixmap()
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        height, width, channels = rgb.shape
+        bytes_per_line = channels * width
+        qimg = QImage(rgb.data, width, height, bytes_per_line, QImage.Format_RGB888)
+        return self._pixmap_to_canvas(QPixmap.fromImage(qimg))
 
-    def _apply_thumbnail(self, filepath: str, image: QImage | QPixmap) -> None:
+    def _compose_thumbnail(self, source: object) -> QPixmap:
+        if isinstance(source, np.ndarray):
+            return self._pixmap_from_frame(source)
+        if isinstance(source, QImage):
+            return self._pixmap_to_canvas(QPixmap.fromImage(source))
+        if isinstance(source, QPixmap):
+            return self._pixmap_to_canvas(source)
+        return self._placeholder_pixmap()
+
+    def _apply_thumbnail(self, filepath: str, image: object) -> None:
         pixmap = self._compose_thumbnail(image)
         self._thumbnail_cache[filepath] = pixmap
         self._pending_thumbnails.discard(filepath)
