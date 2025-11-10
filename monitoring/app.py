@@ -6,6 +6,7 @@ from contextlib import suppress
 import datetime
 import io
 import json
+import logging
 import os
 import re
 import sys
@@ -847,6 +848,9 @@ class CameraListDialog(QDialog):
         self.accept()
 
 # --- GŁÓWNE OKNO ---
+logger = logging.getLogger(__name__)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, cameras):
         super().__init__()
@@ -1352,6 +1356,11 @@ QToolButton:focus { outline: none; }
         self._render_current()
 
     def update_frame(self, frame, index):
+        try:
+            idx = int(index)
+        except (TypeError, ValueError):
+            logger.warning("Ignoring frame with invalid index %r", index)
+            return
         is_valid = (
             isinstance(frame, np.ndarray)
             and frame.size > 0
@@ -1360,21 +1369,21 @@ QToolButton:focus { outline: none; }
             and frame.shape[1] > 0
         )
         if not is_valid:
-            self._last_status[index] = "Brak sygnału (pusta klatka)"
-            self._last_error[index] = "Brak sygnału (pusta klatka)"
-            self._last_frame.pop(index, None)
-            self._last_fps_text[index] = ""
-            if index == self.camera_list.currentRow():
+            self._last_status[idx] = "Brak sygnału (pusta klatka)"
+            self._last_error[idx] = "Brak sygnału (pusta klatka)"
+            self._last_frame.pop(idx, None)
+            self._last_fps_text[idx] = ""
+            if idx == self.camera_list.currentRow():
                 self._render_current()
             return
 
-        self.camera_list.update_thumbnail(index, frame)
-        self.camera_grid.update_frame(index, frame)
+        self.camera_list.update_thumbnail(idx, frame)
+        self.camera_grid.update_frame(idx, frame)
 
         # FPS liczenie dla tej kamery
         from time import perf_counter
         t = perf_counter()
-        dq = self._fps_times.setdefault(index, [])
+        dq = self._fps_times.setdefault(idx, [])
         dq.append(t)
         if len(dq) > 60:
             del dq[0:len(dq)-60]
@@ -1386,12 +1395,12 @@ QToolButton:focus { outline: none; }
                 fps_txt = f"{fps_now:.1f} fps"
 
         # zapisz stan
-        self._last_frame[index] = frame
-        self._last_fps_text[index] = fps_txt
-        self._last_status[index] = "Połączono"
-        self._last_error.pop(index, None)
+        self._last_frame[idx] = frame
+        self._last_fps_text[idx] = fps_txt
+        self._last_status[idx] = "Połączono"
+        self._last_error.pop(idx, None)
 
-        if index == self.camera_list.currentRow():
+        if idx == self.camera_list.currentRow():
             self._render_current()
 
     def _compose_letterboxed(self, frame, top_lines):
