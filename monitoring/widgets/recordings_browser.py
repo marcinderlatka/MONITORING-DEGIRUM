@@ -20,7 +20,7 @@ from PyQt5.QtCore import (
     pyqtSignal,
     QObject,
 )
-from PyQt5.QtGui import QIcon, QImage, QPixmap, QPainter, QColor, QImageReader
+from PyQt5.QtGui import QIcon, QImage, QPixmap, QColor, QImageReader
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -628,7 +628,7 @@ class RecordingsBrowserDialog(QDialog):
         self._thumbnail_workers[entry.filepath] = worker
         self.thumbnail_pool.start(worker)
 
-    def _pixmap_to_canvas(self, pixmap: QPixmap) -> QPixmap:
+    def _scale_pixmap(self, pixmap: QPixmap) -> QPixmap:
         if pixmap.isNull():
             return self._placeholder_pixmap()
 
@@ -640,16 +640,98 @@ class RecordingsBrowserDialog(QDialog):
         if scaled.isNull() or not scaled.width() or not scaled.height():
             return self._placeholder_pixmap()
 
+        return scaled
+
+    def _normalise_qimage(self, image: QImage) -> QImage:
+        if image.isNull():
+            return image
+
+        fmt = image.format()
+        if fmt == QImage.Format_Invalid:
+            return QImage()
+
+        if fmt in (
+            QImage.Format_RGB888,
+            QImage.Format_RGB32,
+            QImage.Format_ARGB32,
+            QImage.Format_ARGB32_Premultiplied,
+            QImage.Format_RGBA8888,
+            QImage.Format_RGBA8888_Premultiplied,
+            QImage.Format_Grayscale8,
+        ):
+            return image.copy()
+
+        if fmt == QImage.Format_Indexed8:
+            return image.convertToFormat(QImage.Format_Grayscale8)
+
+        return image.convertToFormat(QImage.Format_RGBA8888)
+
+    def _qimage_from_frame(self, frame: np.ndarray) -> QImage:
+        if frame.size == 0:
+            return QImage()
+
+        array = frame
+        if array.dtype != np.uint8:
+            try:
+                array = cv2.normalize(array, None, 0, 255, cv2.NORM_MINMAX)
+            except cv2.error:
+                return QImage()
+            array = array.astype(np.uint8)
+
+        if array.ndim == 2:
+            gray = np.ascontiguousarray(array)
+            height, width = gray.shape
+            return QImage(
+                gray.data,
+                width,
+                height,
+                int(gray.strides[0]),
+                QImage.Format_Grayscale8,
+            ).copy()
+
+        if array.ndim != 3:
+            return QImage()
+
+        height, width, channels = array.shape
         canvas = QPixmap(self._thumb_size)
         canvas.fill(QColor("#111111"))
         painter = QPainter(canvas)
         try:
-            x = (self._thumb_size.width() - scaled.width()) // 2
-            y = (self._thumb_size.height() - scaled.height()) // 2
-            painter.drawPixmap(x, y, scaled)
-        finally:
-            painter.end()
-        return canvas
+            if channels == 1:
+                gray = np.ascontiguousarray(array.reshape(height, width))
+                return QImage(
+                    gray.data,
+                    width,
+                    height,
+                    int(gray.strides[0]),
+                    QImage.Format_Grayscale8,
+                ).copy()
+
+            if channels == 3:
+                rgb = cv2.cvtColor(array, cv2.COLOR_BGR2RGB)
+                rgb = np.ascontiguousarray(rgb)
+                return QImage(
+                    rgb.data,
+                    width,
+                    height,
+                    int(rgb.strides[0]),
+                    QImage.Format_RGB888,
+                ).copy()
+
+            if channels == 4:
+                rgba = cv2.cvtColor(array, cv2.COLOR_BGRA2RGBA)
+                rgba = np.ascontiguousarray(rgba)
+                return QImage(
+                    rgba.data,
+                    width,
+                    height,
+                    int(rgba.strides[0]),
+                    QImage.Format_RGBA8888,
+                ).copy()
+        except cv2.error:
+            return QImage()
+
+        return QImage()
 
     def _normalise_qimage(self, image: QImage) -> QImage:
         if image.isNull():
@@ -743,6 +825,7 @@ class RecordingsBrowserDialog(QDialog):
         image = self._qimage_from_frame(frame)
         if image.isNull():
             return self._placeholder_pixmap()
+        return self._scale_pixmap(QPixmap.fromImage(image))
         return self._pixmap_to_canvas(QPixmap.fromImage(image))
 
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -759,6 +842,11 @@ class RecordingsBrowserDialog(QDialog):
             image = self._normalise_qimage(source)
             if image.isNull():
                 return self._placeholder_pixmap()
+            return self._scale_pixmap(QPixmap.fromImage(image))
+        if isinstance(source, QPixmap):
+            if source.isNull():
+                return self._placeholder_pixmap()
+            return self._scale_pixmap(source)
             return self._pixmap_to_canvas(QPixmap.fromImage(image))
         if isinstance(source, QPixmap):
             if source.isNull():
