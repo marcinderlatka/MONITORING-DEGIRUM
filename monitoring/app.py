@@ -1054,6 +1054,10 @@ QToolButton:focus { outline: none; }
 
         self.log_window.add_entry("application", "aplikacja uruchomiona")
 
+        # Track windowed geometry so fullscreen toggle can restore it reliably
+        self._is_fullscreen = False
+        self._normal_geometry = None
+
         # backend
         self.workers = []
         self.camera_list.currentRowChanged.connect(self.switch_camera)
@@ -1089,12 +1093,22 @@ QToolButton:focus { outline: none; }
         os.execl(python, python, *sys.argv)
 
     def toggle_fullscreen(self):
-        if getattr(self, "_is_fullscreen", False):
+        if self._is_fullscreen:
             self.showNormal()
+            if self._normal_geometry is not None:
+                self.setGeometry(self._normal_geometry)
             self._is_fullscreen = False
         else:
+            self._normal_geometry = self.geometry()
             self.showFullScreen()
             self._is_fullscreen = True
+
+    def changeEvent(self, event):
+        if event.type() == QEvent.WindowStateChange:
+            self._is_fullscreen = self.isFullScreen()
+            if not self._is_fullscreen and self._normal_geometry is not None:
+                self.setGeometry(self._normal_geometry)
+        super().changeEvent(event)
 
     def toggle_sound(self):
         self.sound_enabled = not self.sound_enabled
