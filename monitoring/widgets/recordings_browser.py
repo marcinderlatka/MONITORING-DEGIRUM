@@ -43,6 +43,54 @@ from ..recordings import (
     load_history_metadata,
 )
 from ..storage import remove_from_recordings_catalog
+
+
+def _thumbnail_candidates_for_entry(entry: RecordingMetadata) -> List[str]:
+    """Return possible thumbnail paths for a given recording entry."""
+
+    def _resolve(path: str) -> List[str]:
+        if not path:
+            return []
+        resolved: List[str] = [path]
+        if not os.path.isabs(path):
+            resolved.append(os.path.join(os.path.dirname(entry.filepath), path))
+        return [os.path.abspath(p) for p in resolved]
+
+    candidates: List[str] = []
+    if entry.thumb_path:
+        candidates.extend(_resolve(entry.thumb_path))
+
+    base, _ext = os.path.splitext(entry.filepath)
+    for suffix in (".jpg", ".jpeg", ".JPG", ".JPEG"):
+        candidates.append(os.path.abspath(f"{base}{suffix}"))
+
+    for suffix in (".jpg", ".jpeg", ".JPG", ".JPEG"):
+        candidates.append(os.path.abspath(f"{entry.filepath}{suffix}"))
+
+    stem, ext = os.path.splitext(entry.filepath)
+    for replacement in (
+        "_thumb.jpg",
+        "_thumb.jpeg",
+        "_preview.jpg",
+        "_preview.jpeg",
+        "_THUMB.JPG",
+        "_THUMB.JPEG",
+        "_PREVIEW.JPG",
+        "_PREVIEW.JPEG",
+    ):
+        if ext:
+            candidates.append(os.path.abspath(f"{stem}{replacement}"))
+
+    seen: set[str] = set()
+    ordered: List[str] = []
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        ordered.append(candidate)
+    return ordered
+
+
 class ThumbnailWorker(QObject, QRunnable):
     """Asynchronously prepares preview images for recordings."""
 
@@ -76,47 +124,7 @@ class ThumbnailWorker(QObject, QRunnable):
         return None
 
     def _thumbnail_candidates(self) -> List[str]:
-        def _resolve(path: str) -> List[str]:
-            if not path:
-                return []
-            resolved: List[str] = [path]
-            if not os.path.isabs(path):
-                resolved.append(os.path.join(os.path.dirname(self._entry.filepath), path))
-            return [os.path.abspath(p) for p in resolved]
-
-        candidates: List[str] = []
-        if self._entry.thumb_path:
-            candidates.extend(_resolve(self._entry.thumb_path))
-
-        base, _ext = os.path.splitext(self._entry.filepath)
-        for suffix in (".jpg", ".jpeg", ".JPG", ".JPEG"):
-            candidates.append(os.path.abspath(f"{base}{suffix}"))
-
-        for suffix in (".jpg", ".jpeg", ".JPG", ".JPEG"):
-            candidates.append(os.path.abspath(f"{self._entry.filepath}{suffix}"))
-
-        stem, ext = os.path.splitext(self._entry.filepath)
-        for replacement in (
-            "_thumb.jpg",
-            "_thumb.jpeg",
-            "_preview.jpg",
-            "_preview.jpeg",
-            "_THUMB.JPG",
-            "_THUMB.JPEG",
-            "_PREVIEW.JPG",
-            "_PREVIEW.JPEG",
-        ):
-            if ext:
-                candidates.append(os.path.abspath(f"{stem}{replacement}"))
-
-        seen: set[str] = set()
-        ordered: List[str] = []
-        for candidate in candidates:
-            if not candidate or candidate in seen:
-                continue
-            seen.add(candidate)
-            ordered.append(candidate)
-        return ordered
+        return _thumbnail_candidates_for_entry(self._entry)
 
     def _load_thumbnail_file(self, path: str) -> object | None:
         if not os.path.exists(path):
@@ -536,8 +544,11 @@ class RecordingsBrowserDialog(QDialog):
         conf_item.setData(Qt.UserRole, entry.filepath)
         self.table.setItem(row, 4, conf_item)
 
-        file_item = QTableWidgetItem(entry.filename)
+        file_text = self._format_file_cell_text(entry)
+        file_item = QTableWidgetItem(file_text)
         file_item.setData(Qt.UserRole, entry.filepath)
+        if "\n" in file_text:
+            file_item.setToolTip(file_text)
         self.table.setItem(row, 5, file_item)
 
         self._row_lookup[entry.filepath] = row
@@ -756,6 +767,20 @@ class RecordingsBrowserDialog(QDialog):
         for entry in self._entries:
             if self._matches_filters(entry):
                 self._insert_row(entry)
+
+    def _format_file_cell_text(self, entry: RecordingMetadata) -> str:
+        mp4_path = entry.filepath
+        thumb_path = self._resolve_thumbnail_path(entry)
+        if thumb_path and thumb_path != mp4_path:
+            return f"{mp4_path}\n{thumb_path}"
+        return mp4_path
+
+    def _resolve_thumbnail_path(self, entry: RecordingMetadata) -> str:
+        candidates = _thumbnail_candidates_for_entry(entry)
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                return candidate
+        return candidates[0] if candidates else ""
 
     # ------------------------------------------------------------ lifecycle --
     def closeEvent(self, event):  # noqa: D401
