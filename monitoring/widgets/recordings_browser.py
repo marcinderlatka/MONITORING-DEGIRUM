@@ -18,7 +18,7 @@ from PyQt5.QtCore import (
     pyqtSignal,
     QObject,
 )
-from PyQt5.QtGui import QIcon, QImage, QPixmap, QColor, QImageReader
+from PyQt5.QtGui import QIcon, QImage, QPixmap, QColor
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -127,59 +127,18 @@ class ThumbnailWorker(QObject, QRunnable):
         return _thumbnail_candidates_for_entry(self._entry)
 
     def _load_thumbnail_file(self, path: str) -> object | None:
-        """Wczytaj miniaturę z pliku:
-        1) najpierw OpenCV (najpewniejsze dla JPEG),
-        2) dopiero potem Qt (QImageReader/QImage.load),
-        3) awaryjnie imdecode z bajtów.
-        Zwraca: ndarray (BGR) albo QImage, albo None.
-        """
+        """Najprostsze i najpewniejsze ładowanie miniatury (bez QImageReader)."""
+        from PyQt5.QtGui import QPixmap
+
         if not os.path.exists(path):
             return None
 
-        # --- 1) OpenCV (preferowane dla JPG) ---
-        try:
-            img = cv2.imread(path, cv2.IMREAD_COLOR)
-            if img is not None and img.size:
-                return img  # ndarray (BGR)
-        except Exception:
-            pass
-
-        # --- 2) Qt: QImageReader -> QImage.load (z normalizacją do RGB888) ---
-        try:
-            reader = QImageReader(path)
-            reader.setAutoTransform(True)
-            qimg = reader.read()
-            if not qimg.isNull():
-                # zrzucamy alfa/niekompatybilne formaty
-                qimg = self._normalise_qimage(qimg)
-                if not qimg.isNull():
-                    return qimg
-        except Exception:
-            pass
-
-        try:
-            qimg = QImage()
-            if qimg.load(path):
-                qimg = self._normalise_qimage(qimg)
-                if not qimg.isNull():
-                    return qimg
-        except Exception:
-            pass
-
-        # --- 3) Awaryjnie: czytaj bajty + imdecode (omija niektóre problemy ścieżek/codec) ---
-        try:
-            import numpy as np
-            with open(path, 'rb') as f:
-                data = f.read()
-            if data:
-                arr = np.frombuffer(data, dtype=np.uint8)
-                img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                if img is not None and img.size:
-                    return img
-        except Exception:
-            pass
-
-        return None
+        pix = QPixmap(path)
+        if pix.isNull():
+            print("❌ Nie udało się wczytać:", path)
+            return None
+        print("✅ Wczytano miniaturę:", path)
+        return pix
 
     def _extract_preview_frame(self, cap: cv2.VideoCapture) -> Any:
         """Pick a representative non-dark frame from the video if possible."""
@@ -783,7 +742,10 @@ class RecordingsBrowserDialog(QDialog):
             return
         item = self.table.item(row, 0)
         if item is not None:
-            item.setIcon(QIcon(pixmap))
+            if isinstance(pixmap, QPixmap):
+                item.setIcon(QIcon(pixmap))
+            else:
+                item.setIcon(QIcon(self._placeholder_pixmap()))
         label = self._thumbnail_labels.get(filepath)
         if label is not None:
             label.setPixmap(pixmap)
