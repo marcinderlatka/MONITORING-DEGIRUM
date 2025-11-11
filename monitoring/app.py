@@ -117,14 +117,16 @@ class VideoPlayerDialog(QDialog):
         # standalone top-level window.
         self._owner = parent
         super().__init__(None)
-        if parent is not None:
-            self.setWindowModality(Qt.ApplicationModal)
 
         # Ensure the dialog behaves like a top-level window so that the
         # window manager allows switching to the fullscreen state.
-        self.setWindowFlag(Qt.Window, True)
-        self.setWindowFlag(Qt.WindowMinMaxButtonsHint, True)
-        self.setWindowFlag(Qt.WindowCloseButtonHint, True)
+        self.setWindowFlags(
+            Qt.Window
+            | Qt.WindowTitleHint
+            | Qt.WindowSystemMenuHint
+            | Qt.WindowMinMaxButtonsHint
+            | Qt.WindowCloseButtonHint
+        )
         self.resize(900, 600)
 
         # lista plików w katalogu – umożliwia przełączanie
