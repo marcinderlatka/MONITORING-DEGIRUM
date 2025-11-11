@@ -622,22 +622,6 @@ class RecordingsBrowserDialog(QDialog):
             "Format_MonoLSB",
         )
 
-        rgba_like = formats(
-            "Format_ARGB32",
-            "Format_ARGB32_Premultiplied",
-            "Format_RGBA8888",
-            "Format_RGBA8888_Premultiplied",
-            "Format_RGBA64",
-            "Format_RGBA64_Premultiplied",
-            "Format_RGBX8888",
-            "Format_ARGB8565_Premultiplied",
-            "Format_ARGB6666_Premultiplied",
-            "Format_ARGB8555_Premultiplied",
-            "Format_ARGB4444_Premultiplied",
-            "Format_A2RGB30_Premultiplied",
-            "Format_A2BGR30_Premultiplied",
-        )
-
         rgb_like = formats(
             "Format_RGB888",
             "Format_BGR888",
@@ -651,14 +635,13 @@ class RecordingsBrowserDialog(QDialog):
 
         if fmt in grayscale_formats:
             target = QImage.Format_Grayscale8
-        elif fmt in rgba_like:
-            target = QImage.Format_RGBA8888
         elif fmt in rgb_like:
             target = QImage.Format_RGB888
         else:
-            target = QImage.Format_RGBA8888 if image.hasAlphaChannel() else QImage.Format_RGB888
+            # Always drop alpha to avoid fully transparent thumbnails rendering black.
+            target = QImage.Format_RGB888
 
-        if fmt == target:
+        if fmt == target and not image.hasAlphaChannel():
             return image.copy()
 
         converted = image.convertToFormat(target)
