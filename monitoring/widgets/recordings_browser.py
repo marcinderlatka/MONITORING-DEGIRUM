@@ -127,22 +127,57 @@ class ThumbnailWorker(QObject, QRunnable):
         return _thumbnail_candidates_for_entry(self._entry)
 
     def _load_thumbnail_file(self, path: str) -> object | None:
+        """Wczytaj miniaturę z pliku:
+        1) najpierw OpenCV (najpewniejsze dla JPEG),
+        2) dopiero potem Qt (QImageReader/QImage.load),
+        3) awaryjnie imdecode z bajtów.
+        Zwraca: ndarray (BGR) albo QImage, albo None.
+        """
         if not os.path.exists(path):
             return None
 
-        reader = QImageReader(path)
-        reader.setAutoTransform(True)
-        image = reader.read()
-        if not image.isNull():
-            return image
+        # --- 1) OpenCV (preferowane dla JPG) ---
+        try:
+            img = cv2.imread(path, cv2.IMREAD_COLOR)
+            if img is not None and img.size:
+                return img  # ndarray (BGR)
+        except Exception:
+            pass
 
-        image = QImage()
-        if image.load(path):
-            return image
+        # --- 2) Qt: QImageReader -> QImage.load (z normalizacją do RGB888) ---
+        try:
+            reader = QImageReader(path)
+            reader.setAutoTransform(True)
+            qimg = reader.read()
+            if not qimg.isNull():
+                # zrzucamy alfa/niekompatybilne formaty
+                qimg = self._normalise_qimage(qimg)
+                if not qimg.isNull():
+                    return qimg
+        except Exception:
+            pass
 
-        img = cv2.imread(path)
-        if img is not None:
-            return img
+        try:
+            qimg = QImage()
+            if qimg.load(path):
+                qimg = self._normalise_qimage(qimg)
+                if not qimg.isNull():
+                    return qimg
+        except Exception:
+            pass
+
+        # --- 3) Awaryjnie: czytaj bajty + imdecode (omija niektóre problemy ścieżek/codec) ---
+        try:
+            import numpy as np
+            with open(path, 'rb') as f:
+                data = f.read()
+            if data:
+                arr = np.frombuffer(data, dtype=np.uint8)
+                img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                if img is not None and img.size:
+                    return img
+        except Exception:
+            pass
 
         return None
 
