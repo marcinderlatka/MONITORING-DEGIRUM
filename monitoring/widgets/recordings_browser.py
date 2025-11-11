@@ -523,7 +523,11 @@ class RecordingsBrowserDialog(QDialog):
         thumb_label = QLabel()
         thumb_label.setFixedSize(self._thumb_size)
         thumb_label.setAlignment(Qt.AlignCenter)
-        thumb_label.setStyleSheet("border:1px solid #555; background:#111;")
+        thumb_label.setStyleSheet(
+            "border:1px solid #555; background:{};".format(
+                self._thumbnail_background_color().name()
+            )
+        )
         thumb_label.setPixmap(self._placeholder_pixmap())
         self.table.setCellWidget(row, 0, thumb_label)
         self._thumbnail_labels[entry.filepath] = thumb_label
@@ -560,9 +564,20 @@ class RecordingsBrowserDialog(QDialog):
     def _placeholder_pixmap(self) -> QPixmap:
         if not hasattr(self, "_placeholder_pix"):
             pixmap = QPixmap(self._thumb_size)
-            pixmap.fill(QColor("#111111"))
+            pixmap.fill(self._thumbnail_background_color())
             setattr(self, "_placeholder_pix", pixmap)
         return getattr(self, "_placeholder_pix")
+
+    def _thumbnail_background_color(self) -> QColor:
+        table = getattr(self, "table", None)
+        if table is None:
+            return QColor("#2a2a2a")
+        palette = table.palette()
+        role = table.viewport().backgroundRole()
+        color = palette.color(role)
+        if not color.isValid():
+            return QColor("#2a2a2a")
+        return color
 
     def _request_thumbnail(self, entry: RecordingMetadata) -> None:
         if entry.filepath in self._pending_thumbnails or entry.filepath in self._thumbnail_cache:
