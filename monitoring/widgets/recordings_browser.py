@@ -71,10 +71,24 @@ class RecordingsScanWorker(QObject):
 
     def run(self) -> None:  # pragma: no cover - exercised via GUI
         try:
-            history_source = self._history_items if self._history_items is not None else self._history_path
+            history_source = (
+                self._history_items if self._history_items is not None else self._history_path
+            )
             history = load_history_metadata(history_source)
+            if not isinstance(history, dict):
+                history = {}
+
+            catalog_entries = list(load_recordings_catalog())
             catalog_lookup: Dict[str, Mapping[str, object]] = {}
-            for raw_entry in load_recordings_catalog():
+            catalog_history = load_history_metadata(catalog_entries) if catalog_entries else {}
+            for path, data in catalog_history.items():
+                base = history.setdefault(path, {})
+                for key, value in data.items():
+                    if value in (None, ""):
+                        continue
+                    base[key] = value
+
+            for raw_entry in catalog_entries:
                 if not isinstance(raw_entry, Mapping):
                     continue
                 filepath = raw_entry.get("filepath") or raw_entry.get("file")
