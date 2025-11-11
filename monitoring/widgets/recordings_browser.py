@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import datetime as _dt
 import os
-from bisect import bisect_left
 from contextlib import suppress
 from typing import Any, Dict, List, Mapping, Sequence
 
@@ -14,7 +13,6 @@ from PyQt5.QtCore import (
     QRunnable,
     QSize,
     Qt,
-    QThread,
     QThreadPool,
     QTimer,
     pyqtSignal,
@@ -41,93 +39,10 @@ from ..config import ALERTS_HISTORY_PATH, VISIBLE_CLASSES
 from ..recordings import (
     CameraDirectory,
     RecordingMetadata,
-    build_recording_metadata,
+    iter_catalog_entries,
     load_history_metadata,
-    walk_recordings,
 )
-from ..storage import load_recordings_catalog, remove_from_recordings_catalog
-
-
-class RecordingsScanWorker(QObject):
-    """Background worker that discovers recordings on disk."""
-
-    record_discovered = pyqtSignal(RecordingMetadata)
-    finished = pyqtSignal()
-
-    def __init__(
-        self,
-        camera_dirs: Sequence[CameraDirectory],
-        history_path: str | os.PathLike[str],
-        history_items: Sequence[Mapping[str, object]] | Mapping[str, Mapping[str, object]] | None = None,
-    ) -> None:
-        super().__init__()
-        self._camera_dirs = list(camera_dirs)
-        self._history_path = history_path
-        self._history_items = history_items
-        self._abort = False
-
-    def stop(self) -> None:
-        self._abort = True
-
-    def run(self) -> None:  # pragma: no cover - exercised via GUI
-        try:
-            history_source = (
-                self._history_items if self._history_items is not None else self._history_path
-            )
-            history = load_history_metadata(history_source)
-            if not isinstance(history, dict):
-                history = {}
-
-            catalog_entries = list(load_recordings_catalog())
-            catalog_lookup: Dict[str, Mapping[str, object]] = {}
-            catalog_history = load_history_metadata(catalog_entries) if catalog_entries else {}
-            for path, data in catalog_history.items():
-                base = history.setdefault(path, {})
-                for key, value in data.items():
-                    if value in (None, ""):
-                        continue
-                    base[key] = value
-
-            for raw_entry in catalog_entries:
-                if not isinstance(raw_entry, Mapping):
-                    continue
-                filepath = raw_entry.get("filepath") or raw_entry.get("file")
-                if not filepath:
-                    continue
-                catalog_lookup[os.path.abspath(str(filepath))] = raw_entry
-
-            seen: set[str] = set()
-            for path in walk_recordings(self._camera_dirs):
-                if self._abort:
-                    break
-                resolved = os.path.abspath(str(path))
-                overrides = catalog_lookup.pop(resolved, None)
-                entry = build_recording_metadata(
-                    str(path),
-                    self._camera_dirs,
-                    history_meta=history,
-                    overrides=overrides,
-                )
-                seen.add(entry.filepath)
-                self.record_discovered.emit(entry)
-            if not self._abort:
-                for filepath, overrides in catalog_lookup.items():
-                    if self._abort:
-                        break
-                    if filepath in seen:
-                        continue
-                    entry = build_recording_metadata(
-                        filepath,
-                        self._camera_dirs,
-                        history_meta=history,
-                        overrides=overrides,
-                    )
-                    seen.add(entry.filepath)
-                    self.record_discovered.emit(entry)
-        finally:
-            self.finished.emit()
-
-
+from ..storage import remove_from_recordings_catalog
 class ThumbnailWorker(QObject, QRunnable):
     """Asynchronously prepares preview images for recordings."""
 
@@ -291,7 +206,6 @@ class RecordingsBrowserDialog(QDialog):
         self._history_path = str(history_path)
         self._history_items = [dict(item) for item in history_items] if history_items is not None else None
         self._entries: List[RecordingMetadata] = []
-        self._entry_keys: List[tuple[float, str]] = []
         self._row_lookup: Dict[str, int] = {}
         self._thumbnail_cache: Dict[str, QPixmap] = {}
         self._pending_thumbnails: set[str] = set()
@@ -304,8 +218,6 @@ class RecordingsBrowserDialog(QDialog):
         self._max_date: QDate | None = None
 
         self._thumb_size = QSize(256, 144)
-        self.scan_thread: QThread | None = None
-        self._scan_worker: RecordingsScanWorker | None = None
         self.thumbnail_pool = QThreadPool()
 
         layout = QVBoxLayout(self)
@@ -392,35 +304,29 @@ class RecordingsBrowserDialog(QDialog):
 
     # --------------------------------------------------------------- actions --
     def refresh(self) -> None:
-        self._stop_scan_worker()
-        self._entries.clear()
-        self._entry_keys.clear()
-        self._row_lookup.clear()
-        self._thumbnail_cache.clear()
-        self._pending_thumbnails.clear()
-        self._thumbnail_workers.clear()
-        self._thumbnail_labels.clear()
-        self.table.setRowCount(0)
         self.refresh_btn.setEnabled(False)
-        self._min_date = None
-        self._max_date = None
 
-        worker = RecordingsScanWorker(
-            self._camera_dirs,
-            self._history_path,
-            history_items=self._history_items,
-        )
-        thread = QThread(self)
-        worker.moveToThread(thread)
-        worker.record_discovered.connect(self._on_entry_discovered)
-        worker.finished.connect(self._handle_scan_finished)
-        worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        thread.started.connect(worker.run)
-        thread.start()
-        self._scan_worker = worker
-        self.scan_thread = thread
+        try:
+            self._entries = []
+            self._row_lookup.clear()
+            self._thumbnail_cache.clear()
+            self._pending_thumbnails.clear()
+            self._thumbnail_workers.clear()
+            self._thumbnail_labels.clear()
+            self.table.setRowCount(0)
+            self._min_date = None
+            self._max_date = None
+
+            entries = self._load_entries_from_catalog()
+            self._entries = list(entries)
+
+            for entry in self._entries:
+                self._update_class_options(entry.label)
+                self._update_date_range(entry)
+
+            self._apply_filters()
+        finally:
+            self.refresh_btn.setEnabled(True)
 
     def delete_selected(self) -> None:
         paths = self._selected_paths()
@@ -460,7 +366,6 @@ class RecordingsBrowserDialog(QDialog):
 
         removed = set(paths)
         self._entries = [entry for entry in self._entries if entry.filepath not in removed]
-        self._entry_keys = [(-entry.timestamp, entry.filename) for entry in self._entries]
         for path in removed:
             self._thumbnail_cache.pop(path, None)
             self._pending_thumbnails.discard(path)
@@ -477,24 +382,25 @@ class RecordingsBrowserDialog(QDialog):
             QMessageBox.information(self, "Usunięto", f"Usunięto {deleted} nagrań.")
 
     # -------------------------------------------------------------- handlers --
-    def _on_entry_discovered(self, entry: RecordingMetadata) -> None:
-        key = (-entry.timestamp, entry.filename)
-        idx = bisect_left(self._entry_keys, key)
-        self._entry_keys.insert(idx, key)
-        self._entries.insert(idx, entry)
-        self._update_class_options(entry.label)
-        self._update_date_range(entry)
-        self._maybe_insert_row(entry, idx)
+    def _load_entries_from_catalog(self) -> List[RecordingMetadata]:
+        history_source: (
+            Mapping[str, Mapping[str, object]]
+            | Sequence[Mapping[str, object]]
+            | str
+        )
+        if self._history_items is not None:
+            history_source = self._history_items
+        else:
+            history_source = self._history_path
 
-    def _on_scan_finished(self) -> None:
-        self.refresh_btn.setEnabled(True)
-        self._apply_filters()  # Ensure the latest data respects filters
-
-    def _handle_scan_finished(self) -> None:
+        history = load_history_metadata(history_source)
         try:
-            self._on_scan_finished()
-        finally:
-            self._clear_scan_worker()
+            entries = list(iter_catalog_entries(self._camera_dirs, history_meta=history))
+        except Exception:
+            entries = []
+
+        entries.sort(key=lambda item: (-item.timestamp, item.filename))
+        return entries
 
     def _cell_double_clicked(self, row: int, column: int) -> None:
         item = self.table.item(row, 0)
@@ -592,19 +498,6 @@ class RecordingsBrowserDialog(QDialog):
             if needle not in haystack:
                 return False
         return True
-
-    def _maybe_insert_row(self, entry: RecordingMetadata, index: int) -> None:
-        if not self._matches_filters(entry):
-            return
-        row = self._count_visible_before(index)
-        self._insert_row(entry, row)
-
-    def _count_visible_before(self, index: int) -> int:
-        visible = 0
-        for entry in self._entries[:index]:
-            if self._matches_filters(entry):
-                visible += 1
-        return visible
 
     def _insert_row(self, entry: RecordingMetadata, row: int | None = None) -> None:
         if row is None:
@@ -866,22 +759,5 @@ class RecordingsBrowserDialog(QDialog):
 
     # ------------------------------------------------------------ lifecycle --
     def closeEvent(self, event):  # noqa: D401
-        self._stop_scan_worker(wait=True)
         self.thumbnail_pool.clear()
         super().closeEvent(event)
-
-    # --------------------------------------------------------- scan control --
-    def _stop_scan_worker(self, wait: bool = False) -> None:
-        worker = self._scan_worker
-        thread = self.scan_thread
-        if worker is None or thread is None:
-            return
-        worker.stop()
-        thread.quit()
-        if wait:
-            thread.wait()
-        self._clear_scan_worker()
-
-    def _clear_scan_worker(self) -> None:
-        self._scan_worker = None
-        self.scan_thread = None
