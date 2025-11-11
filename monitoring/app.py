@@ -30,6 +30,7 @@ from PyQt5.QtCore import (
     Qt,
     QTimer,
     QSize,
+    QEvent,
     pyqtSignal,
 )
 from PyQt5.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPixmap, QClipboard
@@ -111,6 +112,11 @@ os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = "/usr/lib/x86_64-linux-gnu/qt5/plugi
 class VideoPlayerDialog(QDialog):
     def __init__(self, filepath, parent=None):
         super().__init__(parent)
+        # Ensure the dialog behaves like a top-level window so that the
+        # window manager allows switching to the fullscreen state.
+        self.setWindowFlag(Qt.Window, True)
+        self.setWindowFlag(Qt.WindowMinMaxButtonsHint, True)
+        self.setWindowFlag(Qt.WindowCloseButtonHint, True)
         self.resize(900, 600)
 
         # lista plików w katalogu – umożliwia przełączanie
@@ -168,6 +174,7 @@ class VideoPlayerDialog(QDialog):
         self.current_index = 0
         self.current_frame = None
         self._normal_geometry = None
+        self._is_fullscreen = False
         self.load_video(self.file_list[self.file_index])
 
     def showEvent(self, event):
@@ -175,7 +182,7 @@ class VideoPlayerDialog(QDialog):
         # Zapamiętaj faktyczny rozmiar dopiero po wyrenderowaniu okna,
         # w przeciwnym wypadku geometry() zwraca wartości domyślne i
         # późniejsze przywracanie z pełnego ekranu nie działa poprawnie.
-        if self._normal_geometry is None:
+        if self._normal_geometry is None and not self.isFullScreen():
             self._normal_geometry = self.geometry()
 
     def _read_frame(self, idx=None):
@@ -282,13 +289,32 @@ class VideoPlayerDialog(QDialog):
                 parent.log_window.add_entry("error", f"kadr: {e}")
 
     def toggle_fullscreen(self):
-        if self.windowState() & Qt.WindowFullScreen:
-            self.setWindowState(self.windowState() & ~Qt.WindowFullScreen)
+        if self.isFullScreen():
+            self.showNormal()
             if self._normal_geometry is not None:
                 self.setGeometry(self._normal_geometry)
+            self._is_fullscreen = False
+            self.btn_full.setText("Pełny ekran")
         else:
             self._normal_geometry = self.geometry()
-            self.setWindowState(self.windowState() | Qt.WindowFullScreen)
+            self.showFullScreen()
+            self._is_fullscreen = True
+            self.btn_full.setText("Zamknij pełny ekran")
+
+    def changeEvent(self, event):
+        if event.type() == QEvent.WindowStateChange:
+            self._is_fullscreen = self.isFullScreen()
+            self.btn_full.setText(
+                "Zamknij pełny ekran" if self._is_fullscreen else "Pełny ekran"
+            )
+        super().changeEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape and self.isFullScreen():
+            self.toggle_fullscreen()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def closeEvent(self, e):
         self.pause()
