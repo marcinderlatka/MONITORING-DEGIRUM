@@ -167,8 +167,16 @@ class VideoPlayerDialog(QDialog):
         self.cap = None
         self.current_index = 0
         self.current_frame = None
-        self._normal_geometry = self.geometry()
+        self._normal_geometry = None
         self.load_video(self.file_list[self.file_index])
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Zapamiętaj faktyczny rozmiar dopiero po wyrenderowaniu okna,
+        # w przeciwnym wypadku geometry() zwraca wartości domyślne i
+        # późniejsze przywracanie z pełnego ekranu nie działa poprawnie.
+        if self._normal_geometry is None:
+            self._normal_geometry = self.geometry()
 
     def _read_frame(self, idx=None):
         if idx is not None:
@@ -274,13 +282,13 @@ class VideoPlayerDialog(QDialog):
                 parent.log_window.add_entry("error", f"kadr: {e}")
 
     def toggle_fullscreen(self):
-        if self.isFullScreen():
-            self.showNormal()
-            if getattr(self, "_normal_geometry", None):
+        if self.windowState() & Qt.WindowFullScreen:
+            self.setWindowState(self.windowState() & ~Qt.WindowFullScreen)
+            if self._normal_geometry is not None:
                 self.setGeometry(self._normal_geometry)
         else:
             self._normal_geometry = self.geometry()
-            self.showFullScreen()
+            self.setWindowState(self.windowState() | Qt.WindowFullScreen)
 
     def closeEvent(self, e):
         self.pause()
