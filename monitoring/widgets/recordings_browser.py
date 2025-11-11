@@ -42,11 +42,10 @@ from ..recordings import (
     CameraDirectory,
     RecordingMetadata,
     build_recording_metadata,
-    iter_catalog_entries,
     load_history_metadata,
     walk_recordings,
 )
-from ..storage import remove_from_recordings_catalog
+from ..storage import load_recordings_catalog, remove_from_recordings_catalog
 
 
 class RecordingsScanWorker(QObject):
@@ -74,19 +73,41 @@ class RecordingsScanWorker(QObject):
         try:
             history_source = self._history_items if self._history_items is not None else self._history_path
             history = load_history_metadata(history_source)
+            catalog_lookup: Dict[str, Mapping[str, object]] = {}
+            for raw_entry in load_recordings_catalog():
+                if not isinstance(raw_entry, Mapping):
+                    continue
+                filepath = raw_entry.get("filepath") or raw_entry.get("file")
+                if not filepath:
+                    continue
+                catalog_lookup[os.path.abspath(str(filepath))] = raw_entry
+
             seen: set[str] = set()
             for path in walk_recordings(self._camera_dirs):
                 if self._abort:
                     break
-                entry = build_recording_metadata(str(path), self._camera_dirs, history_meta=history)
+                resolved = os.path.abspath(str(path))
+                overrides = catalog_lookup.pop(resolved, None)
+                entry = build_recording_metadata(
+                    str(path),
+                    self._camera_dirs,
+                    history_meta=history,
+                    overrides=overrides,
+                )
                 seen.add(entry.filepath)
                 self.record_discovered.emit(entry)
             if not self._abort:
-                for entry in iter_catalog_entries(self._camera_dirs, history_meta=history):
+                for filepath, overrides in catalog_lookup.items():
                     if self._abort:
                         break
-                    if entry.filepath in seen:
+                    if filepath in seen:
                         continue
+                    entry = build_recording_metadata(
+                        filepath,
+                        self._camera_dirs,
+                        history_meta=history,
+                        overrides=overrides,
+                    )
                     seen.add(entry.filepath)
                     self.record_discovered.emit(entry)
         finally:
