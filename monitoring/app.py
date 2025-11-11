@@ -183,6 +183,7 @@ class VideoPlayerDialog(QDialog):
         # w przeciwnym wypadku geometry() zwraca wartości domyślne i
         # późniejsze przywracanie z pełnego ekranu nie działa poprawnie.
         if self._normal_geometry is None and not self.isFullScreen():
+        if self._normal_geometry is None and not self._is_fullscreen:
             self._normal_geometry = self.geometry()
 
     def _read_frame(self, idx=None):
@@ -290,6 +291,7 @@ class VideoPlayerDialog(QDialog):
 
     def toggle_fullscreen(self):
         if self.isFullScreen():
+        if self._is_fullscreen:
             self.showNormal()
             if self._normal_geometry is not None:
                 self.setGeometry(self._normal_geometry)
