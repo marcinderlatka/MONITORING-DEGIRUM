@@ -204,6 +204,8 @@ class ThumbnailWorker(QObject, QRunnable):
             )
         sample_indices.append(0)
 
+        fallback: Any | None = None
+
         for index in sample_indices:
             if index:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, index)
@@ -212,6 +214,8 @@ class ThumbnailWorker(QObject, QRunnable):
                 continue
             if not self._is_dark(frame):
                 return frame
+            if fallback is None:
+                fallback = frame
 
         # Fallback: scan first few frames sequentially in case seeking failed.
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
@@ -221,8 +225,10 @@ class ThumbnailWorker(QObject, QRunnable):
                 break
             if not self._is_dark(frame):
                 return frame
+            if fallback is None:
+                fallback = frame
 
-        return None
+        return fallback
 
     @staticmethod
     def _is_dark(frame: Any) -> bool:
@@ -701,22 +707,10 @@ class RecordingsBrowserDialog(QDialog):
         if fmt == target:
             return image.copy()
 
-        return image.convertToFormat(target)
-        if fmt in (
-            QImage.Format_RGB888,
-            QImage.Format_RGB32,
-            QImage.Format_ARGB32,
-            QImage.Format_ARGB32_Premultiplied,
-            QImage.Format_RGBA8888,
-            QImage.Format_RGBA8888_Premultiplied,
-            QImage.Format_Grayscale8,
-        ):
-            return image.copy()
-
-        if fmt == QImage.Format_Indexed8:
-            return image.convertToFormat(QImage.Format_Grayscale8)
-
-        return image.convertToFormat(QImage.Format_RGBA8888)
+        converted = image.convertToFormat(target)
+        if converted.isNull():
+            return QImage()
+        return converted.copy()
 
     def _qimage_from_frame(self, frame: np.ndarray) -> QImage:
         if frame.size == 0:
@@ -745,9 +739,7 @@ class RecordingsBrowserDialog(QDialog):
             return QImage()
 
         height, width, channels = array.shape
-        canvas = QPixmap(self._thumb_size)
-        canvas.fill(QColor("#111111"))
-        painter = QPainter(canvas)
+
         try:
             if channels == 1:
                 gray = np.ascontiguousarray(array.reshape(height, width))
@@ -785,130 +777,28 @@ class RecordingsBrowserDialog(QDialog):
 
         return QImage()
 
-
-    def _normalise_qimage(self, image: QImage) -> QImage:
-        if image.isNull():
-            return image
-
-        fmt = image.format()
-        if fmt == QImage.Format_Invalid:
-            return QImage()
-
-        if fmt in (
-            QImage.Format_RGB888,
-            QImage.Format_RGB32,
-            QImage.Format_ARGB32,
-            QImage.Format_ARGB32_Premultiplied,
-            QImage.Format_RGBA8888,
-            QImage.Format_RGBA8888_Premultiplied,
-            QImage.Format_Grayscale8,
-        ):
-            return image.copy()
-
-        if fmt == QImage.Format_Indexed8:
-            return image.convertToFormat(QImage.Format_Grayscale8)
-
-        return image.convertToFormat(QImage.Format_RGBA8888)
-
-    def _qimage_from_frame(self, frame: np.ndarray) -> QImage:
-        if frame.size == 0:
-            return QImage()
-
-        array = frame
-        if array.dtype != np.uint8:
-            try:
-                array = cv2.normalize(array, None, 0, 255, cv2.NORM_MINMAX)
-            except cv2.error:
-                return QImage()
-            array = array.astype(np.uint8)
-
-        if array.ndim == 2:
-            gray = np.ascontiguousarray(array)
-            height, width = gray.shape
-            return QImage(
-                gray.data,
-                width,
-                height,
-                int(gray.strides[0]),
-                QImage.Format_Grayscale8,
-            ).copy()
-
-        if array.ndim != 3:
-            return QImage()
-
-        height, width, channels = array.shape
-        try:
-            if channels == 1:
-                gray = np.ascontiguousarray(array.reshape(height, width))
-                return QImage(
-                    gray.data,
-                    width,
-                    height,
-                    int(gray.strides[0]),
-                    QImage.Format_Grayscale8,
-                ).copy()
-
-            if channels == 3:
-                rgb = cv2.cvtColor(array, cv2.COLOR_BGR2RGB)
-                rgb = np.ascontiguousarray(rgb)
-                return QImage(
-                    rgb.data,
-                    width,
-                    height,
-                    int(rgb.strides[0]),
-                    QImage.Format_RGB888,
-                ).copy()
-
-            if channels == 4:
-                rgba = cv2.cvtColor(array, cv2.COLOR_BGRA2RGBA)
-                rgba = np.ascontiguousarray(rgba)
-                return QImage(
-                    rgba.data,
-                    width,
-                    height,
-                    int(rgba.strides[0]),
-                    QImage.Format_RGBA8888,
-                ).copy()
-        except cv2.error:
-            return QImage()
-
-        return QImage()
 
     def _pixmap_from_frame(self, frame: np.ndarray) -> QPixmap:
         image = self._qimage_from_frame(frame)
         if image.isNull():
             return self._placeholder_pixmap()
         return self._scale_pixmap(QPixmap.fromImage(image))
-        return self._pixmap_to_canvas(QPixmap.fromImage(image))
-
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        rgb = np.ascontiguousarray(rgb)
-        height, width, _channels = rgb.shape
-        bytes_per_line = int(rgb.strides[0])
-        qimg = QImage(rgb.data, width, height, bytes_per_line, QImage.Format_RGB888).copy()
-        return self._pixmap_to_canvas(QPixmap.fromImage(qimg))
 
     def _compose_thumbnail(self, source: object) -> QPixmap:
         if isinstance(source, np.ndarray):
             return self._pixmap_from_frame(source)
+
         if isinstance(source, QImage):
             image = self._normalise_qimage(source)
             if image.isNull():
                 return self._placeholder_pixmap()
             return self._scale_pixmap(QPixmap.fromImage(image))
+
         if isinstance(source, QPixmap):
             if source.isNull():
                 return self._placeholder_pixmap()
             return self._scale_pixmap(source)
-        if isinstance(source, QPixmap):
-            if source.isNull():
-                return self._placeholder_pixmap()
-            return self._scale_pixmap(source)
-            return self._pixmap_to_canvas(QPixmap.fromImage(image))
-        if isinstance(source, QPixmap):
-            if source.isNull():
-                return self._placeholder_pixmap()
-            return self._pixmap_to_canvas(source)
+
         return self._placeholder_pixmap()
 
     def _apply_thumbnail(self, filepath: str, image: object) -> None:
