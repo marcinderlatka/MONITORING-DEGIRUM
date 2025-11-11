@@ -111,7 +111,15 @@ os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = "/usr/lib/x86_64-linux-gnu/qt5/plugi
 # --- Alert z miniaturką (karta) ---
 class VideoPlayerDialog(QDialog):
     def __init__(self, filepath, parent=None):
-        super().__init__(parent)
+        # QDialog refuses to enter fullscreen mode when it has a parent.
+        # Store the reference manually for logging purposes and detach the
+        # widget from the hierarchy so that the window manager treats it as a
+        # standalone top-level window.
+        self._owner = parent
+        super().__init__(None)
+        if parent is not None:
+            self.setWindowModality(Qt.ApplicationModal)
+
         # Ensure the dialog behaves like a top-level window so that the
         # window manager allows switching to the fullscreen state.
         self.setWindowFlag(Qt.Window, True)
@@ -280,14 +288,14 @@ class VideoPlayerDialog(QDialog):
         try:
             cv2.imwrite(out, self.current_frame)
             QMessageBox.information(self, "Zapisano", f"Kadr zapisany jako: {os.path.basename(out)}")
-            parent = self.parent()
-            if parent is not None and hasattr(parent, "log_window"):
-                parent.log_window.add_entry("application", f"wyeksportowano kadr {os.path.basename(out)}")
+            owner = self._owner
+            if owner is not None and hasattr(owner, "log_window"):
+                owner.log_window.add_entry("application", f"wyeksportowano kadr {os.path.basename(out)}")
         except Exception as e:
             QMessageBox.warning(self, "Błąd", str(e))
-            parent = self.parent()
-            if parent is not None and hasattr(parent, "log_window"):
-                parent.log_window.add_entry("error", f"kadr: {e}")
+            owner = self._owner
+            if owner is not None and hasattr(owner, "log_window"):
+                owner.log_window.add_entry("error", f"kadr: {e}")
 
     def toggle_fullscreen(self):
         if self._is_fullscreen:
