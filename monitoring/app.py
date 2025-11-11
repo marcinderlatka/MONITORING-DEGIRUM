@@ -138,6 +138,7 @@ class VideoPlayerDialog(QDialog):
         self.video_label = QLabel("Wideo")
         self.video_label.setAlignment(Qt.AlignCenter)
         self.video_label.setStyleSheet("background:#000; color:#fff;")
+        self.video_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         v.addWidget(self.video_label, stretch=1)
 
         ctrl = QHBoxLayout()
@@ -319,6 +320,12 @@ class VideoPlayerDialog(QDialog):
                 "Zamknij pełny ekran" if self._is_fullscreen else "Pełny ekran"
             )
         super().changeEvent(event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.current_frame is not None:
+            # Przerysuj bieżącą klatkę, aby dopasować ją do nowego rozmiaru.
+            self._show_frame(self.current_frame)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape and self.isFullScreen():
