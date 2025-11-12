@@ -716,36 +716,39 @@ class RecordingsBrowserDialog(QDialog):
         return self._scale_pixmap(QPixmap.fromImage(image))
 
     def _compose_thumbnail(self, source: object) -> QPixmap:
+        if isinstance(source, QPixmap):
+            return self._scale_pixmap(source)
+        if isinstance(source, QImage):
+            return self._scale_pixmap(QPixmap.fromImage(source))
         if isinstance(source, np.ndarray):
             return self._pixmap_from_frame(source)
-
-        if isinstance(source, QImage):
-            image = self._normalise_qimage(source)
-            if image.isNull():
-                return self._placeholder_pixmap()
-            return self._scale_pixmap(QPixmap.fromImage(image))
-
-        if isinstance(source, QPixmap):
-            if source.isNull():
-                return self._placeholder_pixmap()
-            return self._scale_pixmap(source)
-
         return self._placeholder_pixmap()
 
     def _apply_thumbnail(self, filepath: str, image: object) -> None:
-        pixmap = self._compose_thumbnail(image)
+        # 🔹 Jeśli już mamy gotowy QPixmap – nie konwertujemy
+        if isinstance(image, QPixmap) and not image.isNull():
+            pixmap = image.scaled(self._thumb_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        elif isinstance(image, np.ndarray):
+            pixmap = self._pixmap_from_frame(image)
+        elif isinstance(image, QImage) and not image.isNull():
+            pixmap = QPixmap.fromImage(image)
+            pixmap = self._scale_pixmap(pixmap)
+        else:
+            pixmap = self._placeholder_pixmap()
+
+        # 🔹 Cache + aktualizacja widoku
         self._thumbnail_cache[filepath] = pixmap
         self._pending_thumbnails.discard(filepath)
         self._thumbnail_workers.pop(filepath, None)
+
         row = self._row_lookup.get(filepath)
         if row is None:
             return
+
         item = self.table.item(row, 0)
         if item is not None:
-            if isinstance(pixmap, QPixmap):
-                item.setIcon(QIcon(pixmap))
-            else:
-                item.setIcon(QIcon(self._placeholder_pixmap()))
+            item.setIcon(QIcon(pixmap))
+
         label = self._thumbnail_labels.get(filepath)
         if label is not None:
             label.setPixmap(pixmap)
