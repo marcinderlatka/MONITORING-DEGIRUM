@@ -8,14 +8,20 @@ import os
 import uuid
 from typing import List
 
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import QEvent, QPoint, Qt, QTimer
 from PyQt5.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
+    QPushButton,
     QSizePolicy,
+    QSlider,
     QVBoxLayout,
     QWidget,
 )
@@ -227,7 +233,7 @@ class LogWindow(QListWidget):
 
         cutoff = datetime.datetime.now() - datetime.timedelta(hours=self.retention_hours)
         filtered: List[dict] = []
-        allowed = {"detection", "error", "application"}
+        allowed = {"detection", "error", "application", "settings"}
         for entry in self.history:
             if entry.get("group") not in allowed:
                 continue
@@ -250,7 +256,7 @@ class LogWindow(QListWidget):
     ) -> str:
         if group == "detection object":
             group = "detection"
-        allowed = {"detection", "error", "application"}
+        allowed = {"detection", "error", "application", "settings"}
         if group not in allowed:
             return ""
 
@@ -301,9 +307,166 @@ class LogWindow(QListWidget):
         except Exception as exc:
             print("Nie udało się zaktualizować logów:", exc)
 
+    def set_retention_hours(self, hours: int) -> None:
+        hours = max(1, int(hours))
+        if self.retention_hours == hours:
+            return
+        self.retention_hours = hours
+        self.load_history()
+
+    def clear_history(self) -> None:
+        self.history = []
+        self._refresh_widget()
+        try:
+            with open(self.log_path, "w", encoding="utf-8") as handle:
+                json.dump(self.history, handle, indent=2)
+        except Exception as exc:
+            print("Nie udało się wyczyścić historii logów:", exc)
+
+    def delete_history_file(self) -> None:
+        self.history = []
+        self._refresh_widget()
+        try:
+            if os.path.exists(self.log_path):
+                os.remove(self.log_path)
+        except Exception as exc:
+            print("Nie udało się usunąć pliku logów:", exc)
+
+    def reload(self) -> None:
+        self.load_history()
+
     def get_recent_detections(self, limit: int = 10) -> List[dict]:
         detections = [e for e in self.history if e.get("group") == "detection"]
         return detections[-limit:]
 
 
-__all__ = ["LogEntryWidget", "LogWindow"]
+class LogSettingsDialog(QDialog):
+    def __init__(self, main_window) -> None:
+        super().__init__(main_window)
+        self.mw = main_window
+        self.setWindowTitle("Logi")
+        self.setPalette(QApplication.palette())
+        self.setMinimumSize(400, 250)
+        self.resize(450, 260)
+        self._drag_offset: QPoint | None = None
+
+        layout = QVBoxLayout(self)
+
+        self.header_label = QLabel("Ustawienia logów")
+        self.header_label.setAlignment(Qt.AlignCenter)
+        self.header_label.setStyleSheet("font-size:16px; font-weight:bold;")
+        self.header_label.setCursor(Qt.OpenHandCursor)
+        self.header_label.installEventFilter(self)
+        layout.addWidget(self.header_label)
+
+        self.chk_visible = QCheckBox("Pokaż panel logów")
+        self.chk_visible.setChecked(self.mw.log_window.isVisible())
+        self.chk_visible.toggled.connect(self.mw.log_window.setVisible)
+        layout.addWidget(self.chk_visible)
+
+        retention_box = QVBoxLayout()
+        retention_title = QLabel("Retencja logów (w godzinach)")
+        retention_title.setStyleSheet("font-weight:bold;")
+        retention_box.addWidget(retention_title)
+
+        retention_row = QHBoxLayout()
+        self.retention_slider = QSlider(Qt.Horizontal)
+        self.retention_slider.setMinimum(1)
+        self.retention_slider.setMaximum(24 * 7)
+        self.retention_slider.setPageStep(6)
+        self.retention_slider.setTickInterval(6)
+        self.retention_slider.setTickPosition(QSlider.TicksBelow)
+        slider_value = max(
+            self.retention_slider.minimum(),
+            min(self.retention_slider.maximum(), self.mw.log_window.retention_hours),
+        )
+        self.retention_slider.setValue(slider_value)
+        retention_row.addWidget(self.retention_slider)
+
+        self.retention_label = QLabel()
+        self.retention_label.setMinimumWidth(160)
+        retention_row.addWidget(self.retention_label)
+        retention_box.addLayout(retention_row)
+        layout.addLayout(retention_box)
+
+        self.retention_slider.valueChanged.connect(self._update_retention)
+        self._update_retention(self.retention_slider.value())
+
+        btn_layout = QHBoxLayout()
+
+        btn_reload = QPushButton("Wczytaj ponownie")
+        btn_reload.clicked.connect(self.mw.log_window.reload)
+        btn_layout.addWidget(btn_reload)
+
+        btn_clear = QPushButton("Wyczyść")
+        btn_clear.clicked.connect(self._clear_logs)
+        btn_layout.addWidget(btn_clear)
+
+        btn_delete = QPushButton("Usuń plik")
+        btn_delete.clicked.connect(self._delete_logs)
+        btn_layout.addWidget(btn_delete)
+
+        layout.addLayout(btn_layout)
+        layout.addStretch(1)
+
+    def _update_retention(self, hours: int) -> None:
+        hours = max(1, int(hours))
+        if hours < 24:
+            text = f"ostatnie {hours}h"
+        else:
+            days = hours / 24.0
+            rounded = int(days) if days.is_integer() else round(days, 1)
+            suffix = "dzień" if rounded == 1 else "dni"
+            text = f"ostatnie {rounded} {suffix}"
+        self.retention_label.setText(text)
+        self.mw.update_log_retention_hours(hours)
+
+    def _clear_logs(self) -> None:
+        if (
+            QMessageBox.question(
+                self,
+                "Logi",
+                "Czy na pewno wyczyścić bieżącą historię logów?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            != QMessageBox.Yes
+        ):
+            return
+        self.mw.log_window.clear_history()
+
+    def _delete_logs(self) -> None:
+        if (
+            QMessageBox.question(
+                self,
+                "Logi",
+                "Usunąć plik logów z dysku?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            != QMessageBox.Yes
+        ):
+            return
+        self.mw.log_window.delete_history_file()
+
+    def eventFilter(self, obj, event):
+        if obj is self.header_label:
+            if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                self._drag_offset = event.globalPos() - self.frameGeometry().topLeft()
+                self.header_label.setCursor(Qt.ClosedHandCursor)
+                return True
+            if (
+                event.type() == QEvent.MouseMove
+                and event.buttons() & Qt.LeftButton
+                and self._drag_offset is not None
+            ):
+                self.move(event.globalPos() - self._drag_offset)
+                return True
+            if event.type() == QEvent.MouseButtonRelease and self._drag_offset is not None:
+                self._drag_offset = None
+                self.header_label.setCursor(Qt.OpenHandCursor)
+                return True
+        return super().eventFilter(obj, event)
+
+
+__all__ = ["LogEntryWidget", "LogWindow", "LogSettingsDialog"]
