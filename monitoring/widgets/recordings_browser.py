@@ -1,3 +1,4 @@
+# Naprawa: Widoczne miniaturki + brak białego tła (obsługa błędów ładowania)
 from __future__ import annotations
 
 import datetime as _dt
@@ -18,7 +19,7 @@ from PyQt5.QtCore import (
     pyqtSignal,
     QObject,
 )
-from PyQt5.QtGui import QIcon, QImage, QPixmap, QColor
+from PyQt5.QtGui import QIcon, QImage, QPixmap, QColor, QPalette
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -35,7 +36,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
 )
 
-from ..config import ALERTS_HISTORY_PATH, VISIBLE_CLASSES
+from ..config import ALERTS_HISTORY_PATH, RECORDINGS_CATALOG_PATH, VISIBLE_CLASSES
 from ..recordings import (
     CameraDirectory,
     RecordingMetadata,
@@ -131,11 +132,12 @@ class ThumbnailWorker(QObject, QRunnable):
         from PyQt5.QtGui import QPixmap
 
         if not os.path.exists(path):
+            print("⚠️  Miniatura nie istnieje:", path)
             return None
 
         pix = QPixmap(path)
         if pix.isNull():
-            print("❌ Nie udało się wczytać:", path)
+            print("❌ Nie udało się wczytać (pusty QPixmap):", path)
             return None
         print("✅ Wczytano miniaturę:", path)
         return pix
@@ -203,6 +205,7 @@ class RecordingsBrowserDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Nagrania – przeglądarka")
         self.resize(1200, 720)
+        self._apply_dark_theme()
 
         self._camera_dirs = list(camera_dirs)
         self._history_path = str(history_path)
@@ -219,7 +222,8 @@ class RecordingsBrowserDialog(QDialog):
         self._min_date: QDate | None = None
         self._max_date: QDate | None = None
 
-        self._thumb_size = QSize(256, 144)
+        self._thumb_size = QSize(200, 150)
+        self._placeholder_pixmap_obj = self._create_placeholder_pixmap()
         self.thumbnail_pool = QThreadPool()
 
         layout = QVBoxLayout(self)
@@ -229,6 +233,79 @@ class RecordingsBrowserDialog(QDialog):
         QTimer.singleShot(0, self.refresh)
 
     # ------------------------------------------------------------------ UI --
+    def _apply_dark_theme(self) -> None:
+        palette = QPalette()
+        background = QColor("#0f0f0f")
+        surface = QColor("#181818")
+        accent = QColor("#3d7cfa")
+        text = QColor("#f0f0f0")
+        palette.setColor(QPalette.Window, background)
+        palette.setColor(QPalette.Base, surface)
+        palette.setColor(QPalette.AlternateBase, QColor("#202020"))
+        palette.setColor(QPalette.Text, text)
+        palette.setColor(QPalette.Button, surface)
+        palette.setColor(QPalette.ButtonText, text)
+        palette.setColor(QPalette.Highlight, accent)
+        palette.setColor(QPalette.HighlightedText, QColor("#ffffff"))
+        palette.setColor(QPalette.WindowText, text)
+        palette.setColor(QPalette.ToolTipBase, surface)
+        palette.setColor(QPalette.ToolTipText, text)
+        self.setPalette(palette)
+        self.setAutoFillBackground(True)
+        self.setStyleSheet(
+            """
+            QDialog { background-color: #0f0f0f; color: #f0f0f0; }
+            QLabel { color: #f0f0f0; }
+            QLineEdit, QComboBox, QDateEdit {
+                background-color: #181818;
+                color: #f0f0f0;
+                border: 1px solid #333333;
+                padding: 4px 6px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #181818;
+                color: #f0f0f0;
+                selection-background-color: #3d7cfa;
+                selection-color: #ffffff;
+            }
+            QPushButton {
+                background-color: #202020;
+                color: #f0f0f0;
+                border: 1px solid #3a3a3a;
+                padding: 6px 12px;
+            }
+            QPushButton:hover {
+                background-color: #2a2a2a;
+            }
+            QTableWidget {
+                background-color: #141414;
+                alternate-background-color: #181818;
+                color: #f0f0f0;
+                gridline-color: #2e2e2e;
+            }
+            QHeaderView::section {
+                background-color: #181818;
+                color: #f0f0f0;
+                padding: 4px;
+                border: 0px;
+                border-right: 1px solid #2e2e2e;
+            }
+        """
+        )
+
+    def _configure_table_palette(self) -> None:
+        if not hasattr(self, "table"):
+            return
+        palette = self.table.palette()
+        palette.setColor(QPalette.Base, QColor("#141414"))
+        palette.setColor(QPalette.AlternateBase, QColor("#1c1c1c"))
+        palette.setColor(QPalette.Text, QColor("#f0f0f0"))
+        palette.setColor(QPalette.Highlight, QColor("#3d7cfa"))
+        palette.setColor(QPalette.HighlightedText, QColor("#ffffff"))
+        palette.setColor(QPalette.Button, QColor("#202020"))
+        palette.setColor(QPalette.ButtonText, QColor("#f0f0f0"))
+        self.table.setPalette(palette)
+
     def _build_filters(self) -> QHBoxLayout:
         layout = QHBoxLayout()
 
@@ -290,7 +367,7 @@ class RecordingsBrowserDialog(QDialog):
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.table.setAlternatingRowColors(True)
+        self.table.setAlternatingRowColors(False)
         self.table.setIconSize(self._thumb_size)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         header = self.table.horizontalHeader()
@@ -302,9 +379,35 @@ class RecordingsBrowserDialog(QDialog):
         self.table.customContextMenuRequested.connect(self._context_menu)
         self.table.cellDoubleClicked.connect(self._cell_double_clicked)
 
+        self._configure_table_palette()
+
         return self.table
 
     # --------------------------------------------------------------- actions --
+    def load_recordings(self) -> List[RecordingMetadata]:
+        catalog_path = os.path.abspath(str(RECORDINGS_CATALOG_PATH))
+        print(f"[RecordingsBrowser] Ładowanie katalogu nagrań z: {catalog_path}")
+        print(f"[RecordingsBrowser] Historia alertów: {self._history_path}")
+        try:
+            entries = self._load_entries_from_catalog()
+        except Exception as exc:  # pragma: no cover - diagnostyka GUI
+            print(f"[RecordingsBrowser] Błąd odczytu katalogu: {exc}")
+            return []
+
+        if not entries:
+            print("[RecordingsBrowser] Nie znaleziono żadnych wpisów w katalogu.")
+            return []
+
+        print(f"[RecordingsBrowser] Wczytano {len(entries)} wpisów.")
+        for entry in entries:
+            thumb_path = self._resolve_thumbnail_path(entry)
+            if thumb_path and os.path.exists(thumb_path):
+                print(f"  • {entry.filepath} | thumb: {thumb_path}")
+            else:
+                missing = thumb_path or "(brak informacji)"
+                print(f"  • {entry.filepath} | thumb brak ({missing})")
+        return entries
+
     def refresh(self) -> None:
         self.refresh_btn.setEnabled(False)
 
@@ -319,7 +422,7 @@ class RecordingsBrowserDialog(QDialog):
             self._min_date = None
             self._max_date = None
 
-            entries = self._load_entries_from_catalog()
+            entries = self.load_recordings()
             self._entries = list(entries)
 
             for entry in self._entries:
@@ -518,7 +621,7 @@ class RecordingsBrowserDialog(QDialog):
         thumb_label.setFixedSize(self._thumb_size)
         thumb_label.setAlignment(Qt.AlignCenter)
         thumb_label.setStyleSheet(
-            "border:1px solid #555; background:{};".format(
+            "border: 1px solid #3a3a3a; background-color: {};".format(
                 self._thumbnail_background_color().name()
             )
         )
@@ -555,26 +658,26 @@ class RecordingsBrowserDialog(QDialog):
         else:
             self._request_thumbnail(entry)
 
+    def _create_placeholder_pixmap(self) -> QPixmap:
+        pixmap = QPixmap(self._thumb_size)
+        pixmap.fill(QColor("#2b2b2b"))
+        return pixmap
+
     def _placeholder_pixmap(self) -> QPixmap:
-        if not hasattr(self, "_placeholder_pix"):
-            pixmap = QPixmap(self._thumb_size)
-            pixmap.fill(self._thumbnail_background_color())
-            setattr(self, "_placeholder_pix", pixmap)
-        return getattr(self, "_placeholder_pix")
+        if not hasattr(self, "_placeholder_pixmap_obj"):
+            self._placeholder_pixmap_obj = self._create_placeholder_pixmap()
+        return self._placeholder_pixmap_obj
 
     def _thumbnail_background_color(self) -> QColor:
-        table = getattr(self, "table", None)
-        if table is None:
-            return QColor("#2a2a2a")
-        palette = table.palette()
-        role = table.viewport().backgroundRole()
-        color = palette.color(role)
-        if not color.isValid():
-            return QColor("#2a2a2a")
-        return color
+        return QColor("#1a1a1a")
 
     def _request_thumbnail(self, entry: RecordingMetadata) -> None:
         if entry.filepath in self._pending_thumbnails or entry.filepath in self._thumbnail_cache:
+            return
+        thumb_path = self._resolve_thumbnail_path(entry)
+        direct_pixmap = self._load_pixmap_from_disk(thumb_path)
+        if direct_pixmap is not None:
+            self._apply_thumbnail(entry.filepath, direct_pixmap)
             return
         worker = ThumbnailWorker(entry, self._thumb_size)
         worker.thumbnail_ready.connect(self._apply_thumbnail)
@@ -779,6 +882,18 @@ class RecordingsBrowserDialog(QDialog):
             if os.path.exists(candidate):
                 return candidate
         return candidates[0] if candidates else ""
+
+    def _load_pixmap_from_disk(self, thumb_path: str) -> QPixmap | None:
+        if not thumb_path:
+            return None
+        if not os.path.exists(thumb_path):
+            print(f"[RecordingsBrowser] Brak miniatury na dysku: {thumb_path}")
+            return None
+        pixmap = QPixmap(thumb_path)
+        if pixmap.isNull():
+            print(f"[RecordingsBrowser] Nieprawidłowy plik miniatury: {thumb_path}")
+            return None
+        return pixmap
 
     # ------------------------------------------------------------ lifecycle --
     def closeEvent(self, event):  # noqa: D401
