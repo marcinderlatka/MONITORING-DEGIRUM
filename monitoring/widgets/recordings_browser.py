@@ -32,6 +32,7 @@ from PyQt5.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QStackedLayout,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -377,7 +378,19 @@ class RecordingsBrowserDialog(QDialog):
 
         return layout
 
-    def _build_table(self) -> QTableWidget:
+    def _build_table(self) -> QWidget:
+        container = QWidget()
+        self._table_stack = QStackedLayout(container)
+
+        self.loading_label = QLabel("Wczytuję Twoje nagrania...")
+        self.loading_label.setAlignment(Qt.AlignCenter)
+        self.loading_label.setWordWrap(True)
+        self.loading_label.setStyleSheet(
+            "color: #3a3a3a; font-size: 18px; background-color: #ffffff;"
+        )
+        self.loading_label.setMargin(40)
+        self._table_stack.addWidget(self.loading_label)
+
         self.table = QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(
             [
@@ -409,7 +422,9 @@ class RecordingsBrowserDialog(QDialog):
 
         self._configure_table_palette()
 
-        return self.table
+        self._table_stack.addWidget(self.table)
+        self._table_stack.setCurrentWidget(self.loading_label)
+        return container
 
     # --------------------------------------------------------------- actions --
     def load_recordings(self) -> List[RecordingMetadata]:
@@ -438,6 +453,7 @@ class RecordingsBrowserDialog(QDialog):
 
     def refresh(self) -> None:
         self.refresh_btn.setEnabled(False)
+        self._set_loading_state(True)
 
         try:
             self._entries = []
@@ -461,6 +477,15 @@ class RecordingsBrowserDialog(QDialog):
             self._apply_filters()
         finally:
             self.refresh_btn.setEnabled(True)
+            self._set_loading_state(False)
+
+    def _set_loading_state(self, loading: bool) -> None:
+        if not hasattr(self, "_table_stack"):
+            return
+        target = self.loading_label if loading else self.table
+        if self._table_stack.currentWidget() is not target:
+            self._table_stack.setCurrentWidget(target)
+        self.loading_label.setVisible(loading)
 
     def delete_selected(self) -> None:
         paths = self._selected_paths()
