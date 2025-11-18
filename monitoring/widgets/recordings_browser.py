@@ -19,9 +19,10 @@ from PyQt5.QtCore import (
     pyqtSignal,
     QObject,
 )
-from PyQt5.QtGui import QIcon, QImage, QPixmap, QColor, QPalette
+from PyQt5.QtGui import QImage, QPixmap, QColor, QPalette
 from PyQt5.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QDateEdit,
     QDialog,
@@ -195,6 +196,14 @@ class RecordingsBrowserDialog(QDialog):
 
     open_video = pyqtSignal(str)
 
+    CHECK_COLUMN = 0
+    THUMB_COLUMN = 1
+    TIME_COLUMN = 2
+    CAMERA_COLUMN = 3
+    CLASS_COLUMN = 4
+    CONF_COLUMN = 5
+    FILE_COLUMN = 6
+
     def __init__(
         self,
         camera_dirs: Sequence[CameraDirectory],
@@ -205,7 +214,10 @@ class RecordingsBrowserDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Nagrania – przeglądarka")
         self.resize(1200, 720)
-        self._apply_dark_theme()
+        self._apply_light_theme()
+
+        self._block_item_changed = False
+        self._syncing_select_all = False
 
         self._camera_dirs = list(camera_dirs)
         self._history_path = str(history_path)
@@ -233,62 +245,62 @@ class RecordingsBrowserDialog(QDialog):
         QTimer.singleShot(0, self.refresh)
 
     # ------------------------------------------------------------------ UI --
-    def _apply_dark_theme(self) -> None:
+    def _apply_light_theme(self) -> None:
         palette = QPalette()
-        background = QColor("#0f0f0f")
-        surface = QColor("#181818")
-        accent = QColor("#3d7cfa")
-        text = QColor("#f0f0f0")
+        background = QColor("#ffffff")
+        surface = QColor("#f6f6f6")
+        accent = QColor("#1d5fd1")
+        text = QColor("#000000")
         palette.setColor(QPalette.Window, background)
-        palette.setColor(QPalette.Base, surface)
-        palette.setColor(QPalette.AlternateBase, QColor("#202020"))
+        palette.setColor(QPalette.Base, QColor("#ffffff"))
+        palette.setColor(QPalette.AlternateBase, surface)
         palette.setColor(QPalette.Text, text)
-        palette.setColor(QPalette.Button, surface)
+        palette.setColor(QPalette.Button, QColor("#ffffff"))
         palette.setColor(QPalette.ButtonText, text)
         palette.setColor(QPalette.Highlight, accent)
         palette.setColor(QPalette.HighlightedText, QColor("#ffffff"))
         palette.setColor(QPalette.WindowText, text)
-        palette.setColor(QPalette.ToolTipBase, surface)
+        palette.setColor(QPalette.ToolTipBase, QColor("#ffffdc"))
         palette.setColor(QPalette.ToolTipText, text)
         self.setPalette(palette)
         self.setAutoFillBackground(True)
         self.setStyleSheet(
             """
-            QDialog { background-color: #0f0f0f; color: #f0f0f0; }
-            QLabel { color: #f0f0f0; }
+            QDialog { background-color: #ffffff; color: #000000; }
+            QLabel { color: #000000; }
             QLineEdit, QComboBox, QDateEdit {
-                background-color: #181818;
-                color: #f0f0f0;
-                border: 1px solid #333333;
+                background-color: #ffffff;
+                color: #000000;
+                border: 1px solid #c6c6c6;
                 padding: 4px 6px;
             }
             QComboBox QAbstractItemView {
-                background-color: #181818;
-                color: #f0f0f0;
-                selection-background-color: #3d7cfa;
+                background-color: #ffffff;
+                color: #000000;
+                selection-background-color: #1d5fd1;
                 selection-color: #ffffff;
             }
             QPushButton {
-                background-color: #202020;
-                color: #f0f0f0;
-                border: 1px solid #3a3a3a;
+                background-color: #ffffff;
+                color: #000000;
+                border: 1px solid #bdbdbd;
                 padding: 6px 12px;
             }
             QPushButton:hover {
-                background-color: #2a2a2a;
+                background-color: #f0f0f0;
             }
             QTableWidget {
-                background-color: #141414;
-                alternate-background-color: #181818;
-                color: #f0f0f0;
-                gridline-color: #2e2e2e;
+                background-color: #ffffff;
+                alternate-background-color: #f5f5f5;
+                color: #000000;
+                gridline-color: #d0d0d0;
             }
             QHeaderView::section {
-                background-color: #181818;
-                color: #f0f0f0;
+                background-color: #f0f0f0;
+                color: #000000;
                 padding: 4px;
                 border: 0px;
-                border-right: 1px solid #2e2e2e;
+                border-right: 1px solid #d0d0d0;
             }
         """
         )
@@ -297,13 +309,13 @@ class RecordingsBrowserDialog(QDialog):
         if not hasattr(self, "table"):
             return
         palette = self.table.palette()
-        palette.setColor(QPalette.Base, QColor("#141414"))
-        palette.setColor(QPalette.AlternateBase, QColor("#1c1c1c"))
-        palette.setColor(QPalette.Text, QColor("#f0f0f0"))
-        palette.setColor(QPalette.Highlight, QColor("#3d7cfa"))
+        palette.setColor(QPalette.Base, QColor("#ffffff"))
+        palette.setColor(QPalette.AlternateBase, QColor("#f5f5f5"))
+        palette.setColor(QPalette.Text, QColor("#000000"))
+        palette.setColor(QPalette.Highlight, QColor("#1d5fd1"))
         palette.setColor(QPalette.HighlightedText, QColor("#ffffff"))
-        palette.setColor(QPalette.Button, QColor("#202020"))
-        palette.setColor(QPalette.ButtonText, QColor("#f0f0f0"))
+        palette.setColor(QPalette.Button, QColor("#ffffff"))
+        palette.setColor(QPalette.ButtonText, QColor("#000000"))
         self.table.setPalette(palette)
 
     def _build_filters(self) -> QHBoxLayout:
@@ -343,11 +355,16 @@ class RecordingsBrowserDialog(QDialog):
         self.delete_btn = QPushButton("Usuń zaznaczone")
         layout.addWidget(self.delete_btn)
 
+        self.select_all_checkbox = QCheckBox("Zaznacz wszystko")
+        self.select_all_checkbox.setTristate(True)
+        self.select_all_checkbox.setCheckState(Qt.Unchecked)
+        layout.addWidget(self.select_all_checkbox)
+
         layout.addStretch(1)
 
         today = QDate.currentDate()
         self.date_to.setDate(today)
-        self.date_from.setDate(today.addDays(-7))
+        self.date_from.setDate(today.addDays(-1))
 
         self.camera_filter.currentTextChanged.connect(self._apply_filters)
         self.class_filter.currentTextChanged.connect(self._apply_filters)
@@ -356,13 +373,22 @@ class RecordingsBrowserDialog(QDialog):
         self.search_edit.textChanged.connect(self._apply_filters)
         self.refresh_btn.clicked.connect(self.refresh)
         self.delete_btn.clicked.connect(self.delete_selected)
+        self.select_all_checkbox.stateChanged.connect(self._handle_select_all_changed)
 
         return layout
 
     def _build_table(self) -> QTableWidget:
-        self.table = QTableWidget(0, 6)
+        self.table = QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(
-            ["Miniatura", "Czas", "Kamera", "Klasa", "Pewność", "Plik"]
+            [
+                "Usuń",
+                "Miniatura",
+                "Czas",
+                "Kamera",
+                "Klasa",
+                "Pewność",
+                "Plik",
+            ]
         )
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -373,11 +399,13 @@ class RecordingsBrowserDialog(QDialog):
         header = self.table.horizontalHeader()
         header.setStretchLastSection(True)
         header.setDefaultSectionSize(160)
-        self.table.setColumnWidth(0, self._thumb_size.width())
+        self.table.setColumnWidth(self.CHECK_COLUMN, 90)
+        self.table.setColumnWidth(self.THUMB_COLUMN, self._thumb_size.width())
         self.table.verticalHeader().setDefaultSectionSize(self._thumb_size.height() + 20)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._context_menu)
         self.table.cellDoubleClicked.connect(self._cell_double_clicked)
+        self.table.itemChanged.connect(self._handle_item_changed)
 
         self._configure_table_palette()
 
@@ -421,6 +449,7 @@ class RecordingsBrowserDialog(QDialog):
             self.table.setRowCount(0)
             self._min_date = None
             self._max_date = None
+            self._set_select_all_state(Qt.Unchecked)
 
             entries = self.load_recordings()
             self._entries = list(entries)
@@ -508,10 +537,7 @@ class RecordingsBrowserDialog(QDialog):
         return entries
 
     def _cell_double_clicked(self, row: int, column: int) -> None:
-        item = self.table.item(row, 0)
-        if not item:
-            return
-        path = item.data(Qt.UserRole)
+        path = self._row_filepath(row)
         if path and os.path.exists(path):
             self.open_video.emit(path)
 
@@ -523,21 +549,90 @@ class RecordingsBrowserDialog(QDialog):
         if selected_action == open_action:
             selected = self.table.currentRow()
             if selected >= 0:
-                self._cell_double_clicked(selected, 0)
+                self._cell_double_clicked(selected, self.THUMB_COLUMN)
         elif selected_action == delete_action:
             self.delete_selected()
 
     # --------------------------------------------------------------- helpers --
+    def _row_filepath(self, row: int) -> str | None:
+        for column in range(self.table.columnCount()):
+            item = self.table.item(row, column)
+            if not item:
+                continue
+            path = item.data(Qt.UserRole)
+            if path:
+                return str(path)
+        return None
+
+    def _handle_item_changed(self, item: QTableWidgetItem) -> None:
+        if self._block_item_changed:
+            return
+        if item.column() != self.CHECK_COLUMN:
+            return
+        self._sync_select_all_checkbox()
+
+    def _handle_select_all_changed(self, state: int) -> None:
+        if self._syncing_select_all:
+            return
+        if state == Qt.PartiallyChecked:
+            return
+        target = Qt.Checked if state == Qt.Checked else Qt.Unchecked
+        self._set_all_checkboxes(target)
+
+    def _set_all_checkboxes(self, state: Qt.CheckState) -> None:
+        self._block_item_changed = True
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, self.CHECK_COLUMN)
+            if item:
+                item.setCheckState(state)
+        self._block_item_changed = False
+        self._sync_select_all_checkbox()
+
+    def _set_select_all_state(self, state: Qt.CheckState) -> None:
+        if not hasattr(self, "select_all_checkbox"):
+            return
+        self._syncing_select_all = True
+        self.select_all_checkbox.setCheckState(state)
+        self._syncing_select_all = False
+
+    def _sync_select_all_checkbox(self) -> None:
+        if not hasattr(self, "select_all_checkbox"):
+            return
+        total = self.table.rowCount()
+        checked = 0
+        for row in range(total):
+            item = self.table.item(row, self.CHECK_COLUMN)
+            if item and item.checkState() == Qt.Checked:
+                checked += 1
+        if total == 0 or checked == 0:
+            state = Qt.Unchecked
+        elif checked == total:
+            state = Qt.Checked
+        else:
+            state = Qt.PartiallyChecked
+        self._set_select_all_state(state)
+
     def _selected_paths(self) -> List[str]:
         paths: List[str] = []
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, self.CHECK_COLUMN)
+            if not item:
+                continue
+            if item.checkState() == Qt.Checked:
+                path = item.data(Qt.UserRole)
+                if path:
+                    paths.append(str(path))
+        if paths:
+            return paths
+
         for item in self.table.selectedItems():
-            if item.column() != 0:
+            if item.column() != self.THUMB_COLUMN:
                 continue
             path = item.data(Qt.UserRole)
             if path:
                 paths.append(str(path))
         if not paths and self.table.currentRow() >= 0:
-            item = self.table.item(self.table.currentRow(), 0)
+            item = self.table.item(self.table.currentRow(), self.THUMB_COLUMN)
             if item:
                 path = item.data(Qt.UserRole)
                 if path:
@@ -565,14 +660,12 @@ class RecordingsBrowserDialog(QDialog):
             changed = True
         if changed:
             with suppress(Exception):
-                self.date_from.blockSignals(True)
-                self.date_to.blockSignals(True)
                 if self._min_date:
-                    self.date_from.setDate(self._min_date)
+                    self.date_from.setMinimumDate(self._min_date)
+                    self.date_to.setMinimumDate(self._min_date)
                 if self._max_date:
-                    self.date_to.setDate(self._max_date)
-            self.date_from.blockSignals(False)
-            self.date_to.blockSignals(False)
+                    self.date_from.setMaximumDate(self._max_date)
+                    self.date_to.setMaximumDate(self._max_date)
 
     def _matches_filters(self, entry: RecordingMetadata) -> bool:
         camera_sel = self.camera_filter.currentText()
@@ -605,6 +698,8 @@ class RecordingsBrowserDialog(QDialog):
         return True
 
     def _insert_row(self, entry: RecordingMetadata, row: int | None = None) -> None:
+        previous_block = self._block_item_changed
+        self._block_item_changed = True
         if row is None:
             row = self.table.rowCount()
         self.table.insertRow(row)
@@ -612,55 +707,70 @@ class RecordingsBrowserDialog(QDialog):
             if current_row >= row:
                 self._row_lookup[path] = current_row + 1
 
+        check_item = QTableWidgetItem()
+        check_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+        check_item.setCheckState(Qt.Unchecked)
+        check_item.setData(Qt.UserRole, entry.filepath)
+        check_item.setTextAlignment(Qt.AlignCenter)
+        self.table.setItem(row, self.CHECK_COLUMN, check_item)
+
         thumb_item = QTableWidgetItem()
         thumb_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
         thumb_item.setData(Qt.UserRole, entry.filepath)
-        self.table.setItem(row, 0, thumb_item)
+        thumb_item.setTextAlignment(Qt.AlignCenter)
+        self.table.setItem(row, self.THUMB_COLUMN, thumb_item)
 
         thumb_label = QLabel()
         thumb_label.setFixedSize(self._thumb_size)
         thumb_label.setAlignment(Qt.AlignCenter)
         thumb_label.setStyleSheet(
-            "border: 1px solid #3a3a3a; background-color: {};".format(
+            "border: 1px solid #d0d0d0; background-color: {};".format(
                 self._thumbnail_background_color().name()
             )
         )
         thumb_label.setPixmap(self._placeholder_pixmap())
-        self.table.setCellWidget(row, 0, thumb_label)
+        self.table.setCellWidget(row, self.THUMB_COLUMN, thumb_label)
         self._thumbnail_labels[entry.filepath] = thumb_label
 
         time_item = QTableWidgetItem(entry.display_time)
         time_item.setData(Qt.UserRole, entry.filepath)
-        self.table.setItem(row, 1, time_item)
+        time_item.setTextAlignment(Qt.AlignCenter)
+        self.table.setItem(row, self.TIME_COLUMN, time_item)
 
         cam_item = QTableWidgetItem(entry.camera)
         cam_item.setData(Qt.UserRole, entry.filepath)
-        self.table.setItem(row, 2, cam_item)
+        cam_item.setTextAlignment(Qt.AlignCenter)
+        self.table.setItem(row, self.CAMERA_COLUMN, cam_item)
 
         label_item = QTableWidgetItem(entry.label)
         label_item.setData(Qt.UserRole, entry.filepath)
-        self.table.setItem(row, 3, label_item)
+        label_item.setTextAlignment(Qt.AlignCenter)
+        self.table.setItem(row, self.CLASS_COLUMN, label_item)
 
         conf_item = QTableWidgetItem("-" if entry.confidence <= 0 else f"{entry.confidence:.2f}")
         conf_item.setData(Qt.UserRole, entry.filepath)
-        self.table.setItem(row, 4, conf_item)
+        conf_item.setTextAlignment(Qt.AlignCenter)
+        self.table.setItem(row, self.CONF_COLUMN, conf_item)
 
         file_text = self._format_file_cell_text(entry)
         file_item = QTableWidgetItem(file_text)
         file_item.setData(Qt.UserRole, entry.filepath)
         if "\n" in file_text:
             file_item.setToolTip(file_text)
-        self.table.setItem(row, 5, file_item)
+        file_item.setTextAlignment(Qt.AlignCenter)
+        self.table.setItem(row, self.FILE_COLUMN, file_item)
 
         self._row_lookup[entry.filepath] = row
         if entry.filepath in self._thumbnail_cache:
             self._apply_thumbnail(entry.filepath, self._thumbnail_cache[entry.filepath])
         else:
             self._request_thumbnail(entry)
+        self._block_item_changed = previous_block
+        self._sync_select_all_checkbox()
 
     def _create_placeholder_pixmap(self) -> QPixmap:
         pixmap = QPixmap(self._thumb_size)
-        pixmap.fill(QColor("#2b2b2b"))
+        pixmap.fill(QColor("#f0f0f0"))
         return pixmap
 
     def _placeholder_pixmap(self) -> QPixmap:
@@ -669,7 +779,7 @@ class RecordingsBrowserDialog(QDialog):
         return self._placeholder_pixmap_obj
 
     def _thumbnail_background_color(self) -> QColor:
-        return QColor("#1a1a1a")
+        return QColor("#f8f8f8")
 
     def _request_thumbnail(self, entry: RecordingMetadata) -> None:
         if entry.filepath in self._pending_thumbnails or entry.filepath in self._thumbnail_cache:
@@ -848,10 +958,6 @@ class RecordingsBrowserDialog(QDialog):
         if row is None:
             return
 
-        item = self.table.item(row, 0)
-        if item is not None:
-            item.setIcon(QIcon(pixmap))
-
         label = self._thumbnail_labels.get(filepath)
         if label is not None:
             label.setPixmap(pixmap)
@@ -860,6 +966,8 @@ class RecordingsBrowserDialog(QDialog):
         if not self._entries:
             self.table.setRowCount(0)
             self._row_lookup.clear()
+            self._thumbnail_labels.clear()
+            self._sync_select_all_checkbox()
             return
 
         self.table.setRowCount(0)
@@ -868,13 +976,28 @@ class RecordingsBrowserDialog(QDialog):
         for entry in self._entries:
             if self._matches_filters(entry):
                 self._insert_row(entry)
+        self._sync_select_all_checkbox()
 
     def _format_file_cell_text(self, entry: RecordingMetadata) -> str:
         mp4_path = entry.filepath
         thumb_path = self._resolve_thumbnail_path(entry)
         if thumb_path and thumb_path != mp4_path:
-            return f"{mp4_path}\n{thumb_path}"
-        return mp4_path
+            return "\n".join(
+                [self._shorten_path(mp4_path), self._shorten_path(thumb_path)]
+            )
+        return self._shorten_path(mp4_path)
+
+    def _shorten_path(self, path: str, max_length: int = 60) -> str:
+        if not path:
+            return ""
+        normalized = os.path.normpath(str(path))
+        if len(normalized) <= max_length:
+            return normalized
+        ellipsis = "…"
+        keep = max(max_length - len(ellipsis), 4)
+        head = keep // 2
+        tail = keep - head
+        return f"{normalized[:head]}{ellipsis}{normalized[-tail:]}"
 
     def _resolve_thumbnail_path(self, entry: RecordingMetadata) -> str:
         candidates = _thumbnail_candidates_for_entry(entry)
