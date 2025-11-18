@@ -36,6 +36,7 @@ from PyQt5.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
+    QWidget,
 )
 
 from ..config import ALERTS_HISTORY_PATH, RECORDINGS_CATALOG_PATH, VISIBLE_CLASSES
