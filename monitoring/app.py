@@ -65,6 +65,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from . import config as config_module
 from .config import (
     ALERTS_HISTORY_PATH,
     CONFIG_PATH,
@@ -102,7 +103,7 @@ from .workers import CameraWorker
 from .widgets.alerts import AlertDialog, AlertListWidget
 from .widgets.camera_grid import CameraGridWidget
 from .widgets.camera_list import CameraListWidget
-from .widgets.logs import LogWindow
+from .widgets.logs import LogSettingsDialog, LogWindow
 from .widgets.recordings_browser import RecordingsBrowserDialog
 
 # Qt platform plugin path (Linux)
@@ -1012,6 +1013,11 @@ class MainWindow(QMainWindow):
         btn_alerts.setIconSize(QSize(50, 50))
         btn_alerts.clicked.connect(self.open_alert_dialog)
 
+        btn_logs = QToolButton()
+        btn_logs.setIcon(QIcon(str(ICON_DIR / "terminal.svg")))
+        btn_logs.setIconSize(QSize(50, 50))
+        btn_logs.clicked.connect(self.open_log_settings_dialog)
+
         self.btn_sound = QToolButton()
         self.btn_sound.setIcon(QIcon(str(ICON_DIR / "volume-up.svg")))
         self.btn_sound.setIconSize(QSize(50, 50))
@@ -1033,7 +1039,16 @@ QToolButton:hover { background: #ff6666; }  # jasnoczerwone tło po najechaniu
 QToolButton:focus { outline: none; }
         """
 
-        for btn in (btn_cameras, btn_recordings, btn_settings, btn_cam_ctrl, btn_alerts, self.btn_sound, btn_fullscreen):
+        for btn in (
+            btn_cameras,
+            btn_recordings,
+            btn_settings,
+            btn_cam_ctrl,
+            btn_alerts,
+            btn_logs,
+            self.btn_sound,
+            btn_fullscreen,
+        ):
             btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
             btn.setAutoRaise(True)
             btn.setStyleSheet(btn_style)
@@ -1044,6 +1059,7 @@ QToolButton:focus { outline: none; }
         controls_layout.addWidget(btn_settings)
         controls_layout.addWidget(btn_cam_ctrl)
         controls_layout.addWidget(btn_alerts)
+        controls_layout.addWidget(btn_logs)
         controls_layout.addWidget(self.btn_sound)
         controls_layout.addWidget(btn_fullscreen)
         controls_layout.addStretch()
@@ -1136,6 +1152,22 @@ QToolButton:focus { outline: none; }
     def open_alert_dialog(self):
         dlg = AlertDialog(self)
         dlg.exec_()
+
+    def open_log_settings_dialog(self):
+        self.log_window.add_entry("settings", "otwarto ustawienia logów")
+        dlg = LogSettingsDialog(self)
+        dlg.exec_()
+
+    def update_log_retention_hours(self, hours: int) -> None:
+        hours = max(1, min(24 * 7, int(hours)))
+        if self.log_window.retention_hours == hours:
+            return
+        self.log_window.set_retention_hours(hours)
+        cfg = load_config()
+        cfg["cameras"] = self.cameras
+        cfg["log_retention_hours"] = hours
+        save_config(cfg)
+        config_module.LOG_RETENTION_HOURS = hours
 
     def open_camera_settings(self):
         self.log_window.add_entry("settings", "otwarto ustawienia kamer")
