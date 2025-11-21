@@ -31,8 +31,14 @@ from ..storage import AlertMemory
 
 
 class AlertItemWidget(QWidget):
-    BASE_STYLE = "QWidget{border:1px solid transparent; border-radius:10px; background:rgba(0,0,0,0.35);}"  # noqa: E501
-    SELECTED_STYLE = "QWidget{border:2px solid #ff3333; border-radius:10px; background:rgba(255,0,0,0.08);}"  # noqa: E501
+    BASE_STYLE = (
+        "QWidget{border:0.5px solid transparent; border-radius:10px;"
+        " background:rgba(0,0,0,0.35);}"
+    )
+    SELECTED_STYLE = (
+        "QWidget{border:0.5px solid #ff3333; border-radius:10px;"
+        " background:rgba(255,0,0,0.05);}"
+    )
     COLOR_PALETTE = [
         "#f94144",
         "#f3722c",
@@ -57,7 +63,7 @@ class AlertItemWidget(QWidget):
 
         self.thumb = QLabel()
         self.thumb.setFixedSize(*thumb_size)
-        self.thumb.setStyleSheet("border:1px solid #555; background:#111;")
+        self.thumb.setStyleSheet("border:none; background:#111;")
         layout.addWidget(self.thumb, alignment=Qt.AlignCenter)
 
         camera = alert.get("camera", "?")
@@ -157,6 +163,8 @@ class AlertListWidget(QWidget):
         self.list.itemDoubleClicked.connect(self._open_selected)
         self.list.itemSelectionChanged.connect(self._update_selection_highlight)
 
+        self._selected_rows: set[int] = set()
+
         self.load_from_history(self.mem.items)
 
     @property
@@ -225,12 +233,18 @@ class AlertListWidget(QWidget):
                 self.open_video.emit(filepath)
 
     def _update_selection_highlight(self) -> None:
-        selected_items = self.list.selectedItems()
-        for index in range(self.list.count()):
-            item = self.list.item(index)
+        selected_rows = {index.row() for index in self.list.selectedIndexes()}
+        changed_rows = selected_rows.symmetric_difference(self._selected_rows)
+        if not changed_rows:
+            return
+        self._selected_rows = selected_rows
+        for row in changed_rows:
+            if row < 0 or row >= self.list.count():
+                continue
+            item = self.list.item(row)
             widget = self.list.itemWidget(item)
             if isinstance(widget, AlertItemWidget):
-                widget.set_selected(item in selected_items)
+                widget.set_selected(row in selected_rows)
 
     def reload(self) -> None:
         self.mem.load()
