@@ -410,6 +410,15 @@ class RecordingsBrowserDialog(QDialog):
         self.table.setAlternatingRowColors(False)
         self.table.setIconSize(self._thumb_size)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setStyleSheet(
+            "\n".join(
+                [
+                    "QTableWidget::item:selected{background: transparent; color: inherit;}",
+                    "QTableWidget::item:selected:active{background: transparent; color: inherit;}",
+                    "QTableWidget::item:selected:!active{background: transparent; color: inherit;}",
+                ]
+            )
+        )
         header = self.table.horizontalHeader()
         header.setStretchLastSection(True)
         header.setDefaultSectionSize(160)

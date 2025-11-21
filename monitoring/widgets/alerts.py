@@ -134,7 +134,16 @@ class AlertListWidget(QWidget):
         self.list = QListWidget()
         self.list.setFixedWidth(300)
         self.list.setFrameShape(QFrame.NoFrame)
-        self.list.setStyleSheet("QListWidget{background: transparent; border: none;}")
+        self.list.setStyleSheet(
+            "\n".join(
+                [
+                    "QListWidget{background: transparent; border: none;}",
+                    "QListWidget::item:selected{background: transparent; color: inherit;}",
+                    "QListWidget::item:selected:active{background: transparent; color: inherit;}",
+                    "QListWidget::item:selected:!active{background: transparent; color: inherit;}",
+                ]
+            )
+        )
         self.list.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         layout.addWidget(self.list)
