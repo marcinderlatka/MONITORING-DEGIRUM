@@ -31,6 +31,7 @@ from ..storage import AlertMemory
 
 
 class AlertItemWidget(QWidget):
+    clicked = pyqtSignal()
     BASE_STYLE = (
         "#alertItem{border:0.5px solid transparent; border-radius:10px;"
         " background:rgba(0,0,0,0.35);}"
@@ -57,6 +58,7 @@ class AlertItemWidget(QWidget):
         super().__init__()
         self.alert = alert
         self.setObjectName("alertItem")
+        self.setAttribute(Qt.WA_StyledBackground, True)
         self.setStyleSheet(self.BASE_STYLE)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
@@ -132,6 +134,11 @@ class AlertItemWidget(QWidget):
     def set_selected(self, selected: bool) -> None:
         self.setStyleSheet(self.SELECTED_STYLE if selected else self.BASE_STYLE)
 
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
 
 class AlertListWidget(QWidget):
     open_video = pyqtSignal(str)
@@ -185,6 +192,7 @@ class AlertListWidget(QWidget):
         item.setSizeHint(widget.sizeHint())
         self.list.insertItem(0, item)
         self.list.setItemWidget(item, widget)
+        widget.clicked.connect(lambda _, it=item: self._select_item(it))
         self.list.scrollToItem(item, hint=QListWidget.PositionAtTop)
         self._update_selection_highlight()
 
@@ -222,6 +230,7 @@ class AlertListWidget(QWidget):
             item.setSizeHint(widget.sizeHint())
             self.list.addItem(item)
             self.list.setItemWidget(item, widget)
+            widget.clicked.connect(lambda _, it=item: self._select_item(it))
         if self.list.count():
             self.list.scrollToTop()
         self._update_selection_highlight()
@@ -232,6 +241,9 @@ class AlertListWidget(QWidget):
             filepath = widget.alert.get("filepath") or widget.alert.get("file")
             if filepath and os.path.exists(filepath):
                 self.open_video.emit(filepath)
+
+    def _select_item(self, item: QListWidgetItem) -> None:
+        self.list.setCurrentItem(item)
 
     def _update_selection_highlight(self) -> None:
         selected_rows = {index.row() for index in self.list.selectedIndexes()}
