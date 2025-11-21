@@ -188,7 +188,16 @@ class LogWindow(QListWidget):
         self.setFixedWidth(300)
         self.setFrameShape(QFrame.NoFrame)
         self.setSpacing(8)
-        self.setStyleSheet("QListWidget{background:transparent; border:none;}")
+        self.setStyleSheet(
+            "\n".join(
+                [
+                    "QListWidget{background:transparent; border:none;}",
+                    "QListWidget::item:selected{background: transparent; color: inherit;}",
+                    "QListWidget::item:selected:active{background: transparent; color: inherit;}",
+                    "QListWidget::item:selected:!active{background: transparent; color: inherit;}",
+                ]
+            )
+        )
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
