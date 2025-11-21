@@ -32,11 +32,11 @@ from ..storage import AlertMemory
 
 class AlertItemWidget(QWidget):
     BASE_STYLE = (
-        "QWidget{border:0.5px solid transparent; border-radius:10px;"
+        "#alertItem{border:0.5px solid transparent; border-radius:10px;"
         " background:rgba(0,0,0,0.35);}"
     )
     SELECTED_STYLE = (
-        "QWidget{border:0.5px solid #ff3333; border-radius:10px;"
+        "#alertItem{border:0.5px solid #ff3333; border-radius:10px;"
         " background:rgba(255,0,0,0.05);}"
     )
     COLOR_PALETTE = [
@@ -56,6 +56,7 @@ class AlertItemWidget(QWidget):
     def __init__(self, alert: dict, thumb_size: tuple[int, int] = (256, 144)) -> None:
         super().__init__()
         self.alert = alert
+        self.setObjectName("alertItem")
         self.setStyleSheet(self.BASE_STYLE)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
