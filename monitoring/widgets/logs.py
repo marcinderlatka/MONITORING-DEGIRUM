@@ -31,11 +31,11 @@ from ..config import LOG_HISTORY_PATH, LOG_RETENTION_HOURS
 
 class LogEntryWidget(QFrame):
     BASE_STYLE = (
-        "QFrame{border:0.5px solid transparent; border-radius:10px;"
+        "#logEntry{border:0.5px solid transparent; border-radius:10px;"
         " background:rgba(0,0,0,0.4);}"  # noqa: E501
     )
     SELECTED_STYLE = (
-        "QFrame{border:0.5px solid #ff3333; border-radius:10px;"
+        "#logEntry{border:0.5px solid #ff3333; border-radius:10px;"
         " background:rgba(255,0,0,0.05);}"  # noqa: E501
     )
     def __init__(
@@ -56,6 +56,7 @@ class LogEntryWidget(QFrame):
             "detection": "#4caf50",
             "error": "#ff4444",
         }
+        self.setObjectName("logEntry")
         self.setStyleSheet(self.BASE_STYLE)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 5, 10, 5)

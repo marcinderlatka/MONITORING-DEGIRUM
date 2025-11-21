@@ -412,9 +412,9 @@ class RecordingsBrowserDialog(QDialog):
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setStyleSheet(
             "QTableWidget::item{selection-background-color: transparent;"
-            " border:0.5px solid transparent;}"
-            "QTableWidget::item:selected{background: rgba(255,0,0,0.05);"
-            " color: inherit; border:0.5px solid #ff3333;}"
+            " background: transparent; border:0.5px solid transparent;}"
+            "QTableWidget::item:selected{selection-background-color: transparent;"
+            " background: transparent; color: inherit; border:0.5px solid transparent;}"
         )
         header = self.table.horizontalHeader()
         header.setStretchLastSection(True)
@@ -1060,15 +1060,13 @@ class RecordingsBrowserDialog(QDialog):
         if selection is None:
             return
         selected_rows = {index.row() for index in selection.selectedRows()}
-        highlight_brush = QBrush(QColor(255, 0, 0, 18))
         transparent_brush = QBrush()
         for row in range(self.table.rowCount()):
             is_selected = row in selected_rows
-            brush = highlight_brush if is_selected else transparent_brush
             for col in range(self.table.columnCount()):
                 item = self.table.item(row, col)
                 if item is not None:
-                    item.setBackground(brush)
+                    item.setBackground(transparent_brush)
             check_item = self.table.item(row, self.CHECK_COLUMN)
             filepath = check_item.data(Qt.UserRole) if check_item else ""
             thumb_label = self._thumbnail_labels.get(filepath)
