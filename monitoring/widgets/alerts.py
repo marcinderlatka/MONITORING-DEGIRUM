@@ -31,6 +31,8 @@ from ..storage import AlertMemory
 
 
 class AlertItemWidget(QWidget):
+    BASE_STYLE = "QWidget{border:1px solid transparent; border-radius:10px; background:rgba(0,0,0,0.35);}"  # noqa: E501
+    SELECTED_STYLE = "QWidget{border:2px solid #ff3333; border-radius:10px; background:rgba(255,0,0,0.08);}"  # noqa: E501
     COLOR_PALETTE = [
         "#f94144",
         "#f3722c",
@@ -48,6 +50,7 @@ class AlertItemWidget(QWidget):
     def __init__(self, alert: dict, thumb_size: tuple[int, int] = (256, 144)) -> None:
         super().__init__()
         self.alert = alert
+        self.setStyleSheet(self.BASE_STYLE)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setAlignment(Qt.AlignTop)
@@ -119,6 +122,9 @@ class AlertItemWidget(QWidget):
         )
         self.thumb.setPixmap(pixmap)
 
+    def set_selected(self, selected: bool) -> None:
+        self.setStyleSheet(self.SELECTED_STYLE if selected else self.BASE_STYLE)
+
 
 class AlertListWidget(QWidget):
     open_video = pyqtSignal(str)
@@ -149,6 +155,7 @@ class AlertListWidget(QWidget):
         layout.addWidget(self.list)
 
         self.list.itemDoubleClicked.connect(self._open_selected)
+        self.list.itemSelectionChanged.connect(self._update_selection_highlight)
 
         self.load_from_history(self.mem.items)
 
@@ -170,6 +177,7 @@ class AlertListWidget(QWidget):
         self.list.insertItem(0, item)
         self.list.setItemWidget(item, widget)
         self.list.scrollToItem(item, hint=QListWidget.PositionAtTop)
+        self._update_selection_highlight()
 
     def load_from_history(self, items: List[dict]) -> None:
         self.list.clear()
@@ -207,6 +215,7 @@ class AlertListWidget(QWidget):
             self.list.setItemWidget(item, widget)
         if self.list.count():
             self.list.scrollToTop()
+        self._update_selection_highlight()
 
     def _open_selected(self, item) -> None:
         widget = self.list.itemWidget(item)
@@ -214,6 +223,14 @@ class AlertListWidget(QWidget):
             filepath = widget.alert.get("filepath") or widget.alert.get("file")
             if filepath and os.path.exists(filepath):
                 self.open_video.emit(filepath)
+
+    def _update_selection_highlight(self) -> None:
+        selected_items = set(self.list.selectedItems())
+        for index in range(self.list.count()):
+            item = self.list.item(index)
+            widget = self.list.itemWidget(item)
+            if isinstance(widget, AlertItemWidget):
+                widget.set_selected(item in selected_items)
 
     def reload(self) -> None:
         self.mem.load()

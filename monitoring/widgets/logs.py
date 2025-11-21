@@ -30,6 +30,8 @@ from ..config import LOG_HISTORY_PATH, LOG_RETENTION_HOURS
 
 
 class LogEntryWidget(QFrame):
+    BASE_STYLE = "QFrame{border:1px solid transparent; border-radius:10px; background:rgba(0,0,0,0.4);}"  # noqa: E501
+    SELECTED_STYLE = "QFrame{border:2px solid #ff3333; border-radius:10px; background:rgba(255,0,0,0.08);}"  # noqa: E501
     def __init__(
         self,
         entry_id: str,
@@ -48,7 +50,7 @@ class LogEntryWidget(QFrame):
             "detection": "#4caf50",
             "error": "#ff4444",
         }
-        self.setStyleSheet("QFrame{border:none; background:rgba(0,0,0,0.4);}")
+        self.setStyleSheet(self.BASE_STYLE)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 5, 10, 5)
         layout.setAlignment(Qt.AlignLeft)
@@ -139,6 +141,9 @@ class LogEntryWidget(QFrame):
             self.rec_text = QLabel()
             self._blink_timer = QTimer(self)
 
+    def set_selected(self, selected: bool) -> None:
+        self.setStyleSheet(self.SELECTED_STYLE if selected else self.BASE_STYLE)
+
     def start_recording(self) -> None:
         self.rec_text.setText("Recording started")
         self.rec_text.setStyleSheet("color:red; font-size:15px;")
@@ -201,6 +206,8 @@ class LogWindow(QListWidget):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
+        self.itemSelectionChanged.connect(self._update_selection_highlight)
+
         self.log_path = log_path
         self.retention_hours = retention_hours
         self.history: List[dict] = []
@@ -219,6 +226,7 @@ class LogWindow(QListWidget):
         self.addItem(item)
         self.setItemWidget(item, widget)
         item.setSizeHint(widget.sizeHint())
+        self._update_selection_highlight()
 
     def _refresh_widget(self) -> None:
         self.clear()
@@ -226,6 +234,7 @@ class LogWindow(QListWidget):
             self._add_widget_entry(entry)
         if self.count():
             self.scrollToItem(self.item(self.count() - 1))
+        self._update_selection_highlight()
 
     def load_history(self) -> None:
         self.history = []
@@ -343,6 +352,14 @@ class LogWindow(QListWidget):
 
     def reload(self) -> None:
         self.load_history()
+
+    def _update_selection_highlight(self) -> None:
+        selected_items = set(self.selectedItems())
+        for index in range(self.count()):
+            item = self.item(index)
+            widget = self.itemWidget(item)
+            if isinstance(widget, LogEntryWidget):
+                widget.set_selected(item in selected_items)
 
     def get_recent_detections(self, limit: int = 10) -> List[dict]:
         detections = [e for e in self.history if e.get("group") == "detection"]

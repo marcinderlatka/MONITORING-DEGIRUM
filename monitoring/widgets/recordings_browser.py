@@ -413,9 +413,10 @@ class RecordingsBrowserDialog(QDialog):
         self.table.setStyleSheet(
             "\n".join(
                 [
-                    "QTableWidget::item:selected{background: transparent; color: inherit;}",
-                    "QTableWidget::item:selected:active{background: transparent; color: inherit;}",
-                    "QTableWidget::item:selected:!active{background: transparent; color: inherit;}",
+                    "QTableWidget::item{selection-background-color: transparent;}",
+                    "QTableWidget::item:selected{background: rgba(255,0,0,0.08); color: inherit; border:2px solid #ff3333;}",  # noqa: E501
+                    "QTableWidget::item:selected:active{background: rgba(255,0,0,0.08); color: inherit; border:2px solid #ff3333;}",  # noqa: E501
+                    "QTableWidget::item:selected:!active{background: rgba(255,0,0,0.08); color: inherit; border:2px solid #ff3333;}",  # noqa: E501
                 ]
             )
         )
