@@ -208,6 +208,8 @@ class CameraWorker(QThread):
                     best_label = ""
                     best_score = 0.0
 
+                    best_bbox = None
+
                     for obj in inference_result.results:
                         label = obj.get("label", "").lower()
                         confidence = obj.get("confidence", obj.get("score", 1.0))
@@ -248,17 +250,38 @@ class CameraWorker(QThread):
                             if confidence > best_score:
                                 best_score = confidence
                                 best_label = label
+                                best_bbox = bbox
 
                     if detected:
                         if not self.detection_active:
                             self.no_detection_frames = 0
                             self.post_countdown_frames = 0
+                            alert_frame = self.frame.copy()
+                            if best_bbox:
+                                x1, y1, x2, y2 = map(int, best_bbox)
+                                color = (
+                                    (0, 255, 0)
+                                    if (best_label or "")
+                                    and best_label in [c.lower() for c in self.record_classes]
+                                    else (0, 0, 255)
+                                )
+                                cv2.rectangle(alert_frame, (x1, y1), (x2, y2), color, 2)
+                                cv2.putText(
+                                    alert_frame,
+                                    f"{(best_label or 'object')}: {best_score * 100:.1f}%",
+                                    (x1, max(20, y1 - 10)),
+                                    cv2.FONT_HERSHEY_SIMPLEX,
+                                    0.7,
+                                    color,
+                                    2,
+                                )
+
                             alert = {
                                 "camera": self.camera["name"],
                                 "label": best_label or "object",
                                 "confidence": float(best_score),
                                 "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                "frame": self.frame.copy(),
+                                "frame": alert_frame,
                                 "filepath": "",
                                 "thumb": "",
                             }

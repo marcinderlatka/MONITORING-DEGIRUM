@@ -124,8 +124,11 @@ class AlertItemWidget(QWidget):
 
     def set_frame(self, frame: np.ndarray) -> None:
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        height, width, channels = rgb.shape
-        qimg = QImage(rgb.data, width, height, channels * width, QImage.Format_RGB888)
+        rgb_copy = rgb.copy()
+        height, width, channels = rgb_copy.shape
+        qimg = QImage(
+            rgb_copy.data, width, height, channels * width, QImage.Format_RGB888
+        ).copy()
         pixmap = QPixmap.fromImage(qimg).scaled(
             self.thumb.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
         )
