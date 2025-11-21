@@ -31,6 +31,20 @@ from ..storage import AlertMemory
 
 
 class AlertItemWidget(QWidget):
+    COLOR_PALETTE = [
+        "#f94144",
+        "#f3722c",
+        "#f8961e",
+        "#f9844a",
+        "#90be6d",
+        "#43aa8b",
+        "#577590",
+        "#277da1",
+        "#9b5de5",
+        "#e07a5f",
+    ]
+    _label_color_map: dict[str, str] = {}
+
     def __init__(self, alert: dict, thumb_size: tuple[int, int] = (256, 144)) -> None:
         super().__init__()
         self.alert = alert
@@ -47,10 +61,22 @@ class AlertItemWidget(QWidget):
         label = alert.get("label", "object")
         confidence = float(alert.get("confidence", 0.0)) * 100.0
         timestamp = alert.get("time", "--:--:--")
-        self.meta = QLabel(f"{camera}\n{timestamp} — {label} ({confidence:.1f}%)")
-        self.meta.setStyleSheet("padding-top:6px; color:#ddd;")
-        self.meta.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.meta, alignment=Qt.AlignCenter)
+        date_text, time_text = self._split_timestamp(timestamp)
+        object_line = QLabel(f"OBIEKT: {label.upper()} ({confidence:.1f}%)")
+        object_color = self._get_label_color(label)
+        object_line.setStyleSheet(
+            f"padding-top:6px; font-weight:bold; color:{object_color};"
+        )
+        camera_line = QLabel(f"KAMERA: {camera}")
+        camera_line.setStyleSheet("color:#ddd;")
+        date_line = QLabel(f"DATA: {date_text}")
+        date_line.setStyleSheet("color:#ddd;")
+        time_line = QLabel(f"GODZINA: {time_text}")
+        time_line.setStyleSheet("color:#ddd;")
+
+        for lbl in (object_line, camera_line, date_line, time_line):
+            lbl.setAlignment(Qt.AlignCenter)
+            layout.addWidget(lbl, alignment=Qt.AlignCenter)
 
         frame = alert.get("frame")
         if frame is not None:
@@ -64,6 +90,25 @@ class AlertItemWidget(QWidget):
                 image = cv2.imread(thumb)
                 if image is not None:
                     self.set_frame(image)
+
+    @classmethod
+    def _get_label_color(cls, label: str) -> str:
+        key = label.lower().strip() or "unknown"
+        if key not in cls._label_color_map:
+            color = cls.COLOR_PALETTE[len(cls._label_color_map) % len(cls.COLOR_PALETTE)]
+            cls._label_color_map[key] = color
+        return cls._label_color_map[key]
+
+    @staticmethod
+    def _split_timestamp(timestamp: str) -> tuple[str, str]:
+        try:
+            dt = datetime.datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
+            return dt.strftime("%Y-%m-%d"), dt.strftime("%H:%M:%S")
+        except Exception:
+            if " " in timestamp:
+                parts = timestamp.split(" ", 1)
+                return parts[0].strip(), parts[1].strip()
+            return timestamp, "--:--:--"
 
     def set_frame(self, frame: np.ndarray) -> None:
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
