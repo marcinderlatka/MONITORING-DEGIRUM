@@ -19,7 +19,7 @@ from PyQt5.QtCore import (
     pyqtSignal,
     QObject,
 )
-from PyQt5.QtGui import QImage, QPixmap, QColor, QPalette
+from PyQt5.QtGui import QBrush, QColor, QImage, QPalette, QPixmap
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -411,14 +411,10 @@ class RecordingsBrowserDialog(QDialog):
         self.table.setIconSize(self._thumb_size)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setStyleSheet(
-            "\n".join(
-                [
-                    "QTableWidget::item{selection-background-color: transparent;}",
-                    "QTableWidget::item:selected{background: rgba(255,0,0,0.08); color: inherit; border:2px solid #ff3333;}",  # noqa: E501
-                    "QTableWidget::item:selected:active{background: rgba(255,0,0,0.08); color: inherit; border:2px solid #ff3333;}",  # noqa: E501
-                    "QTableWidget::item:selected:!active{background: rgba(255,0,0,0.08); color: inherit; border:2px solid #ff3333;}",  # noqa: E501
-                ]
-            )
+            "QTableWidget::item{selection-background-color: transparent;"
+            " border:0.5px solid transparent;}"
+            "QTableWidget::item:selected{background: rgba(255,0,0,0.05);"
+            " color: inherit; border:0.5px solid #ff3333;}"
         )
         header = self.table.horizontalHeader()
         header.setStretchLastSection(True)
@@ -430,6 +426,7 @@ class RecordingsBrowserDialog(QDialog):
         self.table.customContextMenuRequested.connect(self._context_menu)
         self.table.cellDoubleClicked.connect(self._cell_double_clicked)
         self.table.itemChanged.connect(self._handle_item_changed)
+        self.table.itemSelectionChanged.connect(self._update_row_highlight)
 
         self._configure_table_palette()
 
@@ -760,7 +757,7 @@ class RecordingsBrowserDialog(QDialog):
         thumb_label.setFixedSize(self._thumb_size)
         thumb_label.setAlignment(Qt.AlignCenter)
         thumb_label.setStyleSheet(
-            "border: 1px solid #d0d0d0; background-color: {};".format(
+            "border: 0.5px solid #d0d0d0; background-color: {};".format(
                 self._thumbnail_background_color().name()
             )
         )
@@ -803,6 +800,7 @@ class RecordingsBrowserDialog(QDialog):
             self._request_thumbnail(entry)
         self._block_item_changed = previous_block
         self._sync_select_all_checkbox()
+        self._update_row_highlight()
 
     def _create_placeholder_pixmap(self) -> QPixmap:
         pixmap = QPixmap(self._thumb_size)
@@ -1013,6 +1011,7 @@ class RecordingsBrowserDialog(QDialog):
             if self._matches_filters(entry):
                 self._insert_row(entry)
         self._sync_select_all_checkbox()
+        self._update_row_highlight()
 
     def _format_file_cell_text(self, entry: RecordingMetadata) -> str:
         mp4_path = entry.filepath
@@ -1053,6 +1052,35 @@ class RecordingsBrowserDialog(QDialog):
             print(f"[RecordingsBrowser] Nieprawidłowy plik miniatury: {thumb_path}")
             return None
         return pixmap
+
+    def _update_row_highlight(self) -> None:
+        if not hasattr(self, "table"):
+            return
+        selection = self.table.selectionModel()
+        if selection is None:
+            return
+        selected_rows = {index.row() for index in selection.selectedRows()}
+        highlight_brush = QBrush(QColor(255, 0, 0, 18))
+        transparent_brush = QBrush()
+        for row in range(self.table.rowCount()):
+            is_selected = row in selected_rows
+            brush = highlight_brush if is_selected else transparent_brush
+            for col in range(self.table.columnCount()):
+                item = self.table.item(row, col)
+                if item is not None:
+                    item.setBackground(brush)
+            check_item = self.table.item(row, self.CHECK_COLUMN)
+            filepath = check_item.data(Qt.UserRole) if check_item else ""
+            thumb_label = self._thumbnail_labels.get(filepath)
+            if thumb_label:
+                thumb_label.setStyleSheet(
+                    "border: 0.5px solid {border}; background-color: {bg};".format(
+                        border="#ff3333" if is_selected else "#d0d0d0",
+                        bg="rgba(255,0,0,0.05)"
+                        if is_selected
+                        else self._thumbnail_background_color().name(),
+                    )
+                )
 
     # ------------------------------------------------------------ lifecycle --
     def closeEvent(self, event):  # noqa: D401

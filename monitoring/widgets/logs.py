@@ -30,8 +30,14 @@ from ..config import LOG_HISTORY_PATH, LOG_RETENTION_HOURS
 
 
 class LogEntryWidget(QFrame):
-    BASE_STYLE = "QFrame{border:1px solid transparent; border-radius:10px; background:rgba(0,0,0,0.4);}"  # noqa: E501
-    SELECTED_STYLE = "QFrame{border:2px solid #ff3333; border-radius:10px; background:rgba(255,0,0,0.08);}"  # noqa: E501
+    BASE_STYLE = (
+        "QFrame{border:0.5px solid transparent; border-radius:10px;"
+        " background:rgba(0,0,0,0.4);}"  # noqa: E501
+    )
+    SELECTED_STYLE = (
+        "QFrame{border:0.5px solid #ff3333; border-radius:10px;"
+        " background:rgba(255,0,0,0.05);}"  # noqa: E501
+    )
     def __init__(
         self,
         entry_id: str,
@@ -207,6 +213,7 @@ class LogWindow(QListWidget):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
         self.itemSelectionChanged.connect(self._update_selection_highlight)
+        self._selected_rows: set[int] = set()
 
         self.log_path = log_path
         self.retention_hours = retention_hours
@@ -354,14 +361,18 @@ class LogWindow(QListWidget):
         self.load_history()
 
     def _update_selection_highlight(self) -> None:
-        # QListWidgetItem instances are unhashable, so keep the selection as a
-        # list to avoid TypeError when checking membership.
-        selected_items = list(self.selectedItems())
-        for index in range(self.count()):
-            item = self.item(index)
+        selected_rows = {index.row() for index in self.selectedIndexes()}
+        changed_rows = selected_rows.symmetric_difference(self._selected_rows)
+        if not changed_rows:
+            return
+        self._selected_rows = selected_rows
+        for row in changed_rows:
+            if row < 0 or row >= self.count():
+                continue
+            item = self.item(row)
             widget = self.itemWidget(item)
             if isinstance(widget, LogEntryWidget):
-                widget.set_selected(item in selected_items)
+                widget.set_selected(row in selected_rows)
 
     def get_recent_detections(self, limit: int = 10) -> List[dict]:
         detections = [e for e in self.history if e.get("group") == "detection"]
