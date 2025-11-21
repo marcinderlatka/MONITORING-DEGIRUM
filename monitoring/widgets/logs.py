@@ -354,7 +354,9 @@ class LogWindow(QListWidget):
         self.load_history()
 
     def _update_selection_highlight(self) -> None:
-        selected_items = set(self.selectedItems())
+        # QListWidgetItem instances are unhashable, so keep the selection as a
+        # list to avoid TypeError when checking membership.
+        selected_items = list(self.selectedItems())
         for index in range(self.count()):
             item = self.item(index)
             widget = self.itemWidget(item)
