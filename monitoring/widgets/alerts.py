@@ -225,7 +225,7 @@ class AlertListWidget(QWidget):
                 self.open_video.emit(filepath)
 
     def _update_selection_highlight(self) -> None:
-        selected_items = set(self.list.selectedItems())
+        selected_items = self.list.selectedItems()
         for index in range(self.list.count()):
             item = self.list.item(index)
             widget = self.list.itemWidget(item)
