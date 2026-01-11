@@ -52,6 +52,7 @@ from PyQt5.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QAction,
     QMenu,
     QMessageBox,
     QPushButton,
@@ -63,6 +64,7 @@ from PyQt5.QtWidgets import (
     QToolButton,
     QVBoxLayout,
     QWidget,
+    QWidgetAction,
 )
 
 from . import config as config_module
@@ -914,6 +916,7 @@ class MainWindow(QMainWindow):
         self.alert_mem = AlertMemory(ALERTS_HISTORY_PATH, max_items=5000)
         self.last_detected_label = ""
         self.sound_enabled = True
+        self.sound_volume = 1.0
         self.last_detection_ids = {}
         self.active_recording_ids = {}
         # Starts that arrive before their log entry is created
@@ -938,7 +941,7 @@ class MainWindow(QMainWindow):
             data = base64.b64encode(buf.getvalue()).decode()
             self.alert_sound.setSource(QUrl.fromEncoded(f"data:audio/wav;base64,{data}".encode()))
             self.alert_sound.setLoopCount(1)
-            self.alert_sound.setVolume(1.0)
+            self.alert_sound.setVolume(self.sound_volume)
         except Exception as e:
             print(f"Failed to initialize alert sound: {e}")
 
@@ -1022,6 +1025,7 @@ class MainWindow(QMainWindow):
         self.btn_sound.setIcon(QIcon(str(ICON_DIR / "volume-up.svg")))
         self.btn_sound.setIconSize(QSize(50, 50))
         self.btn_sound.clicked.connect(self.toggle_sound)
+        self._setup_sound_menu()
 
         btn_fullscreen = QToolButton()
         btn_fullscreen.setIcon(QIcon(str(ICON_DIR / "window-fullscreen.svg")))
@@ -1135,12 +1139,60 @@ QToolButton:focus { outline: none; }
 
     def toggle_sound(self):
         self.sound_enabled = not self.sound_enabled
+        self._apply_sound_state()
+        state = "włączono" if self.sound_enabled else "wyłączono"
+        self.log_window.add_entry("application", f"{state} powiadomienia dźwiękowe")
+
+    def _setup_sound_menu(self) -> None:
+        self.sound_menu = QMenu(self)
+        self.action_mute = QAction("Wycisz", self)
+        self.action_resume = QAction("Wznów", self)
+        self.action_mute.triggered.connect(lambda: self._set_sound_enabled(False))
+        self.action_resume.triggered.connect(lambda: self._set_sound_enabled(True))
+        self.sound_menu.addAction(self.action_mute)
+        self.sound_menu.addAction(self.action_resume)
+
+        slider_widget = QWidget()
+        slider_layout = QVBoxLayout(slider_widget)
+        slider_layout.setContentsMargins(12, 8, 12, 8)
+        slider_label = QLabel("Głośność")
+        slider = QSlider(Qt.Horizontal)
+        slider.setRange(0, 100)
+        slider.setValue(int(self.sound_volume * 100))
+        slider.valueChanged.connect(self._on_sound_volume_changed)
+        slider_layout.addWidget(slider_label)
+        slider_layout.addWidget(slider)
+
+        volume_action = QWidgetAction(self)
+        volume_action.setDefaultWidget(slider_widget)
+        self.sound_menu.addAction(volume_action)
+
+        self.btn_sound.setMenu(self.sound_menu)
+        self.btn_sound.setPopupMode(QToolButton.MenuButtonPopup)
+        self._apply_sound_state()
+
+    def _set_sound_enabled(self, enabled: bool) -> None:
+        if self.sound_enabled == enabled:
+            return
+        self.sound_enabled = enabled
+        self._apply_sound_state()
+        state = "włączono" if self.sound_enabled else "wyłączono"
+        self.log_window.add_entry("application", f"{state} powiadomienia dźwiękowe")
+
+    def _apply_sound_state(self) -> None:
         icon = "volume-up.svg" if self.sound_enabled else "volume-mute.svg"
         self.btn_sound.setIcon(QIcon(str(ICON_DIR / icon)))
         if self.alert_sound:
-            self.alert_sound.setVolume(1.0 if self.sound_enabled else 0.0)
-        state = "włączono" if self.sound_enabled else "wyłączono"
-        self.log_window.add_entry("application", f"{state} powiadomienia dźwiękowe")
+            volume = self.sound_volume if self.sound_enabled else 0.0
+            self.alert_sound.setVolume(volume)
+        if hasattr(self, "action_mute"):
+            self.action_mute.setEnabled(self.sound_enabled)
+            self.action_resume.setEnabled(not self.sound_enabled)
+
+    def _on_sound_volume_changed(self, value: int) -> None:
+        self.sound_volume = max(0.0, min(1.0, value / 100.0))
+        if self.alert_sound and self.sound_enabled:
+            self.alert_sound.setVolume(self.sound_volume)
 
     def play_alert_sound(self):
         if self.alert_sound:
@@ -1658,4 +1710,3 @@ def main(windowed: bool = False):
     else:
         win.showFullScreen()
     sys.exit(app.exec_())
-

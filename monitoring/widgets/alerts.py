@@ -69,24 +69,21 @@ class AlertItemWidget(QWidget):
         self.thumb.setStyleSheet("border:none; background:#111;")
         layout.addWidget(self.thumb, alignment=Qt.AlignCenter)
 
-        camera = alert.get("camera", "?")
         label = alert.get("label", "object")
         confidence = float(alert.get("confidence", 0.0)) * 100.0
         timestamp = alert.get("time", "--:--:--")
         date_text, time_text = self._split_timestamp(timestamp)
-        object_line = QLabel(f"OBIEKT: {label.upper()} ({confidence:.1f}%)")
+        object_line = QLabel(label.upper())
         object_color = self._get_label_color(label)
         object_line.setStyleSheet(
-            f"padding-top:6px; font-weight:bold; color:{object_color};"
+            f"padding-top:6px; font-size:24px; font-weight:bold; color:{object_color};"
         )
-        camera_line = QLabel(f"KAMERA: {camera}")
-        camera_line.setStyleSheet("color:#ddd;")
-        date_line = QLabel(f"DATA: {date_text}")
-        date_line.setStyleSheet("color:#ddd;")
-        time_line = QLabel(f"GODZINA: {time_text}")
-        time_line.setStyleSheet("color:#ddd;")
+        confidence_line = QLabel(f"{confidence:.1f}%")
+        confidence_line.setStyleSheet("font-size:24px; color:#eee;")
+        time_line = QLabel(f"{time_text} {date_text}")
+        time_line.setStyleSheet("font-size:24px; color:#ddd;")
 
-        for lbl in (object_line, camera_line, date_line, time_line):
+        for lbl in (object_line, confidence_line, time_line):
             lbl.setAlignment(Qt.AlignCenter)
             layout.addWidget(lbl, alignment=Qt.AlignCenter)
 
@@ -94,14 +91,7 @@ class AlertItemWidget(QWidget):
         if frame is not None:
             self.set_frame(frame)
         else:
-            thumb = alert.get("thumb")
-            if not thumb:
-                filepath = alert.get("filepath") or alert.get("file") or ""
-                thumb = filepath + ".jpg" if filepath else ""
-            if thumb and os.path.exists(thumb):
-                image = cv2.imread(thumb)
-                if image is not None:
-                    self.set_frame(image)
+            self.set_thumbnail()
 
     @classmethod
     def _get_label_color(cls, label: str) -> str:
@@ -133,6 +123,21 @@ class AlertItemWidget(QWidget):
             self.thumb.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
         )
         self.thumb.setPixmap(pixmap)
+
+    def set_thumbnail(self) -> None:
+        thumb = self.alert.get("thumb")
+        if not thumb:
+            filepath = self.alert.get("filepath") or self.alert.get("file") or ""
+            thumb = filepath + ".jpg" if filepath else ""
+        if not thumb or not os.path.exists(thumb):
+            return
+        pixmap = QPixmap(thumb)
+        if pixmap.isNull():
+            return
+        scaled = pixmap.scaled(
+            self.thumb.size(), Qt.KeepAspectRatio, Qt.FastTransformation
+        )
+        self.thumb.setPixmap(scaled)
 
     def set_selected(self, selected: bool) -> None:
         self.setStyleSheet(self.SELECTED_STYLE if selected else self.BASE_STYLE)
@@ -167,6 +172,7 @@ class AlertListWidget(QWidget):
                 ]
             )
         )
+        self.list.setUniformItemSizes(True)
         self.list.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         layout.addWidget(self.list)
