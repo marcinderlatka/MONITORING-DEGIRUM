@@ -28,10 +28,88 @@ from .config import (
     DEFAULT_POST_SECONDS,
     DEFAULT_PRE_SECONDS,
     DEFAULT_RECORD_PATH,
+    DEFAULT_RTSP_FPS,
     RECORD_CLASSES,
     VISIBLE_CLASSES,
 )
 from .storage import update_recordings_catalog
+
+LABEL_COLORS = {
+    "person": (0, 0, 255),
+    "car": (255, 0, 0),
+    "cat": (0, 255, 255),
+    "dog": (255, 255, 0),
+    "bird": (0, 255, 0),
+}
+
+PALETTE = [
+    (255, 0, 255),
+    (0, 165, 255),
+    (255, 255, 0),
+    (0, 255, 255),
+    (255, 0, 0),
+    (0, 255, 0),
+]
+
+
+def _label_color(label: str) -> tuple[int, int, int]:
+    key = (label or "").lower()
+    if key in LABEL_COLORS:
+        return LABEL_COLORS[key]
+    if not key:
+        return (255, 255, 255)
+    return PALETTE[hash(key) % len(PALETTE)]
+
+
+def _normalize_size(value: Any) -> tuple[int, int] | None:
+    if isinstance(value, dict):
+        w = value.get("width") or value.get("w")
+        h = value.get("height") or value.get("h")
+        if w and h:
+            return int(w), int(h)
+    if isinstance(value, (list, tuple)) and len(value) >= 2:
+        h, w = value[:2]
+        return int(w), int(h)
+    return None
+
+
+def _extract_image_size(result: Any) -> tuple[int, int] | None:
+    for attr in ("image_size", "input_image_size", "image_shape", "input_shape"):
+        value = getattr(result, attr, None)
+        size = _normalize_size(value)
+        if size:
+            return size
+    if isinstance(result, dict):
+        size = _normalize_size(result.get("image_size") or result.get("input_image_size"))
+        if size:
+            return size
+    return None
+
+
+def _scale_bbox(
+    bbox: list[float] | tuple[float, ...],
+    frame_shape: tuple[int, ...],
+    source_size: tuple[int, int] | None,
+) -> tuple[int, int, int, int]:
+    x1, y1, x2, y2 = map(float, bbox)
+    h, w = frame_shape[:2]
+    if source_size:
+        src_w, src_h = source_size
+        if src_w and src_h and (src_w != w or src_h != h):
+            x_scale = w / src_w
+            y_scale = h / src_h
+            x1 *= x_scale
+            x2 *= x_scale
+            y1 *= y_scale
+            y2 *= y_scale
+    if 0.0 <= x1 <= 1.0 and 0.0 <= x2 <= 1.0 and 0.0 <= y1 <= 1.0 and 0.0 <= y2 <= 1.0:
+        x1 *= w
+        x2 *= w
+        y1 *= h
+        y2 *= h
+    x1, x2 = sorted((x1, x2))
+    y1, y2 = sorted((y1, y2))
+    return int(max(0, x1)), int(max(0, y1)), int(min(w - 1, x2)), int(min(h - 1, y2))
 
 
 class RecordingThread(QThread):
@@ -81,6 +159,7 @@ class CameraWorker(QThread):
         self.index = index
 
         self.fps = int(self.camera.get("fps", DEFAULT_FPS))
+        self.rtsp_fps = int(self.camera.get("rtsp_fps", DEFAULT_RTSP_FPS))
         self.confidence_threshold = float(
             self.camera.get("confidence_threshold", DEFAULT_CONFIDENCE_THRESHOLD)
         )
@@ -194,7 +273,8 @@ class CameraWorker(QThread):
                     last_overlays: list[tuple[int, int, int, int, str, float, tuple[int, int, int]]] = []
                     detection_interval = 1.0 / max(1, self.fps)
 
-                    for frame in degirum_tools.video_source(stream, fps=None):
+                    source_fps = self.rtsp_fps if self.rtsp_fps > 0 else None
+                    for frame in degirum_tools.video_source(stream, fps=source_fps):
                         if self.stop_signal:
                             break
 
@@ -224,6 +304,7 @@ class CameraWorker(QThread):
                             best_label = ""
                             best_score = 0.0
                             best_bbox = None
+                            source_size = _extract_image_size(inference_result)
                             overlays: list[
                                 tuple[int, int, int, int, str, float, tuple[int, int, int]]
                             ] = []
@@ -240,12 +321,10 @@ class CameraWorker(QThread):
                                     and confidence >= self.confidence_threshold
                                     and label in [c.lower() for c in self.visible_classes]
                                 ):
-                                    x1, y1, x2, y2 = map(int, bbox)
-                                    color = (
-                                        (0, 255, 0)
-                                        if label in [c.lower() for c in self.record_classes]
-                                        else (255, 0, 0)
+                                    x1, y1, x2, y2 = _scale_bbox(
+                                        bbox, display_frame.shape, source_size
                                     )
+                                    color = _label_color(label)
                                     overlays.append((x1, y1, x2, y2, label, confidence, color))
 
                                 if (
@@ -258,7 +337,9 @@ class CameraWorker(QThread):
                                     if confidence > best_score:
                                         best_score = confidence
                                         best_label = label
-                                        best_bbox = bbox
+                                        best_bbox = _scale_bbox(
+                                            bbox, display_frame.shape, source_size
+                                        )
 
                             if self.draw_overlays:
                                 for x1, y1, x2, y2, label, confidence, color in overlays:
@@ -283,14 +364,8 @@ class CameraWorker(QThread):
                                     self.post_countdown_frames = 0
                                     alert_frame = frame.copy()
                                     if best_bbox:
-                                        x1, y1, x2, y2 = map(int, best_bbox)
-                                        color = (
-                                            (0, 255, 0)
-                                            if (best_label or "")
-                                            and best_label
-                                            in [c.lower() for c in self.record_classes]
-                                            else (0, 0, 255)
-                                        )
+                                        x1, y1, x2, y2 = best_bbox
+                                        color = _label_color(best_label or "")
                                         cv2.rectangle(
                                             alert_frame, (x1, y1), (x2, y2), color, 2
                                         )

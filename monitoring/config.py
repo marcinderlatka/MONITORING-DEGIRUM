@@ -24,6 +24,7 @@ RECORD_CLASSES = ["person", "car", "cat", "dog", "bird"]
 
 DEFAULT_MODEL = "yolov5nu_silu_coco--640x640_float_tflite_multidevice_1"
 DEFAULT_FPS = 3
+DEFAULT_RTSP_FPS = 0
 DEFAULT_CONFIDENCE_THRESHOLD = 0.5
 DEFAULT_DRAW_OVERLAYS = True
 DEFAULT_ENABLE_DETECTION = True
@@ -50,6 +51,7 @@ def fill_camera_defaults(camera: MutableMapping[str, object]) -> MutableMapping[
     defaults: Dict[str, object] = {
         "model": DEFAULT_MODEL,
         "fps": DEFAULT_FPS,
+        "rtsp_fps": DEFAULT_RTSP_FPS,
         "confidence_threshold": DEFAULT_CONFIDENCE_THRESHOLD,
         "draw_overlays": DEFAULT_DRAW_OVERLAYS,
         "enable_detection": DEFAULT_ENABLE_DETECTION,
@@ -143,6 +145,7 @@ __all__ = [
     "DEFAULT_ENABLE_DETECTION",
     "DEFAULT_ENABLE_RECORDING",
     "DEFAULT_FPS",
+    "DEFAULT_RTSP_FPS",
     "DEFAULT_LOST_SECONDS",
     "DEFAULT_MODEL",
     "DEFAULT_POST_SECONDS",

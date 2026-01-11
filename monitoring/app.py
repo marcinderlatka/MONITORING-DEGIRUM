@@ -82,6 +82,7 @@ from .config import (
     DEFAULT_POST_SECONDS,
     DEFAULT_PRE_SECONDS,
     DEFAULT_RECORD_PATH,
+    DEFAULT_RTSP_FPS,
     ICON_DIR,
     LOG_HISTORY_PATH,
     LOG_RETENTION_HOURS,
@@ -626,6 +627,9 @@ class SingleCameraDialog(QDialog):
         self.model_combo.addItems(models)
         self.fps_spin = QSpinBox()
         self.fps_spin.setRange(1, 60)
+        self.rtsp_fps_spin = QSpinBox()
+        self.rtsp_fps_spin.setRange(0, 60)
+        self.rtsp_fps_spin.setSpecialValueText("Auto")
         self.conf_spin = QDoubleSpinBox()
         self.conf_spin.setRange(0.0, 1.0)
         self.conf_spin.setSingleStep(0.05)
@@ -652,7 +656,8 @@ class SingleCameraDialog(QDialog):
         form.addRow("Typ źródła", self.type_combo)
         form.addRow("Adres/Urządzenie", self.source_stack)
         form.addRow("Model detekcji", self.model_combo)
-        form.addRow("FPS", self.fps_spin)
+        form.addRow("FPS/S DETECT", self.fps_spin)
+        form.addRow("FPS/S RTSP", self.rtsp_fps_spin)
         form.addRow("Próg pewności", self.conf_spin)
         form.addRow("Rysuj nakładki", self.draw_chk)
         form.addRow("Wykrywaj obiekty", self.detect_chk)
@@ -736,6 +741,7 @@ class SingleCameraDialog(QDialog):
             self.source_stack.setCurrentWidget(self.rtsp_edit)
         self.model_combo.setCurrentText(cam.get("model", DEFAULT_MODEL))
         self.fps_spin.setValue(int(cam.get("fps", DEFAULT_FPS)))
+        self.rtsp_fps_spin.setValue(int(cam.get("rtsp_fps", DEFAULT_RTSP_FPS)))
         self.conf_spin.setValue(float(cam.get("confidence_threshold", DEFAULT_CONFIDENCE_THRESHOLD)))
         self.draw_chk.setChecked(bool(cam.get("draw_overlays", DEFAULT_DRAW_OVERLAYS)))
         self.detect_chk.setChecked(bool(cam.get("enable_detection", DEFAULT_ENABLE_DETECTION)))
@@ -770,6 +776,7 @@ class SingleCameraDialog(QDialog):
             "draw_overlays": self.draw_chk.isChecked(),
             "enable_detection": self.detect_chk.isChecked(),
             "enable_recording": self.record_chk.isChecked(),
+            "rtsp_fps": int(self.rtsp_fps_spin.value()),
             "detection_hours": self.hours_edit.text().strip() or DEFAULT_DETECTION_HOURS,
             "visible_classes": [c.strip() for c in self.visible_edit.text().split(",") if c.strip()],
             "record_classes": [c.strip() for c in self.record_edit.text().split(",") if c.strip()],
@@ -1024,7 +1031,6 @@ class MainWindow(QMainWindow):
         self.btn_sound = QToolButton()
         self.btn_sound.setIcon(QIcon(str(ICON_DIR / "volume-up.svg")))
         self.btn_sound.setIconSize(QSize(50, 50))
-        self.btn_sound.clicked.connect(self.toggle_sound)
         self._setup_sound_menu()
 
         btn_fullscreen = QToolButton()
@@ -1145,8 +1151,8 @@ QToolButton:focus { outline: none; }
 
     def _setup_sound_menu(self) -> None:
         self.sound_menu = QMenu(self)
-        self.action_mute = QAction("Wycisz", self)
-        self.action_resume = QAction("Wznów", self)
+        self.action_mute = QAction("Wycisz powiadomienia", self)
+        self.action_resume = QAction("Wznów powiadomienia", self)
         self.action_mute.triggered.connect(lambda: self._set_sound_enabled(False))
         self.action_resume.triggered.connect(lambda: self._set_sound_enabled(True))
         self.sound_menu.addAction(self.action_mute)
@@ -1155,12 +1161,17 @@ QToolButton:focus { outline: none; }
         slider_widget = QWidget()
         slider_layout = QVBoxLayout(slider_widget)
         slider_layout.setContentsMargins(12, 8, 12, 8)
+        slider_header = QHBoxLayout()
         slider_label = QLabel("Głośność")
+        self.sound_percent_label = QLabel()
+        slider_header.addWidget(slider_label)
+        slider_header.addStretch(1)
+        slider_header.addWidget(self.sound_percent_label)
         slider = QSlider(Qt.Horizontal)
         slider.setRange(0, 100)
         slider.setValue(int(self.sound_volume * 100))
         slider.valueChanged.connect(self._on_sound_volume_changed)
-        slider_layout.addWidget(slider_label)
+        slider_layout.addLayout(slider_header)
         slider_layout.addWidget(slider)
 
         volume_action = QWidgetAction(self)
@@ -1168,7 +1179,7 @@ QToolButton:focus { outline: none; }
         self.sound_menu.addAction(volume_action)
 
         self.btn_sound.setMenu(self.sound_menu)
-        self.btn_sound.setPopupMode(QToolButton.MenuButtonPopup)
+        self.btn_sound.setPopupMode(QToolButton.InstantPopup)
         self._apply_sound_state()
 
     def _set_sound_enabled(self, enabled: bool) -> None:
@@ -1188,11 +1199,15 @@ QToolButton:focus { outline: none; }
         if hasattr(self, "action_mute"):
             self.action_mute.setEnabled(self.sound_enabled)
             self.action_resume.setEnabled(not self.sound_enabled)
+        if hasattr(self, "sound_percent_label"):
+            self.sound_percent_label.setText(f"{int(round(self.sound_volume * 100))}%")
 
     def _on_sound_volume_changed(self, value: int) -> None:
         self.sound_volume = max(0.0, min(1.0, value / 100.0))
         if self.alert_sound and self.sound_enabled:
             self.alert_sound.setVolume(self.sound_volume)
+        if hasattr(self, "sound_percent_label"):
+            self.sound_percent_label.setText(f"{int(round(self.sound_volume * 100))}%")
 
     def play_alert_sound(self):
         if self.alert_sound:
