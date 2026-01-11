@@ -173,7 +173,7 @@ class AlertListWidget(QWidget):
             )
         )
         self.list.setUniformItemSizes(True)
-        self.list.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.list.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         layout.addWidget(self.list)
 
@@ -201,7 +201,7 @@ class AlertListWidget(QWidget):
         item.setSizeHint(widget.sizeHint())
         self.list.insertItem(0, item)
         self.list.setItemWidget(item, widget)
-        widget.clicked.connect(lambda _, it=item: self._select_item(it))
+        widget.clicked.connect(lambda it=item: self._select_item(it))
         self.list.scrollToItem(item, hint=QListWidget.PositionAtTop)
         self._update_selection_highlight()
 
@@ -239,7 +239,7 @@ class AlertListWidget(QWidget):
             item.setSizeHint(widget.sizeHint())
             self.list.addItem(item)
             self.list.setItemWidget(item, widget)
-            widget.clicked.connect(lambda _, it=item: self._select_item(it))
+            widget.clicked.connect(lambda it=item: self._select_item(it))
         if self.list.count():
             self.list.scrollToTop()
         self._update_selection_highlight()
