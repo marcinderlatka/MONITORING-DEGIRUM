@@ -80,3 +80,27 @@ def test_overload_config_backward_compat(tmp_path):
     assert cfg["overload_protection_enabled"] is True
     assert cfg["overload_camera_count_threshold"] == 6
     assert cfg["overload_reduce_thumb_preview_fps"] == 1
+
+
+def test_restart_required_for_model_or_rtsp_url_change():
+    from monitoring.runtime_helpers import classify_camera_setting_changes
+
+    old = {"name": "Cam", "model": "a", "rtsp": "rtsp://1", "fps": 10}
+    new = {"name": "Cam", "model": "b", "rtsp": "rtsp://2", "fps": 12}
+    changed, restart = classify_camera_setting_changes(old, new, {"model", "rtsp", "type"})
+
+    assert "model" in changed
+    assert "rtsp" in changed
+    assert "fps" in changed
+    assert set(restart) == {"model", "rtsp"}
+
+
+def test_classify_camera_changed_keys_helper_for_live_fields():
+    from monitoring.runtime_helpers import classify_camera_setting_changes
+
+    old = {"name": "Cam", "fps": 10, "draw_overlays": True}
+    new = {"name": "Cam", "fps": 15, "draw_overlays": False}
+    changed, restart = classify_camera_setting_changes(old, new, {"model", "rtsp"})
+
+    assert set(changed) == {"draw_overlays", "fps"}
+    assert restart == []

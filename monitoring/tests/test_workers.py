@@ -175,3 +175,52 @@ def test_record_start_mode_semantics_for_include_prerecord_first(monkeypatch):
     assert np.array_equal(writes[0], prerecord_a)
     assert np.array_equal(writes[1], prerecord_b)
     assert np.array_equal(writes[2], detection)
+
+
+def test_runtime_settings_apply_without_restart_for_live_fields():
+    worker = _worker()
+    worker.visible_classes = ["person"]
+    cfg = {
+        "name": "Cam",
+        "fps": 12,
+        "rtsp_fps": 6,
+        "confidence_threshold": 0.4,
+        "confidence_threshold_draw": 0.35,
+        "confidence_threshold_record": 0.5,
+        "draw_overlays": False,
+        "enable_detection": True,
+        "enable_recording": True,
+        "visible_classes": ["person", "car"],
+        "record_classes": ["car"],
+        "detection_hours": "08:00-20:00",
+        "record_path": "./recordings",
+        "pre_seconds": 2,
+        "lost_seconds": 1,
+        "post_seconds": 3,
+        "required_hits_to_start_recording": 2,
+        "required_misses_to_end_detection": 2,
+        "min_record_seconds": 4,
+        "thumbnail_mode": "best_detection",
+        "record_start_mode": "include_prerecord_first",
+        "preview_fps_main": 10,
+        "preview_fps_thumb": 2,
+        "preview_pause_when_hidden": True,
+    }
+    worker.apply_runtime_settings(cfg)
+
+    assert worker.fps == 12
+    assert worker.rtsp_fps == 6
+    assert worker.confidence_threshold_draw == 0.35
+    assert worker.confidence_threshold_record == 0.5
+    assert "car" in worker.visible_classes_lower
+
+
+def test_apply_runtime_settings_refreshes_class_filters():
+    worker = _worker()
+    worker.apply_runtime_settings({
+        "name": "Cam",
+        "visible_classes": ["Person", "DOG"],
+        "record_classes": ["Car"],
+    })
+    assert worker.visible_classes_lower == {"person", "dog"}
+    assert worker.record_classes_lower == {"car"}

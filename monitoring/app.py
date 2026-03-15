@@ -120,6 +120,7 @@ from .storage import (
     update_recordings_catalog,
 )
 from .workers import CameraWorker
+from .runtime_helpers import classify_camera_setting_changes
 from .widgets.alerts import AlertDialog, AlertListWidget
 from .widgets.camera_grid import CameraGridWidget
 from .widgets.camera_list import CameraListWidget
@@ -128,6 +129,15 @@ from .widgets.recordings_browser import RecordingsBrowserDialog
 
 # Qt platform plugin path (Linux)
 os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = "/usr/lib/x86_64-linux-gnu/qt5/plugins/platforms"
+
+CAMERA_RESTART_REQUIRED_FIELDS = {"rtsp", "type", "model"}
+CAMERA_RUNTIME_APPLY_FIELDS = {
+    "fps", "rtsp_fps", "confidence_threshold", "confidence_threshold_draw", "confidence_threshold_record",
+    "draw_overlays", "enable_detection", "enable_recording", "visible_classes", "record_classes",
+    "detection_hours", "record_path", "pre_seconds", "lost_seconds", "post_seconds",
+    "required_hits_to_start_recording", "required_misses_to_end_detection", "min_record_seconds",
+    "thumbnail_mode", "record_start_mode", "preview_fps_main", "preview_fps_thumb", "preview_pause_when_hidden",
+}
 
 # --- Alert z miniaturką (karta) ---
 class VideoPlayerDialog(QDialog):
@@ -615,23 +625,50 @@ class AddUsbCameraDialog(QDialog):
 
 # --- Ustawienia pojedynczej kamery ---
 class SingleCameraDialog(QDialog):
+    TOOLTIP_MAP = {
+        "name": "Nazwa kamery używana wewnętrznie i w interfejsie użytkownika. Ta wartość pojawia się w alertach, nazwach katalogów nagrań, widokach listy i siatki oraz w przeglądarce nagrań. Użyj krótkiej, jednoznacznej nazwy, aby łatwo odróżniać źródła.",
+        "type": "Typ źródła obrazu dla tej kamery. Wybierz RTSP dla kamer sieciowych albo USB dla urządzeń lokalnych. Zmiana typu wpływa na sposób inicjalizacji strumienia i może wymagać restartu pojedynczego workera.",
+        "rtsp": "Adres strumienia RTSP (lub źródło wejściowe). Niepoprawny adres uniemożliwi połączenie i odczyt klatek. Zmiana tego pola zwykle wymaga restartu strumienia, który aplikacja wykona automatycznie dla tej kamery.",
+        "model": "Model AI używany do detekcji na tej kamerze. Inny model może poprawić dokładność dla wybranych klas albo zwiększyć szybkość kosztem jakości. Zmiana modelu zwykle wymaga przeładowania pipeline tej kamery (automatyczny restart workera).",
+        "fps": "Docelowa częstotliwość inferencji (analizy klatek). Wyższe FPS daje szybszą reakcję i większą szansę wykrycia krótkich zdarzeń, ale zwiększa obciążenie CPU/GPU. Niższe FPS zmniejsza obciążenie, jednak może pominąć bardzo krótkie epizody.",
+        "rtsp_fps": "Limit tempa pobierania/przetwarzania klatek ze strumienia RTSP. Pomaga ograniczyć obciążenie systemu i rozmiary kolejek. Zbyt niska wartość może powodować „skokowy” ruch i pogorszyć skuteczność detekcji oraz płynność nagrań.",
+        "confidence_threshold": "Legacy/global próg pewności zachowany dla zgodności ze starszym config.json. Gdy używasz oddzielnych progów rysowania i nagrywania, to pole działa jako wartość kompatybilności i punkt odniesienia.",
+        "confidence_threshold_draw": "Minimalna pewność detekcji potrzebna do rysowania ramek i etykiet na podglądzie. Niższa wartość pokazuje więcej obiektów (również mniej pewnych), wyższa ogranicza „szum” i zostawia bardziej wiarygodne wskazania.",
+        "confidence_threshold_record": "Minimalna pewność używana przez logikę zdarzeń/nagrań. Zwiększenie progu zmniejsza liczbę fałszywych wyzwalań, ale może obniżyć czułość. Obniżenie progu zwiększa czułość kosztem większej liczby potencjalnie błędnych zdarzeń.",
+        "draw_overlays": "Włącza rysowanie ramek i etykiet na podglądzie live. Wyłączenie może odciążyć CPU/GPU i GUI, ale sama detekcja może nadal działać. Miniatury zdarzeń mogą nadal zawierać zaznaczenie obiektu zależnie od trybu miniatur.",
+        "enable_detection": "Włącza analizę AI dla tej kamery. Po wyłączeniu obraz może być nadal wyświetlany, ale nie działa logika wykrywania obiektów i związane z nią automatyczne zdarzenia.",
+        "enable_recording": "Pozwala zapisywać nagrania zdarzeń dla tej kamery. Po wyłączeniu detekcje mogą być nadal widoczne na podglądzie, ale klipy i metadane nie będą tworzone.",
+        "detection_hours": "Harmonogram godzin aktywnej detekcji, np. 06:00-18:00;20:00-23:59. Poza zadanym oknem detekcja może być wstrzymana/ignorowana zgodnie z logiką aplikacji. Użyj tej opcji do ograniczenia monitoringu do konkretnych pór.",
+        "visible_classes": "Lista klas (po przecinku), które mają być widoczne na nakładkach preview. To filtr wyłącznie wizualny: kontroluje co użytkownik widzi na ekranie. Może różnić się od klas wyzwalających nagrywanie.",
+        "record_classes": "Lista klas (po przecinku), które mogą uruchomić logikę zdarzenia i nagranie. Użyj tej listy, aby ograniczyć rejestrowanie do najważniejszych obiektów (np. person, car) i zmniejszyć liczbę nieistotnych klipów.",
+        "record_path": "Katalog docelowy nagrań, miniatur i metadanych tej kamery. Niepoprawna lub niedostępna ścieżka uniemożliwi zapis klipów. Dla porządku warto używać stabilnej lokalizacji o odpowiedniej pojemności dysku.",
+        "pre_seconds": "Ile sekund materiału sprzed detekcji ma zostać dołączone do nagrania (bufor prerecord). Większa wartość daje więcej kontekstu przed zdarzeniem, ale zwiększa użycie pamięci RAM.",
+        "lost_seconds": "Czas oczekiwania po zniknięciu detekcji zanim system uzna zdarzenie za utracone. Zwiększenie stabilizuje logikę przy chwilowych zanikach i migotaniu detekcji, ale może opóźnić zamknięcie zdarzenia.",
+        "post_seconds": "Dodatkowy czas nagrania po ostatniej pewnej detekcji. Pomaga domknąć scenę i uniknąć urwanych klipów. Zbyt wysoka wartość wydłuża pliki i zużycie miejsca.",
+        "required_hits_to_start_recording": "Liczba kolejnych trafień detekcji wymagana do startu nagrania. 1 = najszybsza reakcja, ale większa podatność na pojedyncze fałszywe trafienia. Wyższe wartości poprawiają stabilność kosztem wolniejszego startu.",
+        "required_misses_to_end_detection": "Liczba kolejnych „pudeł”/braków detekcji potrzebna do potwierdzenia końca zdarzenia. Wyższa wartość redukuje nerwowe przerywanie nagrań przy chwilowych zanikach obiektu.",
+        "min_record_seconds": "Minimalny czas trwania nagrania po uruchomieniu zdarzenia. Chroni przed bardzo krótkimi, mało użytecznymi klipami i poprawia spójność materiału w przeglądarce.",
+        "thumbnail_mode": "Sposób wyboru miniatury zdarzenia: first_detection (pierwsza detekcja), best_detection (najpewniejsza detekcja) albo first_frame (pierwsza klatka). Najczęściej rekomendowany jest best_detection dla czytelnej miniatury.",
+        "record_start_mode": "Sposób ustawienia początku klipu: detection_first (najpierw klatka detekcji) lub include_prerecord_first (najpierw materiał z prerecord). Opcja wpływa na to, co użytkownik widzi na starcie odtwarzania.",
+        "preview_fps_main": "Maksymalna częstotliwość odświeżania podglądu dla głównego/wybranego widoku kamery. Wyższa wartość poprawia płynność GUI, ale zwiększa obciążenie renderowania.",
+        "preview_fps_thumb": "Maksymalna częstotliwość odświeżania miniaturek i widoków pomocniczych. Obniżenie tej wartości zwykle znacząco zmniejsza obciążenie GUI przy wielu kamerach.",
+        "preview_pause_when_hidden": "Wstrzymuje lub silnie ogranicza odświeżanie podglądu, gdy kamera nie jest aktualnie widoczna. Pozwala oszczędzić zasoby GUI bez wyłączania detekcji i nagrywania w tle.",
+    }
+
     def __init__(self, parent=None, camera=None):
         super().__init__(parent)
         self.setWindowTitle("Ustawienia kamery")
-        self.resize(480, 520)
+        self.resize(520, 680)
 
         form = QFormLayout(self)
 
         self.name_edit = QLineEdit()
-        self.type_combo = QComboBox()
-        self.type_combo.addItems(["rtsp", "usb"])
+        self.type_combo = QComboBox(); self.type_combo.addItems(["rtsp", "usb"])
         self.rtsp_edit = QLineEdit()
         self.device_combo = QComboBox()
         for idx, name in list_usb_cameras():
             self.device_combo.addItem(f"{name} ({idx})", idx)
-        self.source_stack = QStackedWidget()
-        self.source_stack.addWidget(self.rtsp_edit)
-        self.source_stack.addWidget(self.device_combo)
+        self.source_stack = QStackedWidget(); self.source_stack.addWidget(self.rtsp_edit); self.source_stack.addWidget(self.device_combo)
         self.type_combo.currentTextChanged.connect(self._on_type_change)
 
         self.model_combo = QComboBox()
@@ -642,85 +679,65 @@ class SingleCameraDialog(QDialog):
         if not models:
             models = [camera.get("model", DEFAULT_MODEL) if camera else DEFAULT_MODEL]
         self.model_combo.addItems(models)
-        self.fps_spin = QSpinBox()
-        self.fps_spin.setRange(1, 60)
-        self.rtsp_fps_spin = QSpinBox()
-        self.rtsp_fps_spin.setRange(0, 60)
-        self.rtsp_fps_spin.setSpecialValueText("Auto")
-        self.conf_spin = QDoubleSpinBox()
-        self.conf_spin.setRange(0.0, 1.0)
-        self.conf_spin.setSingleStep(0.05)
-        self.conf_draw_spin = QDoubleSpinBox()
-        self.conf_draw_spin.setRange(0.0, 1.0)
-        self.conf_draw_spin.setSingleStep(0.05)
-        self.conf_record_spin = QDoubleSpinBox()
-        self.conf_record_spin.setRange(0.0, 1.0)
-        self.conf_record_spin.setSingleStep(0.05)
-        self.draw_chk = QCheckBox()
-        self.detect_chk = QCheckBox()
-        self.record_chk = QCheckBox()
-        self.hours_edit = QLineEdit()
-        self.visible_edit = QLineEdit()
-        self.record_edit = QLineEdit()
-        self.path_edit = QLineEdit()
-        self.btn_path = QPushButton("Wybierz")
-        self.pre_spin = QSpinBox()
-        self.pre_spin.setRange(0, 60)
-        self.lost_spin = QSpinBox()
-        self.lost_spin.setRange(0, 60)
-        self.post_spin = QSpinBox()
-        self.post_spin.setRange(0, 60)
-        self.thumbnail_mode_combo = QComboBox()
-        self.thumbnail_mode_combo.addItems(["first_detection", "best_detection", "first_frame"])
-        self.record_start_mode_combo = QComboBox()
-        self.record_start_mode_combo.addItems(["detection_first", "include_prerecord_first"])
-        self.required_hits_spin = QSpinBox()
-        self.required_hits_spin.setRange(1, 10)
-        self.required_misses_spin = QSpinBox()
-        self.required_misses_spin.setRange(1, 10)
-        self.min_record_seconds_spin = QSpinBox()
-        self.min_record_seconds_spin.setRange(0, 120)
 
-        path_layout = QHBoxLayout()
-        path_layout.addWidget(self.path_edit)
-        path_layout.addWidget(self.btn_path)
+        self.fps_spin = QSpinBox(); self.fps_spin.setRange(1, 60)
+        self.rtsp_fps_spin = QSpinBox(); self.rtsp_fps_spin.setRange(0, 60); self.rtsp_fps_spin.setSpecialValueText("Auto")
+        self.conf_spin = QDoubleSpinBox(); self.conf_spin.setRange(0.0, 1.0); self.conf_spin.setSingleStep(0.05)
+        self.conf_draw_spin = QDoubleSpinBox(); self.conf_draw_spin.setRange(0.0, 1.0); self.conf_draw_spin.setSingleStep(0.05)
+        self.conf_record_spin = QDoubleSpinBox(); self.conf_record_spin.setRange(0.0, 1.0); self.conf_record_spin.setSingleStep(0.05)
+        self.draw_chk = QCheckBox(); self.detect_chk = QCheckBox(); self.record_chk = QCheckBox()
+        self.hours_edit = QLineEdit(); self.visible_edit = QLineEdit(); self.record_edit = QLineEdit()
+        self.path_edit = QLineEdit(); self.btn_path = QPushButton("Wybierz")
+        self.pre_spin = QSpinBox(); self.pre_spin.setRange(0, 60)
+        self.lost_spin = QSpinBox(); self.lost_spin.setRange(0, 60)
+        self.post_spin = QSpinBox(); self.post_spin.setRange(0, 60)
+        self.thumbnail_mode_combo = QComboBox(); self.thumbnail_mode_combo.addItems(["first_detection", "best_detection", "first_frame"])
+        self.record_start_mode_combo = QComboBox(); self.record_start_mode_combo.addItems(["detection_first", "include_prerecord_first"])
+        self.required_hits_spin = QSpinBox(); self.required_hits_spin.setRange(1, 10)
+        self.required_misses_spin = QSpinBox(); self.required_misses_spin.setRange(1, 10)
+        self.min_record_seconds_spin = QSpinBox(); self.min_record_seconds_spin.setRange(0, 120)
+        self.preview_fps_main_spin = QDoubleSpinBox(); self.preview_fps_main_spin.setRange(1.0, 60.0); self.preview_fps_main_spin.setSingleStep(1.0)
+        self.preview_fps_thumb_spin = QDoubleSpinBox(); self.preview_fps_thumb_spin.setRange(0.5, 30.0); self.preview_fps_thumb_spin.setSingleStep(0.5)
+        self.preview_pause_chk = QCheckBox()
 
-        form.addRow("Nazwa", self.name_edit)
-        form.addRow("Typ źródła", self.type_combo)
-        form.addRow("Adres/Urządzenie", self.source_stack)
-        form.addRow("Model detekcji", self.model_combo)
-        form.addRow("FPS/S DETECT", self.fps_spin)
-        form.addRow("FPS/S RTSP", self.rtsp_fps_spin)
-        form.addRow("Próg pewności (legacy)", self.conf_spin)
-        form.addRow("Próg rysowania", self.conf_draw_spin)
-        form.addRow("Próg nagrania", self.conf_record_spin)
-        form.addRow("Rysuj nakładki", self.draw_chk)
-        form.addRow("Wykrywaj obiekty", self.detect_chk)
-        form.addRow("Nagrywaj detekcje", self.record_chk)
-        form.addRow("Godziny detekcji", self.hours_edit)
-        form.addRow("Widoczne klasy", self.visible_edit)
-        form.addRow("Klasy nagrywane", self.record_edit)
-        form.addRow("Folder nagrań", path_layout)
-        form.addRow("Pre seconds", self.pre_spin)
-        form.addRow("Lost seconds", self.lost_spin)
-        form.addRow("Post seconds", self.post_spin)
-        form.addRow("Tryb miniatury", self.thumbnail_mode_combo)
-        form.addRow("Tryb startu nagrania", self.record_start_mode_combo)
-        form.addRow("Wymagane trafienia start", self.required_hits_spin)
-        form.addRow("Wymagane pudła stop", self.required_misses_spin)
-        form.addRow("Minimalny czas nagrania", self.min_record_seconds_spin)
+        path_layout = QHBoxLayout(); path_layout.addWidget(self.path_edit); path_layout.addWidget(self.btn_path)
 
-        # test rtsp
+        self._field_rows = {}
+        self._add_field_row(form, "name", "Nazwa", self.name_edit)
+        self._add_field_row(form, "type", "Typ źródła", self.type_combo)
+        self._add_field_row(form, "rtsp", "Adres/Urządzenie", self.source_stack)
+        self._add_field_row(form, "model", "Model detekcji", self.model_combo)
+        self._add_field_row(form, "fps", "FPS/S DETECT", self.fps_spin)
+        self._add_field_row(form, "rtsp_fps", "FPS/S RTSP", self.rtsp_fps_spin)
+        self._add_field_row(form, "confidence_threshold", "Próg pewności (legacy)", self.conf_spin)
+        self._add_field_row(form, "confidence_threshold_draw", "Próg rysowania", self.conf_draw_spin)
+        self._add_field_row(form, "confidence_threshold_record", "Próg nagrania", self.conf_record_spin)
+        self._add_field_row(form, "draw_overlays", "Rysuj nakładki", self.draw_chk)
+        self._add_field_row(form, "enable_detection", "Wykrywaj obiekty", self.detect_chk)
+        self._add_field_row(form, "enable_recording", "Nagrywaj detekcje", self.record_chk)
+        self._add_field_row(form, "detection_hours", "Godziny detekcji", self.hours_edit)
+        self._add_field_row(form, "visible_classes", "Widoczne klasy", self.visible_edit)
+        self._add_field_row(form, "record_classes", "Klasy nagrywane", self.record_edit)
+        self._add_field_row(form, "record_path", "Folder nagrań", path_layout)
+        self._add_field_row(form, "pre_seconds", "Pre seconds", self.pre_spin)
+        self._add_field_row(form, "lost_seconds", "Lost seconds", self.lost_spin)
+        self._add_field_row(form, "post_seconds", "Post seconds", self.post_spin)
+        self._add_field_row(form, "thumbnail_mode", "Tryb miniatury", self.thumbnail_mode_combo)
+        self._add_field_row(form, "record_start_mode", "Tryb startu nagrania", self.record_start_mode_combo)
+        self._add_field_row(form, "required_hits_to_start_recording", "Wymagane trafienia start", self.required_hits_spin)
+        self._add_field_row(form, "required_misses_to_end_detection", "Wymagane pudła stop", self.required_misses_spin)
+        self._add_field_row(form, "min_record_seconds", "Minimalny czas nagrania", self.min_record_seconds_spin)
+        self._add_field_row(form, "preview_fps_main", "Preview FPS main", self.preview_fps_main_spin)
+        self._add_field_row(form, "preview_fps_thumb", "Preview FPS thumb", self.preview_fps_thumb_spin)
+        self._add_field_row(form, "preview_pause_when_hidden", "Pauzuj preview gdy ukryta", self.preview_pause_chk)
+        self._apply_all_tooltips()
+
         self.test_btn = QPushButton("Test połączenia")
         self.test_status = QLabel("")
         form.addRow(self.test_btn, self.test_status)
 
-        btns = QHBoxLayout()
-        self.btn_ok = QPushButton("OK")
-        self.btn_cancel = QPushButton("Anuluj")
-        btns.addStretch(1)
-        btns.addWidget(self.btn_cancel)
-        btns.addWidget(self.btn_ok)
+        btns = QHBoxLayout(); self.btn_ok = QPushButton("OK"); self.btn_cancel = QPushButton("Anuluj")
+        btns.addStretch(1); btns.addWidget(self.btn_cancel); btns.addWidget(self.btn_ok)
         form.addRow(btns)
 
         self.btn_ok.clicked.connect(self.accept)
@@ -733,6 +750,22 @@ class SingleCameraDialog(QDialog):
             self.load_camera(camera)
         else:
             self._on_type_change(self.type_combo.currentText())
+            self.preview_fps_main_spin.setValue(float(DEFAULT_PREVIEW_FPS_MAIN))
+            self.preview_fps_thumb_spin.setValue(float(DEFAULT_PREVIEW_FPS_THUMB))
+            self.preview_pause_chk.setChecked(bool(DEFAULT_PREVIEW_PAUSE_WHEN_HIDDEN))
+
+    def _add_field_row(self, form: QFormLayout, field_key: str, label_text: str, widget):
+        label = QLabel(label_text)
+        form.addRow(label, widget)
+        self._field_rows[field_key] = (label, widget)
+
+    def _apply_all_tooltips(self):
+        for key, (label, widget) in self._field_rows.items():
+            tooltip = self.TOOLTIP_MAP.get(key, "Ustawienie kamery wpływające na działanie detekcji, podglądu lub nagrywania.")
+            label.setToolTip(tooltip)
+            widget.setToolTip(tooltip)
+            label.setWhatsThis(tooltip)
+            widget.setWhatsThis(tooltip)
 
     def _choose_path(self):
         initial_dir = self.path_edit.text() or str(DEFAULT_RECORD_PATH)
@@ -755,14 +788,11 @@ class SingleCameraDialog(QDialog):
         else:
             url = self.rtsp_edit.text().strip()
             cap = cv2.VideoCapture(url)
-        ok, _ = cap.read()
-        cap.release()
+        ok, _ = cap.read(); cap.release()
         if ok:
-            self.test_status.setText("✅ OK")
-            self.test_status.setStyleSheet("color:#0f0;")
+            self.test_status.setText("✅ OK"); self.test_status.setStyleSheet("color:#0f0;")
         else:
-            self.test_status.setText("⚠️ Błąd")
-            self.test_status.setStyleSheet("color:#f80;")
+            self.test_status.setText("⚠️ Błąd"); self.test_status.setStyleSheet("color:#f80;")
 
     def load_camera(self, cam):
         cam = cam or {}
@@ -771,7 +801,6 @@ class SingleCameraDialog(QDialog):
         self.type_combo.setCurrentText(src_type)
         if src_type == "usb":
             idx = int(cam.get("rtsp", 0))
-            # select matching device if present
             i = self.device_combo.findData(idx)
             if i >= 0:
                 self.device_combo.setCurrentIndex(i)
@@ -801,6 +830,9 @@ class SingleCameraDialog(QDialog):
         self.required_hits_spin.setValue(int(cam.get("required_hits_to_start_recording", DEFAULT_REQUIRED_HITS_TO_START_RECORDING)))
         self.required_misses_spin.setValue(int(cam.get("required_misses_to_end_detection", DEFAULT_REQUIRED_MISSES_TO_END_DETECTION)))
         self.min_record_seconds_spin.setValue(int(cam.get("min_record_seconds", DEFAULT_MIN_RECORD_SECONDS)))
+        self.preview_fps_main_spin.setValue(float(cam.get("preview_fps_main", DEFAULT_PREVIEW_FPS_MAIN)))
+        self.preview_fps_thumb_spin.setValue(float(cam.get("preview_fps_thumb", DEFAULT_PREVIEW_FPS_THUMB)))
+        self.preview_pause_chk.setChecked(bool(cam.get("preview_pause_when_hidden", DEFAULT_PREVIEW_PAUSE_WHEN_HIDDEN)))
 
     def accept(self):
         name = self.name_edit.text().strip()
@@ -839,9 +871,13 @@ class SingleCameraDialog(QDialog):
             "required_hits_to_start_recording": int(self.required_hits_spin.value()),
             "required_misses_to_end_detection": int(self.required_misses_spin.value()),
             "min_record_seconds": int(self.min_record_seconds_spin.value()),
+            "preview_fps_main": float(self.preview_fps_main_spin.value()),
+            "preview_fps_thumb": float(self.preview_fps_thumb_spin.value()),
+            "preview_pause_when_hidden": self.preview_pause_chk.isChecked(),
         }
         self.result_camera = cam
         super().accept()
+
 
 # --- Dialog usuwania kamer ---
 class RemoveCameraDialog(QDialog):
@@ -1587,64 +1623,88 @@ QToolButton:focus { outline: none; }
             self.restart_workers_and_ui()
             self.log_window.add_entry("settings", f"dodano kamerę {data.get('name')}")
 
+    def _requires_worker_restart(self, changed_keys: list[str], old_camera: dict, new_camera: dict) -> tuple[bool, list[str]]:
+        del old_camera, new_camera
+        restart_keys = [key for key in changed_keys if key in CAMERA_RESTART_REQUIRED_FIELDS]
+        return bool(restart_keys), restart_keys
+
+    def _restart_camera_with_new_settings(self, idx: int, was_running: bool) -> bool:
+        if not was_running:
+            return False
+        self.stop_camera(idx)
+        self.start_camera(idx)
+        return True
+
+    def _apply_camera_settings_change(self, idx: int, old_camera: dict, new_camera: dict) -> dict:
+        changed_keys, _ = classify_camera_setting_changes(old_camera, new_camera, CAMERA_RESTART_REQUIRED_FIELDS)
+        requires_restart, restart_reason_keys = self._requires_worker_restart(changed_keys, old_camera, new_camera)
+        worker = self.workers[idx] if idx < len(self.workers) else None
+        was_running = isinstance(worker, CameraWorker) and worker.isRunning()
+
+        result = {
+            "saved": True,
+            "changed_keys": changed_keys,
+            "restart_reason_keys": restart_reason_keys,
+            "applied_live": False,
+            "restarted": False,
+            "was_running": was_running,
+        }
+
+        if not changed_keys:
+            return result
+
+        if requires_restart:
+            result["restarted"] = self._restart_camera_with_new_settings(idx, was_running)
+            return result
+
+        if was_running:
+            worker.apply_runtime_settings(new_camera)
+            result["applied_live"] = True
+        return result
+
+    def _show_camera_settings_result_message(self, camera_name: str, result: dict) -> None:
+        if result.get("restarted"):
+            message = f"Ustawienia kamery „{camera_name}” zostały zapisane. Zmiany wymagające restartu zostały zastosowane automatycznie."
+        elif result.get("applied_live"):
+            message = f"Ustawienia kamery „{camera_name}” zostały zapisane i zastosowane bez restartu."
+        elif result.get("was_running"):
+            message = f"Ustawienia kamery „{camera_name}” zostały zapisane."
+        else:
+            message = f"Ustawienia kamery „{camera_name}” zostały zapisane."
+        if self.statusBar() is not None:
+            self.statusBar().showMessage(message, 8000)
+        QMessageBox.information(self, "Ustawienia kamery", message)
+
     def camera_settings(self, idx: int):
-        cam = self.cameras[idx]
+        cam = dict(self.cameras[idx])
         dlg = SingleCameraDialog(self, cam)
-        if dlg.exec_():
-            new_data = dlg.result_camera
-            if new_data["name"] != cam["name"] and any(c["name"] == new_data["name"] for c in self.cameras):
+        if not dlg.exec_():
+            return
+        new_data = dlg.result_camera
+        try:
+            if new_data["name"] != cam["name"] and any(c["name"] == new_data["name"] for i, c in enumerate(self.cameras) if i != idx):
                 QMessageBox.warning(self, "Duplikat", f"Kamera o nazwie '{new_data['name']}' już istnieje.")
                 return
-            model_changed = new_data.get("model") != cam.get("model")
+
+            fill_camera_defaults(new_data)
             self.cameras[idx] = new_data
             cfg = load_config()
             cfg["cameras"] = self.cameras
             save_config(cfg)
+
             self.camera_list.rebuild(self.cameras)
             self.camera_grid.rebuild(self.cameras)
             self.camera_list.setCurrentRow(idx)
-            self.log_window.add_entry("settings", f"zapisano ustawienia kamery {new_data.get('name')}")
-            if model_changed:
-                self.log_window.add_entry("settings", "zmieniono model")
 
-            w = self.workers[idx] if idx < len(self.workers) else None
-            if isinstance(w, CameraWorker) and w.isRunning():
-                if model_changed:
-                    self.stop_camera(idx)
-                    self.start_camera(idx)
-                else:
-                    legacy_conf = float(new_data.get("confidence_threshold", DEFAULT_CONFIDENCE_THRESHOLD))
-                    w.confidence_threshold = legacy_conf
-                    w.confidence_threshold_draw = float(new_data.get("confidence_threshold_draw", legacy_conf))
-                    w.confidence_threshold_record = float(new_data.get("confidence_threshold_record", legacy_conf))
-                    w.set_draw_overlays(new_data.get("draw_overlays", DEFAULT_DRAW_OVERLAYS))
-                    w.set_enable_detection(new_data.get("enable_detection", DEFAULT_ENABLE_DETECTION))
-                    w.set_enable_recording(new_data.get("enable_recording", DEFAULT_ENABLE_RECORDING))
-                    w.set_detection_schedule(new_data.get("detection_hours", DEFAULT_DETECTION_HOURS))
-                    w.visible_classes = list(new_data.get("visible_classes", VISIBLE_CLASSES))
-                    w.record_classes = list(new_data.get("record_classes", RECORD_CLASSES))
-                    w.refresh_class_filters()
-                    w.pre_seconds = int(new_data.get("pre_seconds", DEFAULT_PRE_SECONDS))
-                    w.lost_seconds = int(new_data.get("lost_seconds", DEFAULT_LOST_SECONDS))
-                    w.post_seconds = int(new_data.get("post_seconds", DEFAULT_POST_SECONDS))
-                    w.thumbnail_mode = str(new_data.get("thumbnail_mode", DEFAULT_THUMBNAIL_MODE))
-                    w.record_start_mode = str(new_data.get("record_start_mode", DEFAULT_RECORD_START_MODE))
-                    w.required_hits_to_start_recording = int(new_data.get("required_hits_to_start_recording", DEFAULT_REQUIRED_HITS_TO_START_RECORDING))
-                    w.required_misses_to_end_detection = int(new_data.get("required_misses_to_end_detection", DEFAULT_REQUIRED_MISSES_TO_END_DETECTION))
-                    w.min_record_seconds = int(new_data.get("min_record_seconds", DEFAULT_MIN_RECORD_SECONDS))
-                    buffer_fps = float(w.rtsp_fps if w.rtsp_fps > 0 else w.fps)
-                    w.prerecord_buffer = deque(maxlen=max(1, int(w.pre_seconds * max(1.0, buffer_fps))))
-                    record_base = Path(new_data.get("record_path", DEFAULT_RECORD_PATH))
-                    w.output_dir = str(record_base / new_data.get("name"))
-                    os.makedirs(w.output_dir, exist_ok=True)
-                    w.camera.update(new_data)
-                    if new_data.get("rtsp") != cam.get("rtsp"):
-                        w.restart_requested = True
-                    if new_data.get("fps") != cam.get("fps"):
-                        w.set_fps(new_data.get("fps", w.fps))
-            else:
-                self.stop_camera(idx)
-                self.start_camera(idx)
+            result = self._apply_camera_settings_change(idx, cam, new_data)
+            self.log_window.add_entry(
+                "settings",
+                f"zapisano ustawienia kamery {new_data.get('name')} changed={result.get('changed_keys', [])} restart={result.get('restart_reason_keys', [])}",
+            )
+            self._show_camera_settings_result_message(new_data.get("name", "kamera"), result)
+        except Exception as exc:
+            self.log_window.add_entry("error", f"błąd zapisu ustawień kamery {new_data.get('name', 'unknown')}: {exc}")
+            QMessageBox.critical(self, "Błąd ustawień", f"Nie udało się zapisać ustawień kamery: {exc}")
 
     def delete_camera(self, idx: int):
         name = self.cameras[idx]["name"]
