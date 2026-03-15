@@ -136,6 +136,48 @@ def _merge_dict(base: MutableMapping[str, object], overrides: Mapping[str, objec
             base[key] = value
 
 
+def build_recording_sidecar_metadata(
+    *,
+    camera: str,
+    label: str,
+    confidence: float,
+    event_time: str,
+    filepath: str,
+    thumb: str,
+    source_fps: float,
+    writer_fps: float,
+    detect_fps: float,
+    event_start_ts: float,
+    thumbnail_ts: float,
+    frames_written: int,
+    dropped_frames: int,
+    thumbnail_mode: str,
+    inference_count: int,
+    positive_detection_count: int,
+) -> Dict[str, object]:
+    """Build backward-compatible recording metadata payload."""
+    return {
+        "camera": camera,
+        "label": label,
+        "confidence": float(confidence),
+        "time": event_time,
+        "timestamp": float(event_start_ts),
+        "file": filepath,
+        "filepath": filepath,
+        "thumb": thumb,
+        "source_fps": float(source_fps),
+        "writer_fps": float(writer_fps),
+        "detect_fps": float(detect_fps),
+        "event_start_ts": float(event_start_ts),
+        "thumbnail_ts": float(thumbnail_ts),
+        "thumbnail_mode": thumbnail_mode,
+        "frames_written": int(frames_written),
+        "dropped_frames": int(dropped_frames),
+        "inference_count": int(inference_count),
+        "positive_detection_count": int(positive_detection_count),
+    }
+
+
 def build_recording_metadata(
     filepath: str,
     camera_dirs: Sequence[CameraDirectory],
@@ -263,6 +305,7 @@ __all__ = [
     "CameraDirectory",
     "RecordingMetadata",
     "build_recording_metadata",
+    "build_recording_sidecar_metadata",
     "camera_name_for_path",
     "discover_recordings",
     "iter_catalog_entries",

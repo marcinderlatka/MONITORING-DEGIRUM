@@ -127,8 +127,10 @@ def _normalise_catalog_entry(entry: dict) -> dict | None:
     if not path.is_absolute():
         path = (BASE_DIR / path).resolve()
     item["filepath"] = str(path)
-    if "file" in item:
-        item["file"] = str(path)
+    item.setdefault("file", str(path))
+    item.setdefault("time", item.get("event_time", ""))
+    if "timestamp" not in item and item.get("event_start_ts") not in (None, ""):
+        item["timestamp"] = item.get("event_start_ts")
     return item
 
 

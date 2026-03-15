@@ -26,6 +26,8 @@ DEFAULT_MODEL = "yolov5nu_silu_coco--640x640_float_tflite_multidevice_1"
 DEFAULT_FPS = 3
 DEFAULT_RTSP_FPS = 0
 DEFAULT_CONFIDENCE_THRESHOLD = 0.5
+DEFAULT_CONFIDENCE_THRESHOLD_DRAW = 0.45
+DEFAULT_CONFIDENCE_THRESHOLD_RECORD = DEFAULT_CONFIDENCE_THRESHOLD
 DEFAULT_DRAW_OVERLAYS = True
 DEFAULT_ENABLE_DETECTION = True
 DEFAULT_ENABLE_RECORDING = True
@@ -34,6 +36,9 @@ DEFAULT_RECORD_PATH = BASE_DIR / "nagrania"
 DEFAULT_PRE_SECONDS = 5
 DEFAULT_POST_SECONDS = 5
 DEFAULT_LOST_SECONDS = 10
+DEFAULT_THUMBNAIL_MODE = "first_detection"
+DEFAULT_RECORD_START_MODE = "detection_first"
+DEFAULT_REQUIRED_HITS_TO_START_RECORDING = 1
 
 
 def _resolve_path(value: str | os.PathLike[str] | None, *, default: Path) -> Path:
@@ -53,6 +58,8 @@ def fill_camera_defaults(camera: MutableMapping[str, object]) -> MutableMapping[
         "fps": DEFAULT_FPS,
         "rtsp_fps": DEFAULT_RTSP_FPS,
         "confidence_threshold": DEFAULT_CONFIDENCE_THRESHOLD,
+        "confidence_threshold_draw": DEFAULT_CONFIDENCE_THRESHOLD_DRAW,
+        "confidence_threshold_record": DEFAULT_CONFIDENCE_THRESHOLD_RECORD,
         "draw_overlays": DEFAULT_DRAW_OVERLAYS,
         "enable_detection": DEFAULT_ENABLE_DETECTION,
         "enable_recording": DEFAULT_ENABLE_RECORDING,
@@ -63,8 +70,18 @@ def fill_camera_defaults(camera: MutableMapping[str, object]) -> MutableMapping[
         "pre_seconds": DEFAULT_PRE_SECONDS,
         "post_seconds": DEFAULT_POST_SECONDS,
         "lost_seconds": DEFAULT_LOST_SECONDS,
+        "thumbnail_mode": DEFAULT_THUMBNAIL_MODE,
+        "record_start_mode": DEFAULT_RECORD_START_MODE,
+        "required_hits_to_start_recording": DEFAULT_REQUIRED_HITS_TO_START_RECORDING,
         "type": "rtsp",
     }
+
+    legacy_confidence = camera.get("confidence_threshold", DEFAULT_CONFIDENCE_THRESHOLD)
+    if "confidence_threshold_draw" not in camera:
+        camera["confidence_threshold_draw"] = legacy_confidence
+    if "confidence_threshold_record" not in camera:
+        camera["confidence_threshold_record"] = legacy_confidence
+
     for key, value in defaults.items():
         camera.setdefault(key, value)
 
@@ -140,6 +157,8 @@ __all__ = [
     "ALERTS_HISTORY_PATH",
     "CONFIG_PATH",
     "DEFAULT_CONFIDENCE_THRESHOLD",
+    "DEFAULT_CONFIDENCE_THRESHOLD_DRAW",
+    "DEFAULT_CONFIDENCE_THRESHOLD_RECORD",
     "DEFAULT_DETECTION_HOURS",
     "DEFAULT_DRAW_OVERLAYS",
     "DEFAULT_ENABLE_DETECTION",
@@ -151,6 +170,9 @@ __all__ = [
     "DEFAULT_POST_SECONDS",
     "DEFAULT_PRE_SECONDS",
     "DEFAULT_RECORD_PATH",
+    "DEFAULT_RECORD_START_MODE",
+    "DEFAULT_REQUIRED_HITS_TO_START_RECORDING",
+    "DEFAULT_THUMBNAIL_MODE",
     "ICON_DIR",
     "LOG_HISTORY_PATH",
     "LOG_RETENTION_HOURS",

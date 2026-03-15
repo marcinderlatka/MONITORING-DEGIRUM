@@ -11,6 +11,7 @@ from monitoring.recordings import (
     build_recording_metadata,
     camera_name_for_path,
     load_history_metadata,
+    build_recording_sidecar_metadata,
 )
 
 
@@ -79,3 +80,30 @@ def test_load_history_metadata_accepts_preloaded_items(tmp_path):
     assert key in metadata
     assert metadata[key]["camera"] == "Cam1"
     assert metadata[key]["label"] == "car"
+
+
+def test_build_recording_sidecar_metadata_contains_reliability_fields():
+    payload = build_recording_sidecar_metadata(
+        camera="Cam1",
+        label="person",
+        confidence=0.9,
+        event_time="2024-01-01 00:00:00",
+        filepath="/tmp/a.mp4",
+        thumb="/tmp/a.mp4.jpg",
+        source_fps=25.0,
+        writer_fps=5.0,
+        detect_fps=3.0,
+        event_start_ts=1704067200.0,
+        thumbnail_ts=1704067200.1,
+        frames_written=12,
+        dropped_frames=1,
+        thumbnail_mode="first_detection",
+        inference_count=30,
+        positive_detection_count=8,
+    )
+
+    assert payload["file"] == "/tmp/a.mp4"
+    assert payload["filepath"] == "/tmp/a.mp4"
+    assert payload["writer_fps"] == 5.0
+    assert payload["thumbnail_mode"] == "first_detection"
+    assert payload["frames_written"] == 12
