@@ -19,6 +19,8 @@ from PyQt5.QtCore import QThread, pyqtSignal
 
 from .config import (
     DEFAULT_CONFIDENCE_THRESHOLD,
+    DEFAULT_CONFIDENCE_THRESHOLD_DRAW,
+    DEFAULT_CONFIDENCE_THRESHOLD_RECORD,
     DEFAULT_DETECTION_HOURS,
     DEFAULT_DRAW_OVERLAYS,
     DEFAULT_ENABLE_DETECTION,
@@ -28,10 +30,15 @@ from .config import (
     DEFAULT_POST_SECONDS,
     DEFAULT_PRE_SECONDS,
     DEFAULT_RECORD_PATH,
+    DEFAULT_RECORD_START_MODE,
+    DEFAULT_REQUIRED_HITS_TO_START_RECORDING,
     DEFAULT_RTSP_FPS,
+    DEFAULT_THUMBNAIL_MODE,
     RECORD_CLASSES,
     VISIBLE_CLASSES,
 )
+from .recordings import build_recording_sidecar_metadata
+from .runtime_helpers import compute_effective_writer_fps
 from .storage import update_recordings_catalog
 
 LABEL_COLORS = {
@@ -113,16 +120,17 @@ def _scale_bbox(
 
 
 class RecordingThread(QThread):
-    def __init__(self, filepath: str, width: int, height: int, fps: int) -> None:
+    def __init__(self, filepath: str, width: int, height: int, fps: float) -> None:
         super().__init__()
         self.filepath = filepath
         self.width = width
         self.height = height
-        self.fps = fps
-        self.queue: "Queue[np.ndarray]" = Queue(maxsize=120)
+        self.fps = float(max(1.0, fps))
+        self.queue: "Queue[np.ndarray]" = Queue(maxsize=240)
         self.running = True
         self.writer = None
         self.dropped_frames = 0
+        self.frames_written = 0
 
     def run(self) -> None:
         self.writer = degirum_tools.VideoWriter(self.filepath, self.width, self.height, self.fps)
@@ -130,6 +138,7 @@ class RecordingThread(QThread):
             try:
                 frame = self.queue.get(timeout=0.1)
                 self.writer.write(frame)
+                self.frames_written += 1
             except Empty:
                 pass
         if self.writer:
@@ -143,7 +152,6 @@ class RecordingThread(QThread):
                 self.queue.put_nowait(frame)
             except Full:
                 self.dropped_frames += 1
-                print(f"[recorder] queue full for {self.filepath}; dropping frame")
 
     def stop(self) -> None:
         self.running = False
@@ -151,11 +159,11 @@ class RecordingThread(QThread):
 
 
 class CameraWorker(QThread):
-    frame_signal = pyqtSignal(object, int)  # (np.ndarray BGR, index)
-    alert_signal = pyqtSignal(object)  # dict z klatką i metadanymi
-    error_signal = pyqtSignal(str, int)  # komunikat, index
-    status_signal = pyqtSignal(str, int)  # status tekstowy, index
-    record_signal = pyqtSignal(str, str)  # (event, filepath)
+    frame_signal = pyqtSignal(object, int)
+    alert_signal = pyqtSignal(object)
+    error_signal = pyqtSignal(str, int)
+    status_signal = pyqtSignal(str, int)
+    record_signal = pyqtSignal(str, str)
 
     def __init__(self, camera: dict, model: Any, index: int = 0) -> None:
         super().__init__()
@@ -165,9 +173,14 @@ class CameraWorker(QThread):
 
         self.fps = int(self.camera.get("fps", DEFAULT_FPS))
         self.rtsp_fps = int(self.camera.get("rtsp_fps", DEFAULT_RTSP_FPS))
-        self.confidence_threshold = float(
-            self.camera.get("confidence_threshold", DEFAULT_CONFIDENCE_THRESHOLD)
+        legacy_conf = float(self.camera.get("confidence_threshold", DEFAULT_CONFIDENCE_THRESHOLD))
+        self.confidence_threshold_draw = float(
+            self.camera.get("confidence_threshold_draw", legacy_conf)
         )
+        self.confidence_threshold_record = float(
+            self.camera.get("confidence_threshold_record", legacy_conf)
+        )
+        self.confidence_threshold = self.confidence_threshold_record
         self.draw_overlays = bool(self.camera.get("draw_overlays", DEFAULT_DRAW_OVERLAYS))
         self.enable_detection = bool(self.camera.get("enable_detection", DEFAULT_ENABLE_DETECTION))
         self.enable_recording = bool(self.camera.get("enable_recording", DEFAULT_ENABLE_RECORDING))
@@ -178,84 +191,55 @@ class CameraWorker(QThread):
         self.record_classes_lower = {c.lower() for c in self.record_classes}
         self.pre_seconds = int(self.camera.get("pre_seconds", DEFAULT_PRE_SECONDS))
         self.post_seconds = int(self.camera.get("post_seconds", DEFAULT_POST_SECONDS))
+        self.lost_seconds = int(self.camera.get("lost_seconds", DEFAULT_LOST_SECONDS))
+        self.thumbnail_mode = str(self.camera.get("thumbnail_mode", DEFAULT_THUMBNAIL_MODE))
+        self.record_start_mode = str(self.camera.get("record_start_mode", DEFAULT_RECORD_START_MODE))
+        self.required_hits_to_start_recording = int(
+            self.camera.get("required_hits_to_start_recording", DEFAULT_REQUIRED_HITS_TO_START_RECORDING)
+        )
         rec_path = str(self.camera.get("record_path", DEFAULT_RECORD_PATH))
         self.output_dir = os.path.join(rec_path, self.camera.get("name", "camera"))
         os.makedirs(self.output_dir, exist_ok=True)
 
-        self.stream_fps = None
-
         self.recording = False
         self.record_thread: RecordingThread | None = None
         self.output_file: str | None = None
-        self.detection_active = False
         self.stop_signal = False
-        self.lost_seconds = int(self.camera.get("lost_seconds", DEFAULT_LOST_SECONDS))
         self.record_lock = Lock()
-        self.no_detection_frames = 0
-        self.post_countdown_frames = 0
+        self.prerecord_buffer = deque(maxlen=max(1, int(self.pre_seconds * max(1, self.fps))))
 
-        self.prerecord_buffer = deque(maxlen=int(self.pre_seconds * self.fps))
-        self.frame: np.ndarray | None = None
+        self.stream_fps = 0.0
+        self.source_fps = 0.0
+        self.writer_fps = 0.0
+        self.last_frame_ts = 0.0
+        self.loop_fps = 0.0
+
+        self.detection_active = False
+        self.pending_detection_hits = 0
+        self.detection_last_seen_ts = 0.0
+
+        self.current_event_start_ts = 0.0
+        self.current_thumbnail_ts = 0.0
+        self.current_thumb_path = ""
+        self.current_label = "object"
+        self.current_confidence = 0.0
+
+        self.inference_count = 0
+        self.positive_detection_count = 0
         self.last_metrics_log_ts = 0.0
-        self.metrics = {
-            "capture": 0.0,
-            "inference": 0.0,
-            "overlay": 0.0,
-            "emit": 0.0,
-            "record_enqueue": 0.0,
-            "frames": 0,
-            "recorder_drops": 0,
-        }
 
     def refresh_class_filters(self) -> None:
         self.visible_classes_lower = {c.lower() for c in self.visible_classes}
         self.record_classes_lower = {c.lower() for c in self.record_classes}
 
-    def _log_metrics_if_needed(self) -> None:
-        now = time.monotonic()
-        if self.last_metrics_log_ts == 0.0:
-            self.last_metrics_log_ts = now
-            return
-        elapsed = now - self.last_metrics_log_ts
-        if elapsed < 5.0 or self.metrics["frames"] <= 0:
-            return
-        frames = max(1, int(self.metrics["frames"]))
-        queue_size = 0
-        if self.record_thread is not None:
-            queue_size = self.record_thread.queue.qsize()
-        print(
-            f"[perf][{self.camera.get('name', self.index)}] "
-            f"capture={self.metrics['capture'] / frames * 1000:.1f}ms "
-            f"infer={self.metrics['inference'] / frames * 1000:.1f}ms "
-            f"overlay={self.metrics['overlay'] / frames * 1000:.1f}ms "
-            f"emit={self.metrics['emit'] / frames * 1000:.1f}ms "
-            f"enqueue={self.metrics['record_enqueue'] / frames * 1000:.1f}ms "
-            f"queue={queue_size} "
-            f"drops={self.metrics['recorder_drops']}"
-        )
-        self.last_metrics_log_ts = now
-        for key in ("capture", "inference", "overlay", "emit", "record_enqueue"):
-            self.metrics[key] = 0.0
-        self.metrics["frames"] = 0
-        self.metrics["recorder_drops"] = 0
-
-    def _stop_recording(self) -> None:
-        if self.record_thread:
-            self.record_thread.stop()
-            self.record_thread = None
-        if self.recording:
-            self.record_signal.emit("stop", self.output_file or "")
-        self.recording = False
-        self.output_file = None
-        if self.record_lock.locked():
-            self.record_lock.release()
-        self.detection_active = False
-        self.no_detection_frames = 0
-        self.post_countdown_frames = 0
-
     def set_confidence(self, threshold: float) -> None:
-        self.confidence_threshold = float(threshold)
-        self.camera["confidence_threshold"] = self.confidence_threshold
+        value = float(threshold)
+        self.confidence_threshold = value
+        self.confidence_threshold_draw = value
+        self.confidence_threshold_record = value
+        self.camera["confidence_threshold"] = value
+        self.camera["confidence_threshold_draw"] = value
+        self.camera["confidence_threshold_record"] = value
 
     def set_fps(self, fps: int) -> None:
         self.fps = int(max(1, fps))
@@ -299,6 +283,158 @@ class CameraWorker(QThread):
         except Exception:
             return True
 
+    def _draw_detection_box(
+        self,
+        frame: np.ndarray,
+        bbox: tuple[int, int, int, int] | None,
+        label: str,
+        score: float,
+    ) -> np.ndarray:
+        canvas = frame.copy()
+        if bbox:
+            x1, y1, x2, y2 = bbox
+            color = _label_color(label)
+            cv2.rectangle(canvas, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(
+                canvas,
+                f"{label}: {score * 100:.1f}%",
+                (x1, max(20, y1 - 10)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                color,
+                2,
+            )
+        return canvas
+
+    def _save_thumbnail(
+        self,
+        frame: np.ndarray,
+        bbox: tuple[int, int, int, int] | None,
+        label: str,
+        score: float,
+    ) -> str:
+        if not self.output_file:
+            return ""
+        thumb_path = self.output_file + ".jpg"
+        thumb_frame = self._draw_detection_box(frame, bbox, label, score)
+        try:
+            cv2.imwrite(thumb_path, thumb_frame)
+            return thumb_path
+        except Exception as exc:
+            print("Nie zapisano miniatury:", exc)
+            return ""
+
+    def _finalize_metadata(self) -> None:
+        if not self.output_file:
+            return
+        frames_written = self.record_thread.frames_written if self.record_thread else 0
+        dropped = self.record_thread.dropped_frames if self.record_thread else 0
+        event_time = datetime.datetime.fromtimestamp(self.current_event_start_ts).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        meta = build_recording_sidecar_metadata(
+            camera=self.camera.get("name", ""),
+            label=self.current_label,
+            confidence=self.current_confidence,
+            event_time=event_time,
+            filepath=self.output_file,
+            thumb=self.current_thumb_path,
+            source_fps=self.source_fps,
+            writer_fps=self.writer_fps,
+            detect_fps=float(self.fps),
+            event_start_ts=self.current_event_start_ts,
+            thumbnail_ts=self.current_thumbnail_ts,
+            frames_written=frames_written,
+            dropped_frames=dropped,
+            thumbnail_mode=self.thumbnail_mode,
+            inference_count=self.inference_count,
+            positive_detection_count=self.positive_detection_count,
+        )
+        try:
+            with open(self.output_file + ".json", "w", encoding="utf-8") as handle:
+                json.dump(meta, handle, indent=2)
+        except Exception as exc:
+            print("Nie zapisano metadanych:", exc)
+        update_recordings_catalog(dict(meta))
+
+    def _start_recording(
+        self,
+        raw_frame: np.ndarray,
+        bbox: tuple[int, int, int, int] | None,
+        label: str,
+        score: float,
+        now_mono: float,
+    ) -> bool:
+        if not self.enable_recording:
+            return False
+        if not self.record_lock.acquire(blocking=False):
+            return False
+
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.output_file = os.path.join(
+            self.output_dir,
+            f"nagranie_{self.camera['name']}_{timestamp}.mp4",
+        )
+        h, w = raw_frame.shape[:2]
+        self.writer_fps = compute_effective_writer_fps(self.rtsp_fps, self.loop_fps, self.stream_fps)
+        self.record_thread = RecordingThread(self.output_file, w, h, self.writer_fps)
+        self.record_thread.start()
+
+        if self.record_start_mode == "include_prerecord_first":
+            for buffer_frame in list(self.prerecord_buffer):
+                self.record_thread.write(buffer_frame)
+        self.record_thread.write(raw_frame)
+
+        self.recording = True
+        self.current_event_start_ts = time.time()
+        self.current_thumbnail_ts = self.current_event_start_ts
+        self.current_label = label or "object"
+        self.current_confidence = float(score)
+        self.current_thumb_path = self._save_thumbnail(raw_frame, bbox, self.current_label, score)
+        self.detection_last_seen_ts = now_mono
+        print(
+            f"[record][{self.camera.get('name', self.index)}] start source_fps={self.source_fps:.2f} "
+            f"writer_fps={self.writer_fps:.2f} detect_fps={self.fps:.2f}"
+        )
+        self.record_signal.emit("start", self.output_file)
+        return True
+
+    def _stop_recording(self) -> None:
+        if self.record_thread:
+            self.record_thread.stop()
+            self._finalize_metadata()
+            self.record_thread = None
+        if self.recording:
+            self.record_signal.emit("stop", self.output_file or "")
+            print(
+                f"[record][{self.camera.get('name', self.index)}] stop frames_written="
+                f"{self.inference_count} inferences={self.inference_count} positives={self.positive_detection_count}"
+            )
+        self.recording = False
+        self.output_file = None
+        if self.record_lock.locked():
+            self.record_lock.release()
+        self.detection_active = False
+        self.pending_detection_hits = 0
+
+    def _log_metrics_if_needed(self) -> None:
+        now = time.monotonic()
+        if self.last_metrics_log_ts == 0.0:
+            self.last_metrics_log_ts = now
+            return
+        elapsed = now - self.last_metrics_log_ts
+        if elapsed < 5.0:
+            return
+        queue_size = self.record_thread.queue.qsize() if self.record_thread else 0
+        dropped = self.record_thread.dropped_frames if self.record_thread else 0
+        print(
+            f"[diag][{self.camera.get('name', self.index)}] source_fps={self.source_fps:.2f} "
+            f"writer_fps={self.writer_fps:.2f} effective_detect_fps={self.fps:.2f} "
+            f"inference_count={self.inference_count} positives={self.positive_detection_count} "
+            f"queue={queue_size} dropped={dropped} recording={self.recording}"
+        )
+        self.last_metrics_log_ts = now
+
     def run(self) -> None:
         while not self.stop_signal:
             try:
@@ -315,9 +451,11 @@ class CameraWorker(QThread):
                     if stream_fps <= 1e-2:
                         stream_fps = 30.0
                     self.stream_fps = stream_fps
+                    self.source_fps = float(self.rtsp_fps if self.rtsp_fps > 0 else stream_fps)
                     self.prerecord_buffer = deque(
-                        maxlen=max(1, int(self.pre_seconds * stream_fps))
+                        maxlen=max(1, int(self.pre_seconds * max(1.0, self.source_fps)))
                     )
+
                     last_inference_time = 0.0
                     detection_interval = 1.0 / max(1, self.fps)
 
@@ -325,39 +463,40 @@ class CameraWorker(QThread):
                     for frame in degirum_tools.video_source(stream, fps=source_fps):
                         if self.stop_signal:
                             break
-
                         if frame is None:
                             self.error_signal.emit("Brak sygnału: pusta klatka", self.index)
                             continue
+
+                        now = time.monotonic()
+                        if self.last_frame_ts > 0:
+                            delta = now - self.last_frame_ts
+                            if delta > 0:
+                                self.loop_fps = 1.0 / delta
+                        self.last_frame_ts = now
 
                         if not connected:
                             self.status_signal.emit("Połączono", self.index)
                             connected = True
 
-                        frame_start = time.perf_counter()
                         raw_frame = frame
                         preview_frame = frame.copy()
-                        should_buffer = self.enable_recording or self.detection_active
-                        if should_buffer:
-                            self.prerecord_buffer.append(raw_frame)
+                        self.prerecord_buffer.append(raw_frame)
 
                         run_inference = self.enable_detection or self.draw_overlays
-                        now = time.monotonic()
                         inference_result = None
                         if run_inference and (
-                            last_inference_time == 0.0
-                            or now - last_inference_time >= detection_interval
+                            last_inference_time == 0.0 or now - last_inference_time >= detection_interval
                         ):
                             last_inference_time = now
-                            infer_start = time.perf_counter()
                             inference_result = self.model.predict(raw_frame)
-                            self.metrics["inference"] += time.perf_counter() - infer_start
+                            self.inference_count += 1
+
+                        detected = False
+                        best_label = ""
+                        best_score = 0.0
+                        best_bbox = None
 
                         if inference_result is not None:
-                            detected = False
-                            best_label = ""
-                            best_score = 0.0
-                            best_bbox = None
                             source_size = _extract_image_size(inference_result)
                             overlays: list[
                                 tuple[int, int, int, int, str, float, tuple[int, int, int]]
@@ -370,177 +509,84 @@ class CameraWorker(QThread):
                                 if not label or bbox is None:
                                     continue
 
+                                scaled = _scale_bbox(bbox, raw_frame.shape, source_size)
                                 if (
                                     self.draw_overlays
-                                    and confidence >= self.confidence_threshold
+                                    and confidence >= self.confidence_threshold_draw
                                     and label in self.visible_classes_lower
                                 ):
-                                    x1, y1, x2, y2 = _scale_bbox(bbox, raw_frame.shape, source_size)
-                                    color = _label_color(label)
-                                    overlays.append((x1, y1, x2, y2, label, confidence, color))
+                                    overlays.append((*scaled, label, confidence, _label_color(label)))
 
                                 if (
                                     self.enable_detection
                                     and self._is_within_schedule()
                                     and label in self.record_classes_lower
-                                    and confidence >= self.confidence_threshold
+                                    and confidence >= self.confidence_threshold_record
                                 ):
                                     detected = True
                                     if confidence > best_score:
-                                        best_score = confidence
+                                        best_score = float(confidence)
                                         best_label = label
-                                        best_bbox = _scale_bbox(bbox, raw_frame.shape, source_size)
+                                        best_bbox = scaled
 
                             if self.draw_overlays and overlays:
-                                overlay_start = time.perf_counter()
                                 for x1, y1, x2, y2, label, confidence, color in overlays:
-                                    cv2.rectangle(
-                                        preview_frame, (x1, y1), (x2, y2), color, 2
-                                    )
-                                    text = f"{label}: {confidence * 100:.1f}%"
+                                    cv2.rectangle(preview_frame, (x1, y1), (x2, y2), color, 2)
                                     cv2.putText(
                                         preview_frame,
-                                        text,
+                                        f"{label}: {confidence * 100:.1f}%",
                                         (x1, y1 - 10),
                                         cv2.FONT_HERSHEY_SIMPLEX,
                                         0.7,
                                         color,
                                         2,
                                     )
-                                self.metrics["overlay"] += time.perf_counter() - overlay_start
 
-                            if detected:
-                                if not self.detection_active:
-                                    self.no_detection_frames = 0
-                                    self.post_countdown_frames = 0
-                                    alert_frame = preview_frame.copy()
-                                    if best_bbox:
-                                        x1, y1, x2, y2 = best_bbox
-                                        color = _label_color(best_label or "")
-                                        cv2.rectangle(
-                                            alert_frame, (x1, y1), (x2, y2), color, 2
-                                        )
-                                        cv2.putText(
-                                            alert_frame,
-                                            f"{(best_label or 'object')}: {best_score * 100:.1f}%",
-                                            (x1, max(20, y1 - 10)),
-                                            cv2.FONT_HERSHEY_SIMPLEX,
-                                            0.7,
-                                            color,
-                                            2,
-                                        )
+                        if detected:
+                            self.positive_detection_count += 1
+                            self.detection_last_seen_ts = now
+                            self.pending_detection_hits += 1
+                            self.detection_active = True
 
+                            if (
+                                not self.recording
+                                and self.pending_detection_hits >= max(1, self.required_hits_to_start_recording)
+                            ):
+                                started = self._start_recording(
+                                    raw_frame,
+                                    best_bbox,
+                                    best_label or "object",
+                                    best_score,
+                                    now,
+                                )
+                                if started:
                                     alert = {
                                         "camera": self.camera["name"],
                                         "label": best_label or "object",
                                         "confidence": float(best_score),
                                         "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                        "frame": alert_frame,
-                                        "filepath": "",
-                                        "thumb": "",
+                                        "frame": self._draw_detection_box(
+                                            preview_frame, best_bbox, best_label or "object", best_score
+                                        ),
+                                        "filepath": self.output_file or "",
+                                        "thumb": self.current_thumb_path,
                                     }
-                                    emit_alert = True
-                                    if self.enable_recording:
-                                        if self.record_lock.acquire(blocking=False):
-                                            timestamp = datetime.datetime.now().strftime(
-                                                "%Y%m%d_%H%M%S"
-                                            )
-                                            self.output_file = os.path.join(
-                                                self.output_dir,
-                                                f"nagranie_{self.camera['name']}_{timestamp}.mp4",
-                                            )
-                                            h, w = raw_frame.shape[:2]
-                                            record_fps = int(max(1, round(stream_fps)))
-                                            self.record_thread = RecordingThread(
-                                                self.output_file, w, h, record_fps
-                                            )
-                                            self.record_thread.start()
-                                            for buffer_frame in list(self.prerecord_buffer):
-                                                self.record_thread.write(buffer_frame)
-                                            self.recording = True
-                                            self.no_detection_frames = 0
-                                            self.post_countdown_frames = 0
-                                            thumb_path = self.output_file + ".jpg"
-                                            try:
-                                                cv2.imwrite(thumb_path, preview_frame)
-                                            except Exception as exc:
-                                                print("Nie zapisano miniatury:", exc)
-                                            alert["filepath"] = self.output_file
-                                            alert["thumb"] = thumb_path
-                                            meta = {
-                                                "camera": alert["camera"],
-                                                "label": alert["label"],
-                                                "confidence": alert["confidence"],
-                                                "time": alert["time"],
-                                                "file": self.output_file,
-                                                "thumb": thumb_path,
-                                            }
-                                            try:
-                                                with open(
-                                                    self.output_file + ".json",
-                                                    "w",
-                                                    encoding="utf-8",
-                                                ) as handle:
-                                                    json.dump(meta, handle, indent=2)
-                                            except Exception as exc:
-                                                print("Nie zapisano metadanych:", exc)
-                                            catalog_entry = dict(meta)
-                                            catalog_entry.setdefault(
-                                                "filepath", self.output_file
-                                            )
-                                            update_recordings_catalog(catalog_entry)
-                                            self.record_signal.emit("start", self.output_file)
-                                        else:
-                                            emit_alert = False
-                                    if emit_alert:
-                                        self.alert_signal.emit(alert)
-                                    self.detection_active = True
-                                else:
-                                    self.no_detection_frames = 0
-                                    self.post_countdown_frames = 0
-                            else:
-                                if self.detection_active:
-                                    if self.recording:
-                                        if self.no_detection_frames < int(
-                                            self.lost_seconds * self.fps
-                                        ):
-                                            self.no_detection_frames += 1
-                                        else:
-                                            self.post_countdown_frames += 1
-                                            if self.post_countdown_frames >= int(
-                                                self.post_seconds * self.fps
-                                            ):
-                                                self._stop_recording()
-                                    else:
-                                        if self.no_detection_frames < int(
-                                            self.lost_seconds * self.fps
-                                        ):
-                                            self.no_detection_frames += 1
-                                        else:
-                                            self.post_countdown_frames += 1
-                                            if self.post_countdown_frames >= int(
-                                                self.post_seconds * self.fps
-                                            ):
-                                                self.detection_active = False
-                                                self.no_detection_frames = 0
-                                                self.post_countdown_frames = 0
-                                else:
-                                    self.no_detection_frames = 0
-                                    self.post_countdown_frames = 0
-                        self.frame = preview_frame
+                                    self.alert_signal.emit(alert)
+                        else:
+                            self.pending_detection_hits = 0
 
-                        enqueue_start = time.perf_counter()
                         if self.recording and self.record_thread:
                             self.record_thread.write(raw_frame)
-                            self.metrics["recorder_drops"] += self.record_thread.dropped_frames
-                            self.record_thread.dropped_frames = 0
-                        self.metrics["record_enqueue"] += time.perf_counter() - enqueue_start
+                            end_after = self.detection_last_seen_ts + self.lost_seconds + self.post_seconds
+                            if self.detection_last_seen_ts > 0 and now > end_after:
+                                self._stop_recording()
+                        elif self.detection_active:
+                            if self.detection_last_seen_ts > 0 and now > (
+                                self.detection_last_seen_ts + self.lost_seconds + self.post_seconds
+                            ):
+                                self.detection_active = False
 
-                        emit_start = time.perf_counter()
                         self.frame_signal.emit(preview_frame, self.index)
-                        self.metrics["emit"] += time.perf_counter() - emit_start
-                        self.metrics["capture"] += time.perf_counter() - frame_start
-                        self.metrics["frames"] += 1
                         self._log_metrics_if_needed()
 
             except Exception as exc:  # pragma: no cover - interacts with hardware

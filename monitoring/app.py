@@ -73,6 +73,8 @@ from .config import (
     ALERTS_HISTORY_PATH,
     CONFIG_PATH,
     DEFAULT_CONFIDENCE_THRESHOLD,
+    DEFAULT_CONFIDENCE_THRESHOLD_DRAW,
+    DEFAULT_CONFIDENCE_THRESHOLD_RECORD,
     DEFAULT_DETECTION_HOURS,
     DEFAULT_DRAW_OVERLAYS,
     DEFAULT_ENABLE_DETECTION,
@@ -83,7 +85,10 @@ from .config import (
     DEFAULT_POST_SECONDS,
     DEFAULT_PRE_SECONDS,
     DEFAULT_RECORD_PATH,
+    DEFAULT_RECORD_START_MODE,
+    DEFAULT_REQUIRED_HITS_TO_START_RECORDING,
     DEFAULT_RTSP_FPS,
+    DEFAULT_THUMBNAIL_MODE,
     ICON_DIR,
     LOG_HISTORY_PATH,
     LOG_RETENTION_HOURS,
@@ -635,6 +640,12 @@ class SingleCameraDialog(QDialog):
         self.conf_spin = QDoubleSpinBox()
         self.conf_spin.setRange(0.0, 1.0)
         self.conf_spin.setSingleStep(0.05)
+        self.conf_draw_spin = QDoubleSpinBox()
+        self.conf_draw_spin.setRange(0.0, 1.0)
+        self.conf_draw_spin.setSingleStep(0.05)
+        self.conf_record_spin = QDoubleSpinBox()
+        self.conf_record_spin.setRange(0.0, 1.0)
+        self.conf_record_spin.setSingleStep(0.05)
         self.draw_chk = QCheckBox()
         self.detect_chk = QCheckBox()
         self.record_chk = QCheckBox()
@@ -649,6 +660,12 @@ class SingleCameraDialog(QDialog):
         self.lost_spin.setRange(0, 60)
         self.post_spin = QSpinBox()
         self.post_spin.setRange(0, 60)
+        self.thumbnail_mode_combo = QComboBox()
+        self.thumbnail_mode_combo.addItems(["first_detection", "best_detection", "first_frame"])
+        self.record_start_mode_combo = QComboBox()
+        self.record_start_mode_combo.addItems(["detection_first", "include_prerecord_first"])
+        self.required_hits_spin = QSpinBox()
+        self.required_hits_spin.setRange(1, 5)
 
         path_layout = QHBoxLayout()
         path_layout.addWidget(self.path_edit)
@@ -660,7 +677,9 @@ class SingleCameraDialog(QDialog):
         form.addRow("Model detekcji", self.model_combo)
         form.addRow("FPS/S DETECT", self.fps_spin)
         form.addRow("FPS/S RTSP", self.rtsp_fps_spin)
-        form.addRow("Próg pewności", self.conf_spin)
+        form.addRow("Próg pewności (legacy)", self.conf_spin)
+        form.addRow("Próg podglądu", self.conf_draw_spin)
+        form.addRow("Próg nagrywania", self.conf_record_spin)
         form.addRow("Rysuj nakładki", self.draw_chk)
         form.addRow("Wykrywaj obiekty", self.detect_chk)
         form.addRow("Nagrywaj detekcje", self.record_chk)
@@ -671,6 +690,9 @@ class SingleCameraDialog(QDialog):
         form.addRow("Pre seconds", self.pre_spin)
         form.addRow("Lost seconds", self.lost_spin)
         form.addRow("Post seconds", self.post_spin)
+        form.addRow("Thumbnail mode", self.thumbnail_mode_combo)
+        form.addRow("Record start mode", self.record_start_mode_combo)
+        form.addRow("Hits to start", self.required_hits_spin)
 
         # test rtsp
         self.test_btn = QPushButton("Test połączenia")
@@ -744,7 +766,10 @@ class SingleCameraDialog(QDialog):
         self.model_combo.setCurrentText(cam.get("model", DEFAULT_MODEL))
         self.fps_spin.setValue(int(cam.get("fps", DEFAULT_FPS)))
         self.rtsp_fps_spin.setValue(int(cam.get("rtsp_fps", DEFAULT_RTSP_FPS)))
-        self.conf_spin.setValue(float(cam.get("confidence_threshold", DEFAULT_CONFIDENCE_THRESHOLD)))
+        legacy_conf = float(cam.get("confidence_threshold", DEFAULT_CONFIDENCE_THRESHOLD))
+        self.conf_spin.setValue(legacy_conf)
+        self.conf_draw_spin.setValue(float(cam.get("confidence_threshold_draw", legacy_conf)))
+        self.conf_record_spin.setValue(float(cam.get("confidence_threshold_record", legacy_conf)))
         self.draw_chk.setChecked(bool(cam.get("draw_overlays", DEFAULT_DRAW_OVERLAYS)))
         self.detect_chk.setChecked(bool(cam.get("enable_detection", DEFAULT_ENABLE_DETECTION)))
         self.record_chk.setChecked(bool(cam.get("enable_recording", DEFAULT_ENABLE_RECORDING)))
@@ -755,6 +780,9 @@ class SingleCameraDialog(QDialog):
         self.pre_spin.setValue(int(cam.get("pre_seconds", DEFAULT_PRE_SECONDS)))
         self.lost_spin.setValue(int(cam.get("lost_seconds", DEFAULT_LOST_SECONDS)))
         self.post_spin.setValue(int(cam.get("post_seconds", DEFAULT_POST_SECONDS)))
+        self.thumbnail_mode_combo.setCurrentText(str(cam.get("thumbnail_mode", DEFAULT_THUMBNAIL_MODE)))
+        self.record_start_mode_combo.setCurrentText(str(cam.get("record_start_mode", DEFAULT_RECORD_START_MODE)))
+        self.required_hits_spin.setValue(int(cam.get("required_hits_to_start_recording", DEFAULT_REQUIRED_HITS_TO_START_RECORDING)))
 
     def accept(self):
         name = self.name_edit.text().strip()
@@ -775,6 +803,8 @@ class SingleCameraDialog(QDialog):
             "model": self.model_combo.currentText(),
             "fps": int(self.fps_spin.value()),
             "confidence_threshold": float(self.conf_spin.value()),
+            "confidence_threshold_draw": float(self.conf_draw_spin.value()),
+            "confidence_threshold_record": float(self.conf_record_spin.value()),
             "draw_overlays": self.draw_chk.isChecked(),
             "enable_detection": self.detect_chk.isChecked(),
             "enable_recording": self.record_chk.isChecked(),
@@ -786,6 +816,9 @@ class SingleCameraDialog(QDialog):
             "pre_seconds": int(self.pre_spin.value()),
             "lost_seconds": int(self.lost_spin.value()),
             "post_seconds": int(self.post_spin.value()),
+            "thumbnail_mode": self.thumbnail_mode_combo.currentText(),
+            "record_start_mode": self.record_start_mode_combo.currentText(),
+            "required_hits_to_start_recording": int(self.required_hits_spin.value()),
         }
         self.result_camera = cam
         super().accept()
@@ -1440,6 +1473,8 @@ QToolButton:focus { outline: none; }
                     self.start_camera(idx)
                 else:
                     w.set_confidence(new_data.get("confidence_threshold", DEFAULT_CONFIDENCE_THRESHOLD))
+                    w.confidence_threshold_draw = float(new_data.get("confidence_threshold_draw", w.confidence_threshold))
+                    w.confidence_threshold_record = float(new_data.get("confidence_threshold_record", w.confidence_threshold))
                     w.set_draw_overlays(new_data.get("draw_overlays", DEFAULT_DRAW_OVERLAYS))
                     w.set_enable_detection(new_data.get("enable_detection", DEFAULT_ENABLE_DETECTION))
                     w.set_enable_recording(new_data.get("enable_recording", DEFAULT_ENABLE_RECORDING))
@@ -1450,6 +1485,9 @@ QToolButton:focus { outline: none; }
                     w.pre_seconds = int(new_data.get("pre_seconds", DEFAULT_PRE_SECONDS))
                     w.lost_seconds = int(new_data.get("lost_seconds", DEFAULT_LOST_SECONDS))
                     w.post_seconds = int(new_data.get("post_seconds", DEFAULT_POST_SECONDS))
+                    w.thumbnail_mode = str(new_data.get("thumbnail_mode", DEFAULT_THUMBNAIL_MODE))
+                    w.record_start_mode = str(new_data.get("record_start_mode", DEFAULT_RECORD_START_MODE))
+                    w.required_hits_to_start_recording = int(new_data.get("required_hits_to_start_recording", DEFAULT_REQUIRED_HITS_TO_START_RECORDING))
                     w.prerecord_buffer = deque(maxlen=int(w.pre_seconds * w.fps))
                     record_base = Path(new_data.get("record_path", DEFAULT_RECORD_PATH))
                     w.output_dir = str(record_base / new_data.get("name"))

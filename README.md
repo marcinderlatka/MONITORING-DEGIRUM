@@ -226,3 +226,35 @@ Performance metrics are aggregated and logged roughly every 5 seconds for captur
 
 Impact:
 Provides low-overhead visibility for profiling and diagnosing bottlenecks in production-like runs.
+
+## Recording and Detection Reliability Fixes
+
+### Natural playback FPS
+- **What changed:** Recording writer FPS is now computed with an explicit helper that prefers configured RTSP throttle (`rtsp_fps`), then measured loop cadence, then stream FPS fallback. The computed value is used when creating `RecordingThread`, logged, and persisted as `writer_fps` together with `source_fps` and `detect_fps`.
+- **Why:** Previously files were often encoded at stream FPS even when processing was throttled, causing time-compressed playback.
+- **Modified file(s):** `monitoring/workers.py`, `monitoring/recordings.py`.
+- **Before / After:** Before a 5 FPS processed stream encoded at 25 FPS played too fast; after, encoded FPS matches effective capture cadence and playback is natural.
+
+### Detection-first thumbnails
+- **What changed:** A thumbnail JPG is explicitly generated from the first confirmed detection frame (with a visible box), saved near the MP4, and stored in metadata (`thumb`, `thumbnail_ts`, `event_start_ts`, `thumbnail_mode=first_detection`). Browser loading now prioritizes explicit thumbnail metadata.
+- **Why:** The old approach could show prerecord / non-event frames as preview.
+- **Modified file(s):** `monitoring/workers.py`, `monitoring/recordings.py`, `monitoring/widgets/recordings_browser.py`.
+- **Before / After:** Before preview often missed the detected object; after preview is detection-centric and does not depend on extracting frame 0 from MP4.
+
+### Real-time recording timers
+- **What changed:** End-of-event timing now uses monotonic timestamps (`detection_last_seen_ts`) instead of frame counters tied to loop FPS.
+- **Why:** Frame-count timing stretched/shrank durations whenever actual processing FPS differed from configured FPS.
+- **Modified file(s):** `monitoring/workers.py`.
+- **Before / After:** Before `lost_seconds` / `post_seconds` were frame-rate dependent; after they represent wall-clock seconds consistently.
+
+### Detection reliability tuning
+- **What changed:** Detection and drawing thresholds were split (`confidence_threshold_draw`, `confidence_threshold_record`), inference cadence remains monotonic-time based, and optional trigger stabilization (`required_hits_to_start_recording`) was added with backward-compatible defaults.
+- **Why:** Single-threshold, sparse sampling behavior made tuning difficult and could miss events.
+- **Modified file(s):** `monitoring/config.py`, `monitoring/app.py`, `monitoring/workers.py`.
+- **Before / After:** Before draw/record confidence was coupled and trigger behavior less tunable; after operators can tune visibility and recording trigger sensitivity separately.
+
+### New metadata fields
+- **What changed:** Recording sidecar/catalog payloads now include reliability diagnostics: `filepath`, `file`, `time`, `timestamp`, `source_fps`, `writer_fps`, `detect_fps`, `event_start_ts`, `thumbnail_ts`, `frames_written`, `dropped_frames`, `thumbnail_mode`, `inference_count`, `positive_detection_count`.
+- **Why:** Rich metadata is required for reliable browsing, diagnostics, and backward-compatible catalog parsing.
+- **Modified file(s):** `monitoring/recordings.py`, `monitoring/storage.py`, `monitoring/workers.py`.
+- **Before / After:** Before metadata was minimal; after each event has enough context to debug recording cadence and detection behavior while old entries still load.

@@ -61,8 +61,9 @@ def _thumbnail_candidates_for_entry(entry: RecordingMetadata) -> List[str]:
         return [os.path.abspath(p) for p in resolved]
 
     candidates: List[str] = []
-    if entry.thumb_path:
-        candidates.extend(_resolve(entry.thumb_path))
+    explicit_thumb = entry.thumb_path or str(entry.extra.get("thumb", ""))
+    if explicit_thumb:
+        candidates.extend(_resolve(explicit_thumb))
 
     base, _ext = os.path.splitext(entry.filepath)
     for suffix in (".jpg", ".jpeg", ".JPG", ".JPEG"):
