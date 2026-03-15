@@ -91,6 +91,7 @@ class AlertMemory:
             "filepath": alert_meta.get("filepath", ""),
             "file": alert_meta.get("file", alert_meta.get("filepath", "")),
             "thumb": alert_meta.get("thumb", ""),
+            "alert_thumb": alert_meta.get("alert_thumb", alert_meta.get("scene_thumb", "")),
         }
         self.items.append(slim)
         if len(self.items) > self.max_items:

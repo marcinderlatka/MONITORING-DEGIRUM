@@ -27,7 +27,30 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from ..recordings import alert_thumbnail_candidates_for_event
 from ..storage import AlertMemory
+
+
+def pick_alert_thumbnail_path(alert: dict) -> str:
+    """Pick a valid alert thumbnail path preferring non-square scene images."""
+
+    first_existing = ""
+    for candidate in alert_thumbnail_candidates_for_event(alert):
+        if not os.path.exists(candidate):
+            continue
+        if not first_existing:
+            first_existing = candidate
+        pixmap = QPixmap(candidate)
+        if pixmap.isNull():
+            continue
+        w = pixmap.width()
+        h = pixmap.height()
+        if w <= 0 or h <= 0:
+            continue
+        ratio = w / max(1, h)
+        if ratio >= 1.2:
+            return candidate
+    return first_existing
 
 
 class AlertItemWidget(QWidget):
@@ -132,10 +155,7 @@ class AlertItemWidget(QWidget):
         self.thumb.setPixmap(pixmap)
 
     def set_thumbnail(self) -> None:
-        thumb = self.alert.get("thumb")
-        if not thumb:
-            filepath = self.alert.get("filepath") or self.alert.get("file") or ""
-            thumb = filepath + ".jpg" if filepath else ""
+        thumb = pick_alert_thumbnail_path(self.alert)
         if not thumb or not os.path.exists(thumb):
             return
         pixmap = QPixmap(thumb)

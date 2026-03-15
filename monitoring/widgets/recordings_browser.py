@@ -6,7 +6,7 @@ from typing import Dict, List, Mapping, Sequence
 
 import cv2
 import numpy as np
-from PyQt5.QtCore import QDate, QObject, QPoint, QRunnable, QSize, Qt, QThreadPool, pyqtSignal
+from PyQt5.QtCore import QDate, QObject, QPoint, QRunnable, QSize, Qt, QThreadPool, pyqtSignal, pyqtSlot
 from PyQt5.QtGui import QImage, QPalette, QPixmap, QColor, QPainter
 from PyQt5.QtWidgets import (
     QAbstractItemView,
@@ -38,6 +38,7 @@ from ..recordings import (
     thumbnail_candidates_for_entry,
 )
 from ..storage import remove_from_recordings_catalog
+from ..runtime_helpers import thumbnail_load_outcome
 
 
 class ThumbnailWorker(QObject, QRunnable):
@@ -91,6 +92,10 @@ class RecordingCardWidget(QWidget):
         self.thumb.setAlignment(Qt.AlignCenter)
         self.thumb.setFixedSize(self._thumb_size)
 
+        self.thumb_status = QLabel("trwa wczytywanie")
+        self.thumb_status.setAlignment(Qt.AlignCenter)
+        self.thumb_status.setStyleSheet("font-size:12px; color:#6b7280;")
+
         self.title = QLabel(f"{entry.display_time}")
         self.title.setWordWrap(True)
         self.meta = QLabel(f"{entry.camera} • {entry.label}")
@@ -104,6 +109,7 @@ class RecordingCardWidget(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.addWidget(self.thumb)
+        layout.addWidget(self.thumb_status)
         layout.addWidget(self.title)
         layout.addWidget(self.meta)
         layout.addWidget(self.extra)
@@ -111,8 +117,17 @@ class RecordingCardWidget(QWidget):
 
         self._set_selected(False)
 
+    def set_loading_placeholder(self, pixmap: QPixmap) -> None:
+        self.thumb.setPixmap(pixmap)
+        self.thumb_status.setText("trwa wczytywanie")
+
     def set_thumbnail(self, pixmap: QPixmap) -> None:
         self.thumb.setPixmap(pixmap)
+        self.thumb_status.setText("")
+
+    def set_thumbnail_failed(self, pixmap: QPixmap) -> None:
+        self.thumb.setPixmap(pixmap)
+        self.thumb_status.setText("brak miniatury")
 
     def _set_selected(self, selected: bool) -> None:
         border = "#1d5fd1" if selected else "#d0d0d0"
@@ -144,6 +159,7 @@ class RecordingsBrowserDialog(QDialog):
         self._filtered_entries: List[RecordingMetadata] = []
         self.thumbnail_cache: Dict[str, QPixmap] = {}
         self._pending_thumbnails: set[str] = set()
+        self._failed_thumbnails: set[str] = set()
         self._thumbnail_workers: Dict[str, ThumbnailWorker] = {}
         self._tile_items: Dict[str, QListWidgetItem] = {}
         self._tile_cards: Dict[str, RecordingCardWidget] = {}
@@ -339,6 +355,11 @@ class RecordingsBrowserDialog(QDialog):
         self._update_empty_state()
         self.status_label.setText(f"Wczytano {len(self._entries)} nagrań, widoczne {len(self._filtered_entries)}")
 
+
+    @staticmethod
+    def _thumb_cache_key(filepath: str) -> str:
+        return os.path.abspath(str(filepath))
+
     def _rebuild_tile_view(self, entries: Sequence[RecordingMetadata]) -> None:
         self.tile_list.clear()
         self._tile_items.clear()
@@ -351,11 +372,19 @@ class RecordingsBrowserDialog(QDialog):
             item.setSizeHint(QSize(350, 320))
             self.tile_list.addItem(item)
             card = RecordingCardWidget(entry, self._thumb_size)
-            card.set_thumbnail(self._placeholder_pixmap())
+            card.set_loading_placeholder(self._placeholder_pixmap())
             self.tile_list.setItemWidget(item, card)
-            self._tile_items[entry.filepath] = item
-            self._tile_cards[entry.filepath] = card
-            self._request_thumbnail(entry)
+            key = self._thumb_cache_key(entry.filepath)
+            self._tile_items[key] = item
+            self._tile_cards[key] = card
+            cached = self.thumbnail_cache.get(key)
+            if cached is not None:
+                if key in self._failed_thumbnails:
+                    card.set_thumbnail_failed(cached)
+                else:
+                    card.set_thumbnail(cached)
+            else:
+                self._request_thumbnail(entry)
 
     def _rebuild_table_view(self, entries: Sequence[RecordingMetadata]) -> None:
         self.table.setSortingEnabled(False)
@@ -363,6 +392,7 @@ class RecordingsBrowserDialog(QDialog):
         self._table_rows.clear()
         for row, entry in enumerate(entries):
             self.table.insertRow(row)
+            key = self._thumb_cache_key(entry.filepath)
             chk = QTableWidgetItem()
             chk.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
             chk.setCheckState(Qt.Unchecked)
@@ -371,7 +401,7 @@ class RecordingsBrowserDialog(QDialog):
 
             thumb_lbl = QLabel()
             thumb_lbl.setAlignment(Qt.AlignCenter)
-            thumb_lbl.setPixmap(self.thumbnail_cache.get(entry.filepath, self._placeholder_pixmap()))
+            thumb_lbl.setPixmap(self.thumbnail_cache.get(key, self._placeholder_pixmap()))
             self.table.setCellWidget(row, 1, thumb_lbl)
 
             self.table.setItem(row, 2, QTableWidgetItem(entry.display_time))
@@ -383,8 +413,8 @@ class RecordingsBrowserDialog(QDialog):
             file_item = QTableWidgetItem(entry.filepath)
             file_item.setData(Qt.UserRole, entry.filepath)
             self.table.setItem(row, 7, file_item)
-            self._table_rows[entry.filepath] = row
-            if entry.filepath not in self.thumbnail_cache:
+            self._table_rows[key] = row
+            if key not in self.thumbnail_cache:
                 self._request_thumbnail(entry)
         self.table.setSortingEnabled(True)
 
@@ -405,27 +435,38 @@ class RecordingsBrowserDialog(QDialog):
             self.empty_label.hide()
 
     def _request_thumbnail(self, entry: RecordingMetadata) -> None:
-        if entry.filepath in self.thumbnail_cache or entry.filepath in self._pending_thumbnails:
+        key = self._thumb_cache_key(entry.filepath)
+        if key in self.thumbnail_cache or key in self._pending_thumbnails:
             return
         worker = ThumbnailWorker(entry)
-        worker.thumbnail_ready.connect(self._apply_thumbnail)
-        self._thumbnail_workers[entry.filepath] = worker
-        self._pending_thumbnails.add(entry.filepath)
+        worker.thumbnail_ready.connect(self._apply_thumbnail, Qt.QueuedConnection)
+        self._thumbnail_workers[key] = worker
+        self._pending_thumbnails.add(key)
         self.thumbnail_pool.start(worker)
 
+    @pyqtSlot(str, object)
     def _apply_thumbnail(self, filepath: str, image: object) -> None:
-        self._pending_thumbnails.discard(filepath)
-        self._thumbnail_workers.pop(filepath, None)
+        key = self._thumb_cache_key(filepath)
+        self._pending_thumbnails.discard(key)
+        self._thumbnail_workers.pop(key, None)
+        outcome = thumbnail_load_outcome(image)
+        success = outcome == "success"
         pixmap = self._placeholder_pixmap()
-        if isinstance(image, QImage) and not image.isNull():
+        if success:
             pixmap = QPixmap.fromImage(image).scaled(self._thumb_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        self.thumbnail_cache[filepath] = pixmap
+            self._failed_thumbnails.discard(key)
+        else:
+            self._failed_thumbnails.add(key)
+        self.thumbnail_cache[key] = pixmap
 
-        card = self._tile_cards.get(filepath)
+        card = self._tile_cards.get(key)
         if card is not None:
-            card.set_thumbnail(pixmap)
+            if success:
+                card.set_thumbnail(pixmap)
+            else:
+                card.set_thumbnail_failed(pixmap)
 
-        row = self._table_rows.get(filepath)
+        row = self._table_rows.get(key)
         if row is not None:
             widget = self.table.cellWidget(row, 1)
             if isinstance(widget, QLabel):
@@ -459,10 +500,10 @@ class RecordingsBrowserDialog(QDialog):
         return str(item.data(Qt.UserRole)) if item else ""
 
     def _restore_selection(self, filepath: str) -> None:
-        item = self._tile_items.get(filepath)
+        item = self._tile_items.get(self._thumb_cache_key(filepath))
         if item is not None:
             self.tile_list.setCurrentItem(item)
-        row = self._table_rows.get(filepath)
+        row = self._table_rows.get(self._thumb_cache_key(filepath))
         if row is not None:
             self.table.selectRow(row)
 
@@ -513,7 +554,9 @@ class RecordingsBrowserDialog(QDialog):
         removed = set(paths)
         self._entries = [entry for entry in self._entries if entry.filepath not in removed]
         for path in removed:
-            self.thumbnail_cache.pop(path, None)
+            key = self._thumb_cache_key(path)
+            self.thumbnail_cache.pop(key, None)
+            self._failed_thumbnails.discard(key)
         self._apply_filters()
         if errors:
             QMessageBox.warning(self, "Usuń nagrania", "Częściowo usunięto pliki:\n" + "\n".join(errors))
@@ -573,7 +616,7 @@ class RecordingsBrowserDialog(QDialog):
         selected = {self.tile_list.row(item) for item in self.tile_list.selectedItems()}
         for idx in range(self.tile_list.count()):
             item = self.tile_list.item(idx)
-            path = str(item.data(Qt.UserRole))
+            path = self._thumb_cache_key(str(item.data(Qt.UserRole)))
             card = self._tile_cards.get(path)
             if card:
                 card._set_selected(idx in selected)

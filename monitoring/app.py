@@ -122,7 +122,7 @@ from .storage import (
     update_recordings_catalog,
 )
 from .workers import CameraWorker
-from .runtime_helpers import classify_camera_setting_changes
+from .runtime_helpers import camera_overlay_anchor, classify_camera_setting_changes, compute_letterboxed_rect
 from .widgets.alerts import AlertDialog, AlertListWidget
 from .widgets.camera_grid import CameraGridWidget
 from .widgets.camera_list import CameraListWidget
@@ -1411,7 +1411,6 @@ QToolButton:focus { outline: none; }
         self.diag_panel.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         self.diag_panel.setMinimumHeight(90)
         self.diag_panel.setVisible(False)
-        center_v.addWidget(self.diag_panel)
         self.diag_timer = QTimer(self)
         self.diag_timer.timeout.connect(self._update_diagnostics_panel)
         self.diag_timer.start(1000)
@@ -2112,7 +2111,16 @@ QToolButton:focus { outline: none; }
         lines.append(" | ".join(metric_parts))
         return lines
 
-    def _draw_camera_info_overlay(self, qimg: QImage, idx: int) -> QImage:
+
+    @staticmethod
+    def _compute_letterboxed_rect(frame_width: int, frame_height: int, canvas_width: int, canvas_height: int) -> tuple[int, int, int, int]:
+        return compute_letterboxed_rect(frame_width, frame_height, canvas_width, canvas_height)
+
+    @staticmethod
+    def _camera_info_overlay_anchor(image_rect: tuple[int, int, int, int], box_size: tuple[int, int], padding: int = 10) -> tuple[int, int]:
+        return camera_overlay_anchor(image_rect, box_size, padding)
+
+    def _draw_camera_info_overlay(self, qimg: QImage, idx: int, image_rect: tuple[int, int, int, int]) -> QImage:
         if qimg.isNull():
             return qimg
 
@@ -2125,19 +2133,18 @@ QToolButton:focus { outline: none; }
             return qimg
 
         w_label = qimg.width()
-        h_label = qimg.height()
+        font_size = 10 if w_label < 900 else 12 if w_label < 1400 else 14
         painter = QPainter(qimg)
         try:
-            font = QFont("DejaVu Sans", 12 if w_label < 1100 else 14)
+            font = QFont("DejaVu Sans", font_size)
             painter.setFont(font)
             fm = painter.fontMetrics()
-            pad = 10
+            pad = 8
             line_h = fm.height() + 2
             text_w = max(fm.horizontalAdvance(line) for line in lines)
             box_w = text_w + 2 * pad
             box_h = line_h * len(lines) + 2 * pad
-            x = max(8, w_label - box_w - 16)
-            y = max(8, h_label - box_h - 16)
+            x, y = self._camera_info_overlay_anchor(image_rect, (box_w, box_h), padding=10)
 
             painter.setPen(Qt.NoPen)
             painter.setBrush(QColor(0, 0, 0, 128))
@@ -2156,21 +2163,19 @@ QToolButton:focus { outline: none; }
         h_label = max(1, self.camera_view.height())
         canvas = np.zeros((h_label, w_label, 3), dtype=np.uint8)
 
+        image_rect = (0, 0, w_label, h_label)
         if frame is not None:
             fh, fw = frame.shape[:2]
             if fh > 0 and fw > 0:
-                scale = min(w_label / fw, h_label / fh)
-                new_w = max(1, int(fw * scale))
-                new_h = max(1, int(fh * scale))
+                x0, y0, new_w, new_h = self._compute_letterboxed_rect(fw, fh, w_label, h_label)
+                image_rect = (x0, y0, new_w, new_h)
                 resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
-                x0 = (w_label - new_w) // 2
-                y0 = (h_label - new_h) // 2
                 canvas[y0:y0+new_h, x0:x0+new_w] = resized
 
         rgb = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
         qimg = QImage(rgb.data, w_label, h_label, rgb.strides[0], QImage.Format_RGB888).copy()
 
-        return self._draw_camera_info_overlay(qimg, idx)
+        return self._draw_camera_info_overlay(qimg, idx, image_rect)
 
     def _render_current(self):
         now = time.time()

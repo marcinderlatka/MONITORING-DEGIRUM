@@ -77,8 +77,55 @@ def load_history_metadata(history_path: HistorySource) -> Dict[str, Dict[str, ob
             "confidence": item.get("confidence", 0.0),
             "time": item.get("time", ""),
             "thumb": item.get("thumb", ""),
+            "alert_thumb": item.get("alert_thumb", item.get("scene_thumb", "")),
         }
     return metadata
+
+
+
+
+def alert_thumbnail_candidates_for_event(alert: Mapping[str, object]) -> List[str]:
+    """Return ordered alert thumbnail candidates preferring scene previews."""
+
+    filepath = str(alert.get("filepath") or alert.get("file") or "")
+    explicit = [
+        alert.get("alert_thumb"),
+        alert.get("scene_thumb"),
+        alert.get("thumb_scene"),
+    ]
+    candidates: List[str] = []
+    for value in explicit:
+        if value:
+            candidates.append(str(value))
+
+    if filepath:
+        base = Path(filepath)
+        candidates.extend(
+            [
+                f"{filepath}.alert.jpg",
+                f"{filepath}.scene.jpg",
+                f"{filepath}.preview.jpg",
+                f"{filepath}.jpg",
+                str(base.with_suffix(".mp4.jpg")),
+                str(base.with_suffix(".jpg")),
+            ]
+        )
+
+    legacy_thumb = alert.get("thumb")
+    if legacy_thumb:
+        candidates.append(str(legacy_thumb))
+
+    seen: set[str] = set()
+    ordered: List[str] = []
+    for candidate in candidates:
+        if not candidate:
+            continue
+        abs_path = os.path.abspath(str(candidate))
+        if abs_path in seen:
+            continue
+        seen.add(abs_path)
+        ordered.append(abs_path)
+    return ordered
 
 
 def _normalise_dirs(camera_dirs: Sequence[CameraDirectory]) -> List[CameraDirectory]:
@@ -172,6 +219,7 @@ def build_recording_sidecar_metadata(
     skipped_inference_cycles: int = 0,
     app_overload_mode: bool | None = None,
     recorder_queue_peak: int = 0,
+    alert_thumb: str = "",
 ) -> Dict[str, object]:
     """Build backward-compatible recording metadata payload."""
     return {
@@ -183,6 +231,7 @@ def build_recording_sidecar_metadata(
         "file": filepath,
         "filepath": filepath,
         "thumb": thumb,
+        "alert_thumb": str(alert_thumb or thumb),
         "source_fps": float(source_fps),
         "writer_fps": float(writer_fps),
         "detect_fps": float(detect_fps),
@@ -236,6 +285,7 @@ def build_recording_metadata(
         "confidence": 0.0,
         "time": "",
         "thumb": "",
+        "alert_thumb": "",
         "timestamp": None,
     }
 
@@ -289,7 +339,7 @@ def build_recording_metadata(
         timestamp=timestamp_float,
         display_time=str(info.get("time", "")),
         thumb_path=str(info.get("thumb", "")),
-        extra={k: v for k, v in info.items() if k not in {"camera", "label", "confidence", "time", "thumb", "timestamp"}},
+        extra={k: v for k, v in info.items() if k not in {"camera", "label", "confidence", "time", "thumb", "alert_thumb", "timestamp"}},
     )
 
 
@@ -305,7 +355,7 @@ def thumbnail_candidates_for_entry(entry: RecordingMetadata) -> List[str]:
         return [os.path.abspath(p) for p in resolved]
 
     candidates: List[str] = []
-    explicit_thumb = entry.thumb_path or str(entry.extra.get("thumb", ""))
+    explicit_thumb = str(entry.extra.get("recording_thumb", "")) or entry.thumb_path or str(entry.extra.get("thumb", ""))
     if explicit_thumb:
         candidates.extend(_resolve(explicit_thumb))
 

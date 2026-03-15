@@ -21,8 +21,9 @@ from monitoring.recordings import (
     load_recording_entries,
     merge_recording_entries,
 )
-from monitoring.runtime_helpers import compute_effective_writer_fps
+from monitoring.runtime_helpers import camera_overlay_anchor, compute_effective_writer_fps, compute_letterboxed_rect, thumbnail_load_outcome
 from monitoring.recordings import thumbnail_candidates_for_entry
+from monitoring.recordings import alert_thumbnail_candidates_for_event
 
 
 def test_build_recording_metadata_merges_sources(tmp_path):
@@ -309,3 +310,52 @@ def test_missing_catalog_entries_can_be_recovered_from_disk(tmp_path, monkeypatc
     assert len(entries) == 1
     assert len(healed) == 1
     assert healed[0]["filepath"] == str(mp4.resolve())
+
+
+def test_alert_thumbnail_prefers_scene_preview_not_object_crop(tmp_path):
+    video = tmp_path / "event.mp4"
+    video.write_bytes(b"")
+    candidates = alert_thumbnail_candidates_for_event(
+        {
+            "filepath": str(video),
+            "alert_thumb": str(video) + ".alert.jpg",
+            "thumb": str(video) + ".jpg",
+        }
+    )
+    assert candidates[0].endswith(".alert.jpg")
+    assert candidates[1].endswith(".scene.jpg") or candidates[1].endswith(".preview.jpg") or candidates[1].endswith(".jpg")
+
+
+def test_recording_thumbnail_candidate_order_prefers_explicit_jpg(tmp_path):
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"")
+    metadata = build_recording_metadata(
+        str(video),
+        [("cam", str(tmp_path))],
+        overrides={"thumb": str(tmp_path / "poster.jpg")},
+    )
+    candidates = thumbnail_candidates_for_entry(metadata)
+    assert candidates[0] == str((tmp_path / "poster.jpg").resolve())
+
+
+def test_tile_thumbnail_loading_resolves_to_success_or_fallback():
+    class _NullImage:
+        def isNull(self):
+            return True
+
+    class _ValidImage:
+        def isNull(self):
+            return False
+
+    assert thumbnail_load_outcome(_NullImage()) == "fallback"
+    assert thumbnail_load_outcome(_ValidImage()) == "success"
+    assert thumbnail_load_outcome(None) == "fallback"
+
+
+def test_camera_overlay_anchor_uses_visible_image_rect_not_whole_widget():
+    image_rect = compute_letterboxed_rect(1920, 1080, 1000, 1000)
+    # visible rect should be centered vertically (letterbox bars on top/bottom)
+    assert image_rect == (0, 219, 1000, 562)
+    anchor = camera_overlay_anchor(image_rect, (260, 120), padding=10)
+    assert anchor[0] == 10
+    assert anchor[1] == 651
