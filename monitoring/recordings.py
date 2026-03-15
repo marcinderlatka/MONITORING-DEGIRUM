@@ -158,6 +158,12 @@ def build_recording_sidecar_metadata(
     min_record_seconds: int = 0,
     required_hits_to_start_recording: int = 1,
     required_misses_to_end_detection: int = 1,
+    event_end_ts: float = 0.0,
+    recording_duration: float = 0.0,
+    detection_count: int = 0,
+    max_confidence: float = 0.0,
+    avg_confidence: float = 0.0,
+    stream_fps: float = 0.0,
 ) -> Dict[str, object]:
     """Build backward-compatible recording metadata payload."""
     return {
@@ -183,6 +189,13 @@ def build_recording_sidecar_metadata(
         "min_record_seconds": int(min_record_seconds),
         "required_hits_to_start_recording": int(required_hits_to_start_recording),
         "required_misses_to_end_detection": int(required_misses_to_end_detection),
+        "event_end_ts": float(event_end_ts),
+        "recording_duration": float(recording_duration),
+        "detection_count": int(detection_count),
+        "max_confidence": float(max_confidence),
+        "avg_confidence": float(avg_confidence),
+        "duration": float(recording_duration),
+        "stream_fps": float(stream_fps),
     }
 
 

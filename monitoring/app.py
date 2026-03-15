@@ -1151,8 +1151,18 @@ QToolButton:focus { outline: none; }
         self._last_status = {}
         self._last_error = {}
         self._last_fps_text = {}
+        self._worker_diag: dict[str, dict[str, object]] = {}
         self.last_render_time = 0.0
         self._render_interval_s = 1 / 15
+
+        self.diag_panel = QLabel("Diagnostyka: brak danych")
+        self.diag_panel.setStyleSheet("color: #dddddd; background: #111; padding: 8px; border: 1px solid #333;")
+        self.diag_panel.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.diag_panel.setMinimumHeight(90)
+        center_v.addWidget(self.diag_panel)
+        self.diag_timer = QTimer(self)
+        self.diag_timer.timeout.connect(self._update_diagnostics_panel)
+        self.diag_timer.start(1000)
 
         # zacznij od startu wszystkich, ale z niewielkim opóźnieniem aby GUI
         # mogło się pojawić bez czekania na inicjalizację kamer
@@ -1381,6 +1391,7 @@ QToolButton:focus { outline: none; }
         w.error_signal.connect(self._worker_error)
         w.status_signal.connect(self._worker_status)
         w.record_signal.connect(lambda event, fp, cam_name=cam.get("name", idx): self.on_record_event(event, fp, cam_name))
+        w.worker_status_signal.connect(self._on_worker_heartbeat)
         w.start()
         self.workers[idx] = w
         self.log_window.add_entry("application", f"uruchomiono kamerę {cam.get('name', idx)}")
@@ -1425,6 +1436,33 @@ QToolButton:focus { outline: none; }
             self.log_window.add_entry("application", "brak sygnału RTSP")
         if idx == self.camera_list.currentRow():
             self._render_current()
+
+    def _on_worker_heartbeat(self, camera_name: str, status: dict):
+        self._worker_diag[str(camera_name)] = dict(status or {})
+
+    def _update_diagnostics_panel(self):
+        idx = self.camera_list.currentRow()
+        if idx < 0 or idx >= len(self.cameras):
+            self.diag_panel.setText("Diagnostyka: brak wybranej kamery")
+            return
+        name = str(self.cameras[idx].get("name", idx))
+        stat = self._worker_diag.get(name, {})
+        if not stat:
+            self.diag_panel.setText(f"Diagnostyka [{name}]: oczekiwanie na heartbeat")
+            return
+        self.diag_panel.setText(
+            "\n".join(
+                [
+                    f"[{name}]",
+                    f"stream fps: {float(stat.get('stream_fps', 0.0)):.2f}",
+                    f"detect fps: {float(stat.get('detect_fps', 0.0)):.2f}",
+                    f"writer fps: {float(stat.get('writer_fps', 0.0)):.2f}",
+                    f"recording queue size: {int(stat.get('queue_size', 0))}",
+                    f"dropped frames: {int(stat.get('dropped_frames', 0))}",
+                    f"last detection seconds: {float(stat.get('last_detection_seconds', -1.0)):.1f}",
+                ]
+            )
+        )
         print(msg)
 
     # --- Zarządzanie kamerami (global) ---

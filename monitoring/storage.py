@@ -133,6 +133,11 @@ def _normalise_catalog_entry(entry: dict) -> dict | None:
     item.setdefault("time", item.get("event_time", ""))
     if "timestamp" not in item and item.get("event_start_ts") not in (None, ""):
         item["timestamp"] = item.get("event_start_ts")
+    item.setdefault("duration", float(item.get("recording_duration", 0.0) or 0.0))
+    item.setdefault("event_end_ts", float(item.get("event_end_ts", 0.0) or 0.0))
+    item.setdefault("max_confidence", float(item.get("max_confidence", 0.0) or 0.0))
+    item.setdefault("avg_confidence", float(item.get("avg_confidence", 0.0) or 0.0))
+    item.setdefault("detection_count", int(item.get("detection_count", 0) or 0))
     return item
 
 

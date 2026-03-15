@@ -125,6 +125,12 @@ def test_build_recording_sidecar_metadata_contains_reliability_fields():
         thumbnail_mode="first_detection",
         inference_count=30,
         positive_detection_count=8,
+        event_end_ts=1704067204.0,
+        recording_duration=4.0,
+        detection_count=12,
+        max_confidence=0.87,
+        avg_confidence=0.54,
+        stream_fps=24.0,
     )
 
     assert payload["file"] == "/tmp/a.mp4"
@@ -132,6 +138,36 @@ def test_build_recording_sidecar_metadata_contains_reliability_fields():
     assert payload["writer_fps"] == 5.0
     assert payload["thumbnail_mode"] == "first_detection"
     assert payload["frames_written"] == 12
+    assert payload["event_end_ts"] == 1704067204.0
+    assert payload["recording_duration"] == 4.0
+    assert payload["duration"] == 4.0
+    assert payload["detection_count"] == 12
+
+
+def test_metadata_duration_fields(tmp_path):
+    root = tmp_path / "Cam1"
+    root.mkdir()
+    video = root / "clip_20240102_030405.mp4"
+    video.write_bytes(b"")
+    video.with_suffix(".mp4.json").write_text(
+        json.dumps(
+            {
+                "label": "person",
+                "recording_duration": 6.5,
+                "duration": 6.5,
+                "event_end_ts": 1704067206.5,
+                "detection_count": 7,
+                "max_confidence": 0.9,
+                "avg_confidence": 0.6,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    metadata = build_recording_metadata(str(video), [("Cam1", str(root))])
+    assert metadata.extra["recording_duration"] == 6.5
+    assert metadata.extra["duration"] == 6.5
+    assert metadata.extra["event_end_ts"] == 1704067206.5
 
 
 def test_thumbnail_candidates_prefer_explicit_thumb_path(tmp_path):
