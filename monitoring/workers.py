@@ -119,15 +119,14 @@ class RecordingThread(QThread):
         self.width = width
         self.height = height
         self.fps = fps
-        queue_size = max(10, int(max(1, fps) * 3))
-        self.queue: "Queue[np.ndarray]" = Queue(maxsize=queue_size)
-        self._stop = False
+        self.queue: "Queue[np.ndarray]" = Queue(maxsize=120)
+        self.running = True
         self.writer = None
         self.dropped_frames = 0
 
     def run(self) -> None:
         self.writer = degirum_tools.VideoWriter(self.filepath, self.width, self.height, self.fps)
-        while not self._stop or not self.queue.empty():
+        while self.running or not self.queue.empty():
             try:
                 frame = self.queue.get(timeout=0.1)
                 self.writer.write(frame)
@@ -139,22 +138,15 @@ class RecordingThread(QThread):
             self.writer = None
 
     def write(self, frame: np.ndarray) -> None:
-        if not self._stop:
+        if self.running:
             try:
                 self.queue.put_nowait(frame)
             except Full:
-                try:
-                    self.queue.get_nowait()
-                except Empty:
-                    pass
-                try:
-                    self.queue.put_nowait(frame)
-                except Full:
-                    pass
                 self.dropped_frames += 1
+                print(f"[recorder] queue full for {self.filepath}; dropping frame")
 
     def stop(self) -> None:
-        self._stop = True
+        self.running = False
         self.wait()
 
 
@@ -228,6 +220,9 @@ class CameraWorker(QThread):
         if elapsed < 5.0 or self.metrics["frames"] <= 0:
             return
         frames = max(1, int(self.metrics["frames"]))
+        queue_size = 0
+        if self.record_thread is not None:
+            queue_size = self.record_thread.queue.qsize()
         print(
             f"[perf][{self.camera.get('name', self.index)}] "
             f"capture={self.metrics['capture'] / frames * 1000:.1f}ms "
@@ -235,6 +230,7 @@ class CameraWorker(QThread):
             f"overlay={self.metrics['overlay'] / frames * 1000:.1f}ms "
             f"emit={self.metrics['emit'] / frames * 1000:.1f}ms "
             f"enqueue={self.metrics['record_enqueue'] / frames * 1000:.1f}ms "
+            f"queue={queue_size} "
             f"drops={self.metrics['recorder_drops']}"
         )
         self.last_metrics_log_ts = now
@@ -340,10 +336,10 @@ class CameraWorker(QThread):
 
                         frame_start = time.perf_counter()
                         raw_frame = frame
+                        preview_frame = frame.copy()
                         should_buffer = self.enable_recording or self.detection_active
                         if should_buffer:
-                            self.prerecord_buffer.append(raw_frame.copy())
-                        preview_frame = raw_frame
+                            self.prerecord_buffer.append(raw_frame)
 
                         run_inference = self.enable_detection or self.draw_overlays
                         now = time.monotonic()
@@ -397,7 +393,6 @@ class CameraWorker(QThread):
 
                             if self.draw_overlays and overlays:
                                 overlay_start = time.perf_counter()
-                                preview_frame = raw_frame.copy()
                                 for x1, y1, x2, y2, label, confidence, color in overlays:
                                     cv2.rectangle(
                                         preview_frame, (x1, y1), (x2, y2), color, 2
@@ -418,7 +413,7 @@ class CameraWorker(QThread):
                                 if not self.detection_active:
                                     self.no_detection_frames = 0
                                     self.post_countdown_frames = 0
-                                    alert_frame = frame.copy()
+                                    alert_frame = preview_frame.copy()
                                     if best_bbox:
                                         x1, y1, x2, y2 = best_bbox
                                         color = _label_color(best_label or "")

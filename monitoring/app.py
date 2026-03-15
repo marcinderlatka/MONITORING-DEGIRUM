@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import sys
+import time
 import uuid
 import wave
 from glob import glob
@@ -1105,8 +1106,8 @@ QToolButton:focus { outline: none; }
         self._last_status = {}
         self._last_error = {}
         self._last_fps_text = {}
-        self._last_preview_render_ts = 0.0
-        self._render_interval_s = 0.1
+        self.last_render_time = 0.0
+        self._render_interval_s = 1 / 15
 
         # zacznij od startu wszystkich, ale z niewielkim opóźnieniem aby GUI
         # mogło się pojawić bez czekania na inicjalizację kamer
@@ -1532,7 +1533,7 @@ QToolButton:focus { outline: none; }
 
     def switch_camera(self, idx):
         # odśwież HUD dla nowej kamery
-        self._last_preview_render_ts = 0.0
+        self.last_render_time = 0.0
         self._render_current()
 
     def update_frame(self, frame, index):
@@ -1581,11 +1582,7 @@ QToolButton:focus { outline: none; }
         self._last_error.pop(idx, None)
 
         if idx == self.camera_list.currentRow():
-            from time import perf_counter
-            now = perf_counter()
-            if now - self._last_preview_render_ts >= self._render_interval_s:
-                self._last_preview_render_ts = now
-                self._render_current()
+            self._render_current()
 
     def _compose_letterboxed(self, frame, top_lines):
         # Create canvas matching label size, paste scaled frame centered
@@ -1646,6 +1643,11 @@ QToolButton:focus { outline: none; }
         return qimg
 
     def _render_current(self):
+        now = time.time()
+        if now - self.last_render_time < self._render_interval_s:
+            return
+        self.last_render_time = now
+
         idx = self.camera_list.currentRow()
         if idx < 0:
             return
