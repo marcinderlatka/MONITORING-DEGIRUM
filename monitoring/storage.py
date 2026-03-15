@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from threading import Lock, Timer
 from typing import Iterable, List
@@ -51,7 +52,8 @@ class AlertMemory:
         self.path = Path(path)
         self.max_items = max_items
         self.items: List[dict] = []
-        self._writer = _DebouncedJsonWriter(self.path, debounce_seconds=1.0)
+        self._writer = _DebouncedJsonWriter(self.path, debounce_seconds=2.0)
+        self.last_save_time = 0.0
         self.load()
 
     def load(self) -> None:
@@ -68,9 +70,14 @@ class AlertMemory:
             self.items = []
 
     def save(self) -> None:
+        now = time.monotonic()
+        if now - self.last_save_time < 2.0:
+            return
+        self.last_save_time = now
         self._writer.schedule(self.items[-self.max_items :])
 
     def flush(self) -> None:
+        self.last_save_time = time.monotonic()
         self._writer.schedule(self.items[-self.max_items :])
         self._writer.flush()
 

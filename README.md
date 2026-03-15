@@ -120,3 +120,109 @@ Podwójne kliknięcie nagrania otwiera odtwarzacz z kontrolkami transportu, prze
 * Obsługa nowych klas obiektów sprowadza się do aktualizacji list `VISIBLE_CLASSES` i `RECORD_CLASSES` lub konfiguracji pojedynczej kamery.
 * W razie problemów z RTSP skorzystaj z kreatora dodawania i wbudowanego testu połączenia (wykorzystuje `cv2.VideoCapture`).
 * Błędy łącza/detekcji są raportowane w logach oraz prezentowane w overlayu aktywnej kamery.
+
+## Performance Optimizations
+
+### Model Cache
+
+File: `monitoring/app.py`
+
+Before:
+Each camera startup path could trigger an independent DeGirum model load for the same model name.
+
+After:
+Application-level model cache (`self.model_cache`) with `_get_model(model_name)` reuses loaded model instances across workers.
+
+Impact:
+Reduces repeated model initialization overhead, startup latency for additional cameras, and memory pressure.
+
+### Class Set Optimization
+
+File: `monitoring/workers.py`
+
+Before:
+Class filtering in detection paths rebuilt lowercase containers repeatedly during frame processing.
+
+After:
+Lowercased sets (`visible_classes_lower`, `record_classes_lower`) are precomputed and refreshed only when class lists change.
+
+Impact:
+Removes per-frame list reconstruction and speeds up class membership checks in the hot inference loop.
+
+### Raw/Preview Frame Split
+
+File: `monitoring/workers.py`
+
+Before:
+Multiple `frame.copy()` operations could happen in the main processing loop for buffering, overlays, and alert data.
+
+After:
+Loop now uses explicit `raw_frame` for recording/buffering and `preview_frame` for overlays/GUI output, eliminating redundant copies.
+
+Impact:
+Lowers per-frame memory allocation and reduces CPU overhead from unnecessary array duplication.
+
+### Recording Queue Limit
+
+File: `monitoring/workers.py`
+
+Before:
+Recorder queue growth strategy could keep accumulating frames under write pressure, increasing RAM usage risk.
+
+After:
+`RecordingThread` uses `Queue(maxsize=120)` and non-blocking enqueue with frame drop + warning when full.
+
+Impact:
+Prevents unbounded memory growth during slow disk I/O and keeps capture/detection responsive.
+
+### GUI Render Throttling
+
+File: `monitoring/app.py`
+
+Before:
+Main preview rendering could be triggered at full incoming frame rate.
+
+After:
+Rendering is throttled using `self.last_render_time` to approximately 15 FPS.
+
+Impact:
+Reduces GUI repaint load and CPU usage while preserving smooth operator preview.
+
+### JSON Write Debounce
+
+File: `monitoring/storage.py`
+
+Before:
+Alert persistence updates could schedule frequent JSON writes under bursty detections.
+
+After:
+`AlertMemory` tracks `last_save_time` and only schedules writes at most once every 2 seconds (with flush on shutdown).
+
+Impact:
+Lowers disk I/O amplification and avoids write storms during high alert rates.
+
+### Safe Thread Stop
+
+File: `monitoring/workers.py`
+
+Before:
+Recorder shutdown logic relied on stop flags but did not expose explicit running-state semantics.
+
+After:
+Recorder thread now uses `self.running = False` and exits naturally after draining the queue, without forceful thread termination.
+
+Impact:
+Improves shutdown safety and reduces chance of thread-related instability/crashes.
+
+### Basic Performance Logging
+
+File: `monitoring/workers.py`
+
+Before:
+No periodic lightweight timing summary for runtime hot path.
+
+After:
+Performance metrics are aggregated and logged roughly every 5 seconds for capture, inference, overlay draw, emit/enqueue, and recorder queue size.
+
+Impact:
+Provides low-overhead visibility for profiling and diagnosing bottlenecks in production-like runs.
