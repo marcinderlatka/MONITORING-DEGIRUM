@@ -87,6 +87,7 @@ from .config import (
     DEFAULT_PREVIEW_FPS_MAIN,
     DEFAULT_PREVIEW_FPS_THUMB,
     DEFAULT_PREVIEW_PAUSE_WHEN_HIDDEN,
+    DEFAULT_SHOW_CAMERA_INFO_OVERLAY,
     DEFAULT_OVERLOAD_PROTECTION_ENABLED,
     DEFAULT_OVERLOAD_CAMERA_COUNT_THRESHOLD,
     DEFAULT_OVERLOAD_REDUCE_THUMB_PREVIEW_FPS,
@@ -137,7 +138,7 @@ CAMERA_RUNTIME_APPLY_FIELDS = {
     "draw_overlays", "enable_detection", "enable_recording", "visible_classes", "record_classes",
     "detection_hours", "record_path", "pre_seconds", "lost_seconds", "post_seconds",
     "required_hits_to_start_recording", "required_misses_to_end_detection", "min_record_seconds",
-    "thumbnail_mode", "record_start_mode", "preview_fps_main", "preview_fps_thumb", "preview_pause_when_hidden",
+    "thumbnail_mode", "record_start_mode", "preview_fps_main", "preview_fps_thumb", "preview_pause_when_hidden", "show_camera_info_overlay",
 }
 
 CAMERA_SETTING_TOOLTIPS = {
@@ -214,6 +215,10 @@ CAMERA_SETTING_TOOLTIPS = {
         "Wyłączenie tej opcji może trochę zmniejszyć obciążenie systemu, szczególnie przy wielu kamerach.\n"
         "Detekcja może nadal działać nawet wtedy, gdy ramki nie są rysowane.\n\n"
         "Uwaga: miniatura nagrania może nadal zawierać zaznaczony obiekt, aby łatwiej było rozpoznać zdarzenie."
+    ),
+    "show_camera_info_overlay": (
+        "Pokazuje na obrazie kamery scalone informacje o statusie połączenia, FPS, stanie nagrywania i diagnostyce.\n\n"
+        "Wyłączenie ukrywa okno informacyjne, ale nie wyłącza samej detekcji ani nagrywania."
     ),
     "enable_detection": (
         "Włącza analizę AI dla tej kamery.\n\n"
@@ -789,9 +794,13 @@ class SingleCameraDialog(QDialog):
     def __init__(self, parent=None, camera=None):
         super().__init__(parent)
         self.setWindowTitle("Ustawienia kamery")
-        self.resize(520, 680)
 
-        form = QFormLayout(self)
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            geom = screen.availableGeometry()
+            self.resize(int(geom.width() * 0.9), int(geom.height() * 0.86))
+        else:
+            self.resize(1400, 900)
 
         self.name_edit = QLineEdit()
         self.type_combo = QComboBox(); self.type_combo.addItems(["rtsp", "usb"])
@@ -817,6 +826,7 @@ class SingleCameraDialog(QDialog):
         self.conf_draw_spin = QDoubleSpinBox(); self.conf_draw_spin.setRange(0.0, 1.0); self.conf_draw_spin.setSingleStep(0.05)
         self.conf_record_spin = QDoubleSpinBox(); self.conf_record_spin.setRange(0.0, 1.0); self.conf_record_spin.setSingleStep(0.05)
         self.draw_chk = QCheckBox(); self.detect_chk = QCheckBox(); self.record_chk = QCheckBox()
+        self.info_overlay_chk = QCheckBox()
         self.hours_edit = QLineEdit(); self.visible_edit = QLineEdit(); self.record_edit = QLineEdit()
         self.path_edit = QLineEdit(); self.btn_path = QPushButton("Wybierz")
         self.pre_spin = QSpinBox(); self.pre_spin.setRange(0, 60)
@@ -835,33 +845,47 @@ class SingleCameraDialog(QDialog):
 
         self._field_rows = {}
         self._focus_help_widgets = {}
-        self._add_field_row(form, "name", "Nazwa", self.name_edit)
-        self._add_field_row(form, "type", "Typ źródła", self.type_combo)
-        self._add_field_row(form, "rtsp", "Adres/Urządzenie", self.source_stack, input_widget=self.rtsp_edit, focus_widgets=[self.rtsp_edit, self.device_combo, self.source_stack])
-        self._add_field_row(form, "model", "Model detekcji", self.model_combo)
-        self._add_field_row(form, "fps", "FPS/S DETECT", self.fps_spin)
-        self._add_field_row(form, "rtsp_fps", "FPS/S RTSP", self.rtsp_fps_spin)
-        self._add_field_row(form, "confidence_threshold", "Próg pewności (legacy)", self.conf_spin)
-        self._add_field_row(form, "confidence_threshold_draw", "Próg rysowania", self.conf_draw_spin)
-        self._add_field_row(form, "confidence_threshold_record", "Próg nagrania", self.conf_record_spin)
-        self._add_field_row(form, "draw_overlays", "Rysuj nakładki", self.draw_chk)
-        self._add_field_row(form, "enable_detection", "Wykrywaj obiekty", self.detect_chk)
-        self._add_field_row(form, "enable_recording", "Nagrywaj detekcje", self.record_chk)
-        self._add_field_row(form, "detection_hours", "Godziny detekcji", self.hours_edit)
-        self._add_field_row(form, "visible_classes", "Widoczne klasy", self.visible_edit)
-        self._add_field_row(form, "record_classes", "Klasy nagrywane", self.record_edit)
-        self._add_field_row(form, "record_path", "Folder nagrań", path_layout, input_widget=self.path_edit, focus_widgets=[self.path_edit, self.btn_path])
-        self._add_field_row(form, "pre_seconds", "Pre seconds", self.pre_spin)
-        self._add_field_row(form, "lost_seconds", "Lost seconds", self.lost_spin)
-        self._add_field_row(form, "post_seconds", "Post seconds", self.post_spin)
-        self._add_field_row(form, "thumbnail_mode", "Tryb miniatury", self.thumbnail_mode_combo)
-        self._add_field_row(form, "record_start_mode", "Tryb startu nagrania", self.record_start_mode_combo)
-        self._add_field_row(form, "required_hits_to_start_recording", "Wymagane trafienia start", self.required_hits_spin)
-        self._add_field_row(form, "required_misses_to_end_detection", "Wymagane pudła stop", self.required_misses_spin)
-        self._add_field_row(form, "min_record_seconds", "Minimalny czas nagrania", self.min_record_seconds_spin)
-        self._add_field_row(form, "preview_fps_main", "Preview FPS main", self.preview_fps_main_spin)
-        self._add_field_row(form, "preview_fps_thumb", "Preview FPS thumb", self.preview_fps_thumb_spin)
-        self._add_field_row(form, "preview_pause_when_hidden", "Pauzuj preview gdy ukryta", self.preview_pause_chk)
+
+        root = QVBoxLayout(self)
+        cols = QHBoxLayout()
+        root.addLayout(cols, stretch=1)
+
+        left_box = QFrame(); left_layout = QFormLayout(left_box)
+        middle_box = QFrame(); middle_layout = QFormLayout(middle_box)
+        right_box = QFrame(); right_layout = QFormLayout(right_box)
+        cols.addWidget(left_box, 1); cols.addWidget(middle_box, 1); cols.addWidget(right_box, 1)
+
+        self._add_field_row(left_layout, "name", "Nazwa", self.name_edit)
+        self._add_field_row(left_layout, "type", "Typ źródła", self.type_combo)
+        self._add_field_row(left_layout, "rtsp", "Adres/Urządzenie", self.source_stack, input_widget=self.rtsp_edit, focus_widgets=[self.rtsp_edit, self.device_combo, self.source_stack])
+        self._add_field_row(left_layout, "model", "Model detekcji", self.model_combo)
+        self._add_field_row(left_layout, "fps", "FPS/S DETECT", self.fps_spin)
+        self._add_field_row(left_layout, "rtsp_fps", "FPS/S RTSP", self.rtsp_fps_spin)
+        self._add_field_row(left_layout, "show_camera_info_overlay", "Pokaż okno info na obrazie", self.info_overlay_chk)
+
+        self._add_field_row(middle_layout, "confidence_threshold", "Próg pewności (legacy)", self.conf_spin)
+        self._add_field_row(middle_layout, "confidence_threshold_draw", "Próg rysowania", self.conf_draw_spin)
+        self._add_field_row(middle_layout, "confidence_threshold_record", "Próg nagrania", self.conf_record_spin)
+        self._add_field_row(middle_layout, "draw_overlays", "Rysuj nakładki", self.draw_chk)
+        self._add_field_row(middle_layout, "enable_detection", "Wykrywaj obiekty", self.detect_chk)
+        self._add_field_row(middle_layout, "enable_recording", "Nagrywaj detekcje", self.record_chk)
+        self._add_field_row(middle_layout, "detection_hours", "Godziny detekcji", self.hours_edit)
+        self._add_field_row(middle_layout, "visible_classes", "Widoczne klasy", self.visible_edit)
+        self._add_field_row(middle_layout, "record_classes", "Klasy nagrywane", self.record_edit)
+
+        self._add_field_row(right_layout, "record_path", "Folder nagrań", path_layout, input_widget=self.path_edit, focus_widgets=[self.path_edit, self.btn_path])
+        self._add_field_row(right_layout, "pre_seconds", "Pre seconds", self.pre_spin)
+        self._add_field_row(right_layout, "lost_seconds", "Lost seconds", self.lost_spin)
+        self._add_field_row(right_layout, "post_seconds", "Post seconds", self.post_spin)
+        self._add_field_row(right_layout, "thumbnail_mode", "Tryb miniatury", self.thumbnail_mode_combo)
+        self._add_field_row(right_layout, "record_start_mode", "Tryb startu nagrania", self.record_start_mode_combo)
+        self._add_field_row(right_layout, "required_hits_to_start_recording", "Wymagane trafienia start", self.required_hits_spin)
+        self._add_field_row(right_layout, "required_misses_to_end_detection", "Wymagane pudła stop", self.required_misses_spin)
+        self._add_field_row(right_layout, "min_record_seconds", "Minimalny czas nagrania", self.min_record_seconds_spin)
+        self._add_field_row(right_layout, "preview_fps_main", "Preview FPS main", self.preview_fps_main_spin)
+        self._add_field_row(right_layout, "preview_fps_thumb", "Preview FPS thumb", self.preview_fps_thumb_spin)
+        self._add_field_row(right_layout, "preview_pause_when_hidden", "Pauzuj preview gdy ukryta", self.preview_pause_chk)
+
         self._apply_all_tooltips()
         self._apply_field_tooltip("record_path", None, self.btn_path)
         self._apply_field_tooltip("rtsp", None, self.device_combo)
@@ -871,16 +895,20 @@ class SingleCameraDialog(QDialog):
         self.help_panel.setReadOnly(True)
         self.help_panel.setMinimumHeight(130)
         self.help_panel.setPlaceholderText("Kliknij lub zaznacz pole ustawień, aby zobaczyć szczegółowy opis.")
-        form.addRow("Pomoc do ustawienia", self.help_panel)
+        root.addWidget(self.help_panel)
         self._set_help_panel_text("name")
 
+        controls = QHBoxLayout()
         self.test_btn = QPushButton("Test połączenia")
         self.test_status = QLabel("")
-        form.addRow(self.test_btn, self.test_status)
-
-        btns = QHBoxLayout(); self.btn_ok = QPushButton("OK"); self.btn_cancel = QPushButton("Anuluj")
-        btns.addStretch(1); btns.addWidget(self.btn_cancel); btns.addWidget(self.btn_ok)
-        form.addRow(btns)
+        self.btn_ok = QPushButton("Zapisz")
+        self.btn_cancel = QPushButton("Anuluj")
+        controls.addWidget(self.test_btn)
+        controls.addWidget(self.test_status)
+        controls.addStretch(1)
+        controls.addWidget(self.btn_cancel)
+        controls.addWidget(self.btn_ok)
+        root.addLayout(controls)
 
         self.btn_ok.clicked.connect(self.accept)
         self.btn_cancel.clicked.connect(self.reject)
@@ -895,6 +923,7 @@ class SingleCameraDialog(QDialog):
             self.preview_fps_main_spin.setValue(float(DEFAULT_PREVIEW_FPS_MAIN))
             self.preview_fps_thumb_spin.setValue(float(DEFAULT_PREVIEW_FPS_THUMB))
             self.preview_pause_chk.setChecked(bool(DEFAULT_PREVIEW_PAUSE_WHEN_HIDDEN))
+            self.info_overlay_chk.setChecked(bool(DEFAULT_SHOW_CAMERA_INFO_OVERLAY))
 
     def _add_field_row(self, form: QFormLayout, field_key: str, label_text: str, widget, input_widget=None, focus_widgets=None):
         label = QLabel(label_text)
@@ -939,23 +968,18 @@ class SingleCameraDialog(QDialog):
         return super().eventFilter(watched, event)
 
     def _choose_path(self):
-        initial_dir = self.path_edit.text() or str(DEFAULT_RECORD_PATH)
-        d = QFileDialog.getExistingDirectory(self, "Wybierz folder nagrań", initial_dir)
-        if d:
-            self.path_edit.setText(d)
+        path = QFileDialog.getExistingDirectory(self, "Wybierz folder nagrań", self.path_edit.text() or str(DEFAULT_RECORD_PATH))
+        if path:
+            self.path_edit.setText(path)
 
-    def _on_type_change(self, value):
-        if value == "usb":
-            self.source_stack.setCurrentWidget(self.device_combo)
-        else:
-            self.source_stack.setCurrentWidget(self.rtsp_edit)
+    def _on_type_change(self, t):
+        self.source_stack.setCurrentWidget(self.device_combo if t == "usb" else self.rtsp_edit)
 
     def _test_source(self):
-        self.test_status.setText("Testuję...")
+        self.test_status.setText("Testuję…")
         self.test_status.setStyleSheet("color:#ccc;")
         if self.type_combo.currentText() == "usb":
-            idx = self.device_combo.currentData()
-            cap = cv2.VideoCapture(int(idx))
+            cap = cv2.VideoCapture(int(self.device_combo.currentData()))
         else:
             url = self.rtsp_edit.text().strip()
             cap = cv2.VideoCapture(url)
@@ -989,6 +1013,7 @@ class SingleCameraDialog(QDialog):
         self.draw_chk.setChecked(bool(cam.get("draw_overlays", DEFAULT_DRAW_OVERLAYS)))
         self.detect_chk.setChecked(bool(cam.get("enable_detection", DEFAULT_ENABLE_DETECTION)))
         self.record_chk.setChecked(bool(cam.get("enable_recording", DEFAULT_ENABLE_RECORDING)))
+        self.info_overlay_chk.setChecked(bool(cam.get("show_camera_info_overlay", DEFAULT_SHOW_CAMERA_INFO_OVERLAY)))
         self.hours_edit.setText(cam.get("detection_hours", DEFAULT_DETECTION_HOURS))
         self.visible_edit.setText(",".join(cam.get("visible_classes", VISIBLE_CLASSES)))
         self.record_edit.setText(",".join(cam.get("record_classes", RECORD_CLASSES)))
@@ -1029,6 +1054,7 @@ class SingleCameraDialog(QDialog):
             "draw_overlays": self.draw_chk.isChecked(),
             "enable_detection": self.detect_chk.isChecked(),
             "enable_recording": self.record_chk.isChecked(),
+            "show_camera_info_overlay": self.info_overlay_chk.isChecked(),
             "rtsp_fps": int(self.rtsp_fps_spin.value()),
             "detection_hours": self.hours_edit.text().strip() or DEFAULT_DETECTION_HOURS,
             "visible_classes": [c.strip() for c in self.visible_edit.text().split(",") if c.strip()],
@@ -1380,10 +1406,11 @@ QToolButton:focus { outline: none; }
         self.overload_disable_nonessential_overlays = bool(self.config.get("overload_disable_nonessential_overlays", DEFAULT_OVERLOAD_DISABLE_NONESSENTIAL_OVERLAYS)) if hasattr(self, "config") else DEFAULT_OVERLOAD_DISABLE_NONESSENTIAL_OVERLAYS
         self.overload_mode_active = False
 
-        self.diag_panel = QLabel("Diagnostyka: brak danych")
+        self.diag_panel = QLabel("Diagnostyka (debug): brak danych")
         self.diag_panel.setStyleSheet("color: #dddddd; background: #111; padding: 8px; border: 1px solid #333;")
         self.diag_panel.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         self.diag_panel.setMinimumHeight(90)
+        self.diag_panel.setVisible(False)
         center_v.addWidget(self.diag_panel)
         self.diag_timer = QTimer(self)
         self.diag_timer.timeout.connect(self._update_diagnostics_panel)
@@ -1688,15 +1715,48 @@ QToolButton:focus { outline: none; }
         self.log_window.add_entry("application", f"uruchomiono kamerę {cam.get('name', idx)}")
 
     def stop_camera(self, idx: int):
-        if 0 <= idx < len(self.workers):
-            w = self.workers[idx]
-            if isinstance(w, CameraWorker):
-                w.stop()
-                self.workers[idx] = None
-                cam = self.cameras[idx]
-                self.log_window.add_entry("application", f"zatrzymano kamerę {cam.get('name', idx)}")
-                self._evaluate_overload_mode()
-                self._refresh_camera_status_indicators()
+        if not (0 <= idx < len(self.workers)):
+            return
+        w = self.workers[idx]
+        if not isinstance(w, CameraWorker):
+            return
+
+        cam = self.cameras[idx]
+        stopped = w.stop()
+        if not stopped:
+            self.log_window.add_entry("warning", f"kamera {cam.get('name', idx)} nie zatrzymała się w czasie")
+
+        with suppress(Exception):
+            w.frame_signal.disconnect(self.update_frame)
+        with suppress(Exception):
+            w.alert_signal.disconnect(self.on_new_alert)
+        with suppress(Exception):
+            w.error_signal.disconnect(self._worker_error)
+        with suppress(Exception):
+            w.status_signal.disconnect(self._worker_status)
+
+        self.workers[idx] = None
+        self._last_frame.pop(idx, None)
+        self._last_fps_text[idx] = ""
+        self._last_status[idx] = "Zatrzymano"
+        self._last_error.pop(idx, None)
+        cam_name = str(cam.get("name", idx))
+        self.worker_status.pop(cam_name, None)
+        self._worker_diag.pop(cam_name, None)
+        if hasattr(self.camera_grid, "update_frame"):
+            blank = np.zeros((180, 320, 3), dtype=np.uint8)
+            with suppress(Exception):
+                self.camera_grid.update_frame(idx, blank)
+        if hasattr(self.camera_list, "update_thumbnail"):
+            blank = np.zeros((180, 320, 3), dtype=np.uint8)
+            with suppress(Exception):
+                self.camera_list.update_thumbnail(idx, blank)
+        if idx == self.camera_list.currentRow():
+            self._render_current()
+
+        self.log_window.add_entry("application", f"zatrzymano kamerę {cam.get('name', idx)}")
+        self._evaluate_overload_mode()
+        self._refresh_camera_status_indicators()
 
 
     def _worker_status(self, text: str, idx: int):
@@ -2012,14 +2072,49 @@ QToolButton:focus { outline: none; }
         if idx == self.camera_list.currentRow():
             self._render_current()
 
-    def _compose_letterboxed(self, frame, top_lines):
-        # Create canvas matching label size, paste scaled frame centered
+    def _build_camera_hud_lines(self, idx: int) -> list[str]:
+        if idx < 0 or idx >= len(self.cameras):
+            return []
+        cam = self.cameras[idx]
+        name = str(cam.get("name", idx))
+        status = self._last_status.get(idx, "")
+        err = self._last_error.get(idx, "")
+        fps_txt = self._last_fps_text.get(idx, "")
+        stat = self.worker_status.get(name, {})
+
+        flags = []
+        if bool(stat.get("recording_active", False)):
+            flags.append("REC")
+        if 0 <= float(stat.get("last_detection_seconds", -1.0)) <= 10.0:
+            flags.append("DET")
+        if bool(stat.get("stream_error_active", False)):
+            flags.append("ERR")
+        if bool(stat.get("overload_degraded", False)):
+            flags.append("DEG")
+
+        lines = [name]
+        state_line = f"Status: {err if err else (status or 'Brak danych')}"
+        if flags:
+            state_line += f" [{' '.join(flags)}]"
+        lines.append(state_line)
+        metric_parts = []
+        if fps_txt:
+            metric_parts.append(f"preview {fps_txt}")
+        metric_parts.extend([
+            f"stream {float(stat.get('stream_fps', 0.0)):.1f}",
+            f"detect {float(stat.get('detect_fps', 0.0)):.1f}",
+            f"writer {float(stat.get('writer_fps', 0.0)):.1f}",
+            f"q {int(stat.get('queue_size', 0))}",
+            f"drop {int(stat.get('dropped_frames', 0))}",
+        ])
+        lines.append(" | ".join(metric_parts))
+        return lines
+
+    def _compose_letterboxed(self, frame, idx: int):
         w_label = max(1, self.camera_view.width())
         h_label = max(1, self.camera_view.height())
         canvas = np.zeros((h_label, w_label, 3), dtype=np.uint8)
 
-        top_bar_h = 0
-        y0 = 0
         if frame is not None:
             fh, fw = frame.shape[:2]
             if fh > 0 and fw > 0:
@@ -2029,42 +2124,37 @@ QToolButton:focus { outline: none; }
                 resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
                 x0 = (w_label - new_w) // 2
                 y0 = (h_label - new_h) // 2
-                top_bar_h = max(40, y0)  # wysokość górnego paska (min 40px)
                 canvas[y0:y0+new_h, x0:x0+new_w] = resized
-        else:
-            top_bar_h = 60
 
-        # Convert to QImage and draw text (UTF-8 capable), centered
         rgb = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
         qimg = QImage(rgb.data, w_label, h_label, rgb.strides[0], QImage.Format_RGB888).copy()
+
+        cam = self.cameras[idx] if 0 <= idx < len(self.cameras) else {}
+        if not bool(cam.get("show_camera_info_overlay", DEFAULT_SHOW_CAMERA_INFO_OVERLAY)):
+            return qimg
+
+        lines = self._build_camera_hud_lines(idx)
+        if not lines:
+            return qimg
+
         painter = QPainter(qimg)
         try:
-            # dynamic font size vs width
-            base_size = 14
-            if w_label > 1200:
-                base_size = 20
-            elif w_label > 900:
-                base_size = 18
-            elif w_label > 700:
-                base_size = 16
-
-            font1 = QFont("DejaVu Sans", base_size)
-            font1.setBold(False)
-            font2 = QFont("DejaVu Sans", max(12, base_size - 2))
-            font2.setBold(False)
-
+            font = QFont("DejaVu Sans", 12 if w_label < 1100 else 14)
+            painter.setFont(font)
+            fm = painter.fontMetrics()
+            pad = 10
+            line_h = fm.height() + 2
+            text_w = max(fm.horizontalAdvance(line) for line in lines)
+            box_w = text_w + 2 * pad
+            box_h = line_h * len(lines) + 2 * pad
+            x = max(8, w_label - box_w - 16)
+            y = max(8, h_label - box_h - 16)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(0, 0, 0, 128))
+            painter.drawRoundedRect(x, y, box_w, box_h, 8, 8)
             painter.setPen(QColor(255, 255, 255))
-
-            # Rects for lines on the top bar
-            line1_rect = QRect(0, 6, w_label, max(24, top_bar_h//2))
-            line2_rect = QRect(0, line1_rect.bottom() + 2, w_label, max(22, top_bar_h - line1_rect.height()))
-
-            if top_lines and len(top_lines) > 0 and top_lines[0]:
-                painter.setFont(font1)
-                painter.drawText(line1_rect, Qt.AlignHCenter | Qt.AlignVCenter, top_lines[0])
-            if top_lines and len(top_lines) > 1 and top_lines[1]:
-                painter.setFont(font2)
-                painter.drawText(line2_rect, Qt.AlignHCenter | Qt.AlignVCenter, top_lines[1])
+            for i, line in enumerate(lines):
+                painter.drawText(x + pad, y + pad + (i + 1) * line_h - 4, line)
         finally:
             painter.end()
 
@@ -2080,22 +2170,10 @@ QToolButton:focus { outline: none; }
         if idx < 0:
             return
         frame = self._last_frame.get(idx)
-        name = self.cameras[idx]["name"] if (0 <= idx < len(self.cameras)) else "-"
-        fps_txt = self._last_fps_text.get(idx, "")
-        status = self._last_status.get(idx, "")
-        err = self._last_error.get(idx, "")
-        # Prepare lines: name, fps, status/error
-        line1 = name
-        line2_parts = []
-        if fps_txt:
-            line2_parts.append(fps_txt)
-        if err:
-            line2_parts.append(f"Błąd: {err}")
-        elif status:
-            line2_parts.append(status)
-        line2 = "  |  ".join(line2_parts) if line2_parts else ""
-
-        composed_qimg = self._compose_letterboxed(frame if frame is not None else np.zeros((720,1280,3), dtype=np.uint8), [line1, line2])
+        composed_qimg = self._compose_letterboxed(
+            frame if frame is not None else np.zeros((720, 1280, 3), dtype=np.uint8),
+            idx,
+        )
         self.camera_view.setPixmap(QPixmap.fromImage(composed_qimg))
 
 

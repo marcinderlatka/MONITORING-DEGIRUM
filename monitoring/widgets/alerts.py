@@ -54,7 +54,7 @@ class AlertItemWidget(QWidget):
     ]
     _label_color_map: dict[str, str] = {}
 
-    def __init__(self, alert: dict, thumb_size: tuple[int, int] = (256, 144)) -> None:
+    def __init__(self, alert: dict, card_width: int = 380) -> None:
         super().__init__()
         self.alert = alert
         self.setObjectName("alertItem")
@@ -64,10 +64,12 @@ class AlertItemWidget(QWidget):
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setAlignment(Qt.AlignTop)
 
+        self._card_width = max(300, int(card_width))
         self.thumb = QLabel()
-        self.thumb.setFixedSize(*thumb_size)
+        self.thumb.setFixedSize(*self._thumb_size_for_card())
+        self.thumb.setAlignment(Qt.AlignCenter)
         self.thumb.setStyleSheet("border:none; background:#111;")
-        layout.addWidget(self.thumb, alignment=Qt.AlignCenter)
+        layout.addWidget(self.thumb)
 
         label = alert.get("label", "object")
         confidence = float(alert.get("confidence", 0.0)) * 100.0
@@ -85,13 +87,18 @@ class AlertItemWidget(QWidget):
 
         for lbl in (object_line, confidence_line, time_line):
             lbl.setAlignment(Qt.AlignCenter)
-            layout.addWidget(lbl, alignment=Qt.AlignCenter)
+            layout.addWidget(lbl)
 
         frame = alert.get("frame")
         if frame is not None:
             self.set_frame(frame)
         else:
             self.set_thumbnail()
+
+    def _thumb_size_for_card(self) -> tuple[int, int]:
+        thumb_width = max(280, self._card_width - 20)
+        thumb_height = int(thumb_width * 9 / 16)
+        return thumb_width, max(130, thumb_height)
 
     @classmethod
     def _get_label_color(cls, label: str) -> str:
@@ -154,13 +161,14 @@ class AlertListWidget(QWidget):
     def __init__(self, alert_memory: AlertMemory) -> None:
         super().__init__()
         self.mem = alert_memory
-        self.setFixedWidth(300)
+        self._panel_width = 390
+        self.setFixedWidth(self._panel_width)
         self.setStyleSheet("background: transparent;")
         self._time_range_days = 1
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.list = QListWidget()
-        self.list.setFixedWidth(300)
+        self.list.setFixedWidth(self._panel_width)
         self.list.setFrameShape(QFrame.NoFrame)
         self.list.setStyleSheet(
             "\n".join(
@@ -196,7 +204,7 @@ class AlertListWidget(QWidget):
         self.load_from_history(self.mem.items)
 
     def add_alert(self, alert: dict) -> None:
-        widget = AlertItemWidget(alert)
+        widget = AlertItemWidget(alert, card_width=self._panel_width - 8)
         item = QListWidgetItem()
         item.setSizeHint(widget.sizeHint())
         self.list.insertItem(0, item)
@@ -234,7 +242,7 @@ class AlertListWidget(QWidget):
                 and alert_dt < cutoff
             ):
                 continue
-            widget = AlertItemWidget(alert)
+            widget = AlertItemWidget(alert, card_width=self._panel_width - 8)
             item = QListWidgetItem()
             item.setSizeHint(widget.sizeHint())
             self.list.addItem(item)

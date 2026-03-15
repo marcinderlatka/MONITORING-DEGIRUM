@@ -104,3 +104,12 @@ def test_classify_camera_changed_keys_helper_for_live_fields():
 
     assert set(changed) == {"draw_overlays", "fps"}
     assert restart == []
+
+
+def test_fill_camera_defaults_adds_info_overlay_flag():
+    from monitoring import config
+
+    camera = {"name": "Cam"}
+    updated = config.fill_camera_defaults(camera)
+
+    assert updated["show_camera_info_overlay"] is True

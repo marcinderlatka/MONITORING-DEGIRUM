@@ -47,6 +47,8 @@ if "PyQt5" not in sys.modules:
             pass
         def wait(self, *_args, **_kwargs):
             return True
+        def isRunning(self):
+            return False
         @staticmethod
         def msleep(_ms):
             return None
@@ -224,3 +226,10 @@ def test_apply_runtime_settings_refreshes_class_filters():
     })
     assert worker.visible_classes_lower == {"person", "dog"}
     assert worker.record_classes_lower == {"car"}
+
+
+def test_worker_stop_returns_bool_and_sets_signal():
+    worker = _worker()
+    result = worker.stop(timeout_ms=1)
+    assert worker.stop_signal is True
+    assert result is True
