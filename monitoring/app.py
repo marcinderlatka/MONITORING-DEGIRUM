@@ -62,6 +62,7 @@ from PyQt5.QtWidgets import (
     QStackedWidget,
     QStyle,
     QSizePolicy,
+    QTextEdit,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -137,6 +138,165 @@ CAMERA_RUNTIME_APPLY_FIELDS = {
     "detection_hours", "record_path", "pre_seconds", "lost_seconds", "post_seconds",
     "required_hits_to_start_recording", "required_misses_to_end_detection", "min_record_seconds",
     "thumbnail_mode", "record_start_mode", "preview_fps_main", "preview_fps_thumb", "preview_pause_when_hidden",
+}
+
+CAMERA_SETTING_TOOLTIPS = {
+    "name": (
+        "Nazwa kamery widoczna w aplikacji, alertach, nagraniach i przeglądarce nagrań.\n\n"
+        "To pole nie zmienia obrazu ani detekcji, ale ułatwia rozpoznanie źródła zdarzenia.\n"
+        "Warto używać krótkich i jednoznacznych nazw, np. 'Brama', 'Podjazd', 'Magazyn'."
+    ),
+    "type": (
+        "Typ źródła obrazu dla tej kamery: RTSP (kamera sieciowa) albo USB (kamera lokalna).\n\n"
+        "To ustawienie decyduje, jak aplikacja otwiera strumień i jakiej ścieżki inicjalizacji używa.\n"
+        "Zmiana typu jest krytyczna dla strumienia i zwykle wymaga automatycznego restartu tej kamery."
+    ),
+    "url": (
+        "Adres źródła obrazu, najczęściej strumienia RTSP.\n\n"
+        "To najważniejsze ustawienie połączenia z kamerą. Jeśli adres jest błędny, kamera nie połączy się "
+        "albo obraz nie będzie dostępny.\n\n"
+        "Zmiana tego pola zwykle wymaga przeładowania lub restartu tylko tej kamery, ponieważ zmienia sposób "
+        "inicjalizacji strumienia."
+    ),
+    "rtsp": (
+        "Adres źródła obrazu, najczęściej strumienia RTSP.\n\n"
+        "To najważniejsze ustawienie połączenia z kamerą. Jeśli adres jest błędny, kamera nie połączy się "
+        "albo obraz nie będzie dostępny.\n\n"
+        "Zmiana tego pola zwykle wymaga przeładowania lub restartu tylko tej kamery, ponieważ zmienia sposób "
+        "inicjalizacji strumienia."
+    ),
+    "model_name": (
+        "Model AI używany do detekcji obiektów dla tej kamery.\n\n"
+        "Różne modele mogą różnić się szybkością działania, dokładnością oraz listą obsługiwanych klas.\n"
+        "Lżejszy model zwykle działa szybciej, ale może gorzej wykrywać trudniejsze obiekty.\n"
+        "Zmiana modelu zwykle wymaga przeładowania kamery."
+    ),
+    "model": (
+        "Model AI używany do detekcji obiektów dla tej kamery.\n\n"
+        "Różne modele mogą różnić się szybkością działania, dokładnością oraz listą obsługiwanych klas.\n"
+        "Lżejszy model zwykle działa szybciej, ale może gorzej wykrywać trudniejsze obiekty.\n"
+        "Zmiana modelu zwykle wymaga przeładowania kamery."
+    ),
+    "fps": (
+        "Docelowa częstotliwość wykonywania detekcji AI.\n\n"
+        "Wyższa wartość oznacza częstsze sprawdzanie klatek, większą szansę wykrycia krótkiego zdarzenia, "
+        "ale też większe obciążenie CPU/GPU.\n"
+        "Niższa wartość zmniejsza obciążenie, ale może powodować pomijanie krótkich pojawień się obiektu.\n\n"
+        "To ustawienie wpływa głównie na detekcję, a nie bezpośrednio na sam podgląd."
+    ),
+    "rtsp_fps": (
+        "Ograniczenie liczby klatek pobieranych ze strumienia RTSP do przetwarzania.\n\n"
+        "Pozwala zmniejszyć obciążenie systemu przy wielu kamerach. Zbyt niska wartość może jednak pogorszyć "
+        "płynność ruchu i obniżyć skuteczność wykrywania szybkich zdarzeń.\n\n"
+        "W praktyce: wyższe rtsp_fps = lepsza płynność i więcej danych, niższe rtsp_fps = mniejsze obciążenie."
+    ),
+    "confidence_threshold": (
+        "Starszy, zgodnościowy próg pewności detekcji.\n\n"
+        "Jeżeli aplikacja używa osobnych progów rysowania i nagrywania, to to pole może pełnić rolę ustawienia "
+        "zgodności ze starszym configiem.\n\n"
+        "Im wyższy próg, tym mniej słabych wykryć. Im niższy próg, tym większa czułość, ale także większe ryzyko "
+        "fałszywych trafień."
+    ),
+    "confidence_threshold_draw": (
+        "Minimalna pewność detekcji potrzebna do narysowania ramki i etykiety na podglądzie.\n\n"
+        "Niższa wartość pokaże więcej wykryć, także słabszych. Wyższa wartość ograniczy liczbę ramek do bardziej "
+        "pewnych trafień.\n\n"
+        "To ustawienie wpływa na to, co widzisz na ekranie, ale nie musi samo w sobie uruchamiać nagrywania."
+    ),
+    "confidence_threshold_record": (
+        "Minimalna pewność detekcji wymagana do uruchomienia logiki zdarzenia i nagrania.\n\n"
+        "Zwiększenie tej wartości zmniejsza liczbę fałszywych alarmów, ale może powodować pomijanie trudniejszych "
+        "wykryć.\n"
+        "Zmniejszenie zwiększa czułość systemu, ale może prowadzić do częstszych niepotrzebnych nagrań."
+    ),
+    "draw_overlays": (
+        "Włącza rysowanie ramek, etykiet i opisów detekcji na podglądzie na żywo.\n\n"
+        "Wyłączenie tej opcji może trochę zmniejszyć obciążenie systemu, szczególnie przy wielu kamerach.\n"
+        "Detekcja może nadal działać nawet wtedy, gdy ramki nie są rysowane.\n\n"
+        "Uwaga: miniatura nagrania może nadal zawierać zaznaczony obiekt, aby łatwiej było rozpoznać zdarzenie."
+    ),
+    "enable_detection": (
+        "Włącza analizę AI dla tej kamery.\n\n"
+        "Gdy opcja jest wyłączona, obraz z kamery może nadal być wyświetlany, ale aplikacja nie będzie "
+        "wykrywać obiektów, tworzyć zdarzeń ani reagować logiką detekcji."
+    ),
+    "enable_recording": (
+        "Pozwala zapisywać nagrania zdarzeń dla tej kamery.\n\n"
+        "Po wyłączeniu tej opcji detekcja może nadal działać i obiekty mogą być widoczne na podglądzie, "
+        "ale aplikacja nie będzie tworzyć plików MP4 dla wykrytych zdarzeń."
+    ),
+    "visible_classes": (
+        "Lista klas obiektów, które mogą być pokazywane na podglądzie kamery.\n\n"
+        "Jeśli obiekt nie znajduje się na tej liście, może nie być rysowany na ekranie nawet wtedy, gdy model go wykryje.\n"
+        "To ustawienie dotyczy warstwy wizualnej i pomaga ograniczyć bałagan na obrazie."
+    ),
+    "record_classes": (
+        "Lista klas obiektów, które mogą uruchamiać nagrywanie zdarzenia.\n\n"
+        "Pozwala zawęzić nagrania tylko do ważnych obiektów, np. 'person' albo 'car'.\n"
+        "Dzięki temu można ograniczyć liczbę niepotrzebnych plików i lepiej kontrolować logikę alarmów."
+    ),
+    "detection_hours": (
+        "Zakres godzin, w których detekcja ma być aktywna.\n\n"
+        "Przydaje się, gdy kamera ma reagować tylko o określonych porach, np. nocą lub poza godzinami pracy.\n"
+        "Poza wskazanym zakresem system może nie wykonywać detekcji albo ignorować zdarzenia — zależnie od implementacji."
+    ),
+    "record_path": (
+        "Folder zapisu nagrań, miniaturek JPG i metadanych JSON dla tej kamery.\n\n"
+        "Jeśli ścieżka jest błędna, niedostępna albo bez uprawnień zapisu, nagrania mogą się nie tworzyć.\n"
+        "Warto używać stabilnej lokalizacji z odpowiednią ilością miejsca na dysku."
+    ),
+    "pre_seconds": (
+        "Liczba sekund materiału zachowywana przed wykryciem obiektu.\n\n"
+        "Większa wartość daje lepszy kontekst zdarzenia, bo nagranie może pokazać, co działo się chwilę wcześniej.\n"
+        "Zwiększa jednak użycie pamięci, ponieważ aplikacja musi buforować więcej klatek."
+    ),
+    "lost_seconds": (
+        "Czas oczekiwania po zniknięciu obiektu, zanim system uzna, że zdarzenie rzeczywiście się skończyło.\n\n"
+        "Pomaga uniknąć nerwowego przerywania nagrania, gdy obiekt znika tylko na chwilę albo detekcja chwilowo go nie widzi."
+    ),
+    "post_seconds": (
+        "Dodatkowy czas nagrywania po ostatnim wykryciu obiektu.\n\n"
+        "Dzięki temu końcówka zdarzenia nie zostaje ucięta zbyt wcześnie i nagranie jest bardziej naturalne."
+    ),
+    "required_hits_to_start_recording": (
+        "Liczba kolejnych lub potwierdzonych trafień wymagana do uruchomienia nagrania.\n\n"
+        "Wartość 1 daje najszybszą reakcję.\n"
+        "Wyższa wartość poprawia stabilność i ogranicza fałszywe uruchomienia, ale może minimalnie opóźnić start nagrania."
+    ),
+    "required_misses_to_end_detection": (
+        "Liczba kolejnych braków detekcji pomagająca potwierdzić zakończenie zdarzenia.\n\n"
+        "Wyższa wartość sprawia, że system mniej nerwowo kończy zdarzenie przy chwilowym zaniku obiektu."
+    ),
+    "min_record_seconds": (
+        "Minimalna długość pojedynczego nagrania po jego uruchomieniu.\n\n"
+        "Zapobiega tworzeniu bardzo krótkich, mało użytecznych klipów przy pojedynczym krótkim wykryciu."
+    ),
+    "thumbnail_mode": (
+        "Sposób wyboru miniatury nagrania widocznej w przeglądarce.\n\n"
+        "first_detection — miniatura z pierwszego potwierdzonego wykrycia,\n"
+        "best_detection — miniatura z najlepiej ocenionego wykrycia,\n"
+        "first_frame — miniatura z pierwszej klatki zdarzenia.\n\n"
+        "Najczęściej najlepszy efekt daje first_detection albo best_detection."
+    ),
+    "record_start_mode": (
+        "Sposób organizacji początku nagrania.\n\n"
+        "detection_first — nagranie zaczyna się od momentu wykrycia,\n"
+        "include_prerecord_first — nagranie może zawierać także materiał sprzed wykrycia.\n\n"
+        "To ustawienie wpływa na to, co użytkownik zobaczy na początku klipu i jak interpretowany jest start zdarzenia."
+    ),
+    "preview_fps_main": (
+        "Maksymalna częstotliwość odświeżania głównego podglądu wybranej kamery.\n\n"
+        "Wyższa wartość daje płynniejszy obraz, ale zwiększa obciążenie GUI.\n"
+        "Niższa wartość zmniejsza zużycie CPU, ale może pogorszyć płynność."
+    ),
+    "preview_fps_thumb": (
+        "Maksymalna częstotliwość odświeżania miniaturek lub widoków pobocznych kamer.\n\n"
+        "To ważne ustawienie przy wielu kamerach, bo ogranicza obciążenie interfejsu bez wyłączania samej detekcji."
+    ),
+    "preview_pause_when_hidden": (
+        "Ogranicza lub zatrzymuje aktualizację podglądu, gdy kamera nie jest widoczna w aktywnym widoku.\n\n"
+        "Zmniejsza obciążenie GUI, zachowując działanie logiki detekcji i nagrywania, jeśli system wspiera taki tryb."
+    ),
 }
 
 # --- Alert z miniaturką (karta) ---
@@ -625,35 +785,6 @@ class AddUsbCameraDialog(QDialog):
 
 # --- Ustawienia pojedynczej kamery ---
 class SingleCameraDialog(QDialog):
-    TOOLTIP_MAP = {
-        "name": "Nazwa kamery używana wewnętrznie i w interfejsie użytkownika. Ta wartość pojawia się w alertach, nazwach katalogów nagrań, widokach listy i siatki oraz w przeglądarce nagrań. Użyj krótkiej, jednoznacznej nazwy, aby łatwo odróżniać źródła.",
-        "type": "Typ źródła obrazu dla tej kamery. Wybierz RTSP dla kamer sieciowych albo USB dla urządzeń lokalnych. Zmiana typu wpływa na sposób inicjalizacji strumienia i może wymagać restartu pojedynczego workera.",
-        "rtsp": "Adres strumienia RTSP (lub źródło wejściowe). Niepoprawny adres uniemożliwi połączenie i odczyt klatek. Zmiana tego pola zwykle wymaga restartu strumienia, który aplikacja wykona automatycznie dla tej kamery.",
-        "model": "Model AI używany do detekcji na tej kamerze. Inny model może poprawić dokładność dla wybranych klas albo zwiększyć szybkość kosztem jakości. Zmiana modelu zwykle wymaga przeładowania pipeline tej kamery (automatyczny restart workera).",
-        "fps": "Docelowa częstotliwość inferencji (analizy klatek). Wyższe FPS daje szybszą reakcję i większą szansę wykrycia krótkich zdarzeń, ale zwiększa obciążenie CPU/GPU. Niższe FPS zmniejsza obciążenie, jednak może pominąć bardzo krótkie epizody.",
-        "rtsp_fps": "Limit tempa pobierania/przetwarzania klatek ze strumienia RTSP. Pomaga ograniczyć obciążenie systemu i rozmiary kolejek. Zbyt niska wartość może powodować „skokowy” ruch i pogorszyć skuteczność detekcji oraz płynność nagrań.",
-        "confidence_threshold": "Legacy/global próg pewności zachowany dla zgodności ze starszym config.json. Gdy używasz oddzielnych progów rysowania i nagrywania, to pole działa jako wartość kompatybilności i punkt odniesienia.",
-        "confidence_threshold_draw": "Minimalna pewność detekcji potrzebna do rysowania ramek i etykiet na podglądzie. Niższa wartość pokazuje więcej obiektów (również mniej pewnych), wyższa ogranicza „szum” i zostawia bardziej wiarygodne wskazania.",
-        "confidence_threshold_record": "Minimalna pewność używana przez logikę zdarzeń/nagrań. Zwiększenie progu zmniejsza liczbę fałszywych wyzwalań, ale może obniżyć czułość. Obniżenie progu zwiększa czułość kosztem większej liczby potencjalnie błędnych zdarzeń.",
-        "draw_overlays": "Włącza rysowanie ramek i etykiet na podglądzie live. Wyłączenie może odciążyć CPU/GPU i GUI, ale sama detekcja może nadal działać. Miniatury zdarzeń mogą nadal zawierać zaznaczenie obiektu zależnie od trybu miniatur.",
-        "enable_detection": "Włącza analizę AI dla tej kamery. Po wyłączeniu obraz może być nadal wyświetlany, ale nie działa logika wykrywania obiektów i związane z nią automatyczne zdarzenia.",
-        "enable_recording": "Pozwala zapisywać nagrania zdarzeń dla tej kamery. Po wyłączeniu detekcje mogą być nadal widoczne na podglądzie, ale klipy i metadane nie będą tworzone.",
-        "detection_hours": "Harmonogram godzin aktywnej detekcji, np. 06:00-18:00;20:00-23:59. Poza zadanym oknem detekcja może być wstrzymana/ignorowana zgodnie z logiką aplikacji. Użyj tej opcji do ograniczenia monitoringu do konkretnych pór.",
-        "visible_classes": "Lista klas (po przecinku), które mają być widoczne na nakładkach preview. To filtr wyłącznie wizualny: kontroluje co użytkownik widzi na ekranie. Może różnić się od klas wyzwalających nagrywanie.",
-        "record_classes": "Lista klas (po przecinku), które mogą uruchomić logikę zdarzenia i nagranie. Użyj tej listy, aby ograniczyć rejestrowanie do najważniejszych obiektów (np. person, car) i zmniejszyć liczbę nieistotnych klipów.",
-        "record_path": "Katalog docelowy nagrań, miniatur i metadanych tej kamery. Niepoprawna lub niedostępna ścieżka uniemożliwi zapis klipów. Dla porządku warto używać stabilnej lokalizacji o odpowiedniej pojemności dysku.",
-        "pre_seconds": "Ile sekund materiału sprzed detekcji ma zostać dołączone do nagrania (bufor prerecord). Większa wartość daje więcej kontekstu przed zdarzeniem, ale zwiększa użycie pamięci RAM.",
-        "lost_seconds": "Czas oczekiwania po zniknięciu detekcji zanim system uzna zdarzenie za utracone. Zwiększenie stabilizuje logikę przy chwilowych zanikach i migotaniu detekcji, ale może opóźnić zamknięcie zdarzenia.",
-        "post_seconds": "Dodatkowy czas nagrania po ostatniej pewnej detekcji. Pomaga domknąć scenę i uniknąć urwanych klipów. Zbyt wysoka wartość wydłuża pliki i zużycie miejsca.",
-        "required_hits_to_start_recording": "Liczba kolejnych trafień detekcji wymagana do startu nagrania. 1 = najszybsza reakcja, ale większa podatność na pojedyncze fałszywe trafienia. Wyższe wartości poprawiają stabilność kosztem wolniejszego startu.",
-        "required_misses_to_end_detection": "Liczba kolejnych „pudeł”/braków detekcji potrzebna do potwierdzenia końca zdarzenia. Wyższa wartość redukuje nerwowe przerywanie nagrań przy chwilowych zanikach obiektu.",
-        "min_record_seconds": "Minimalny czas trwania nagrania po uruchomieniu zdarzenia. Chroni przed bardzo krótkimi, mało użytecznymi klipami i poprawia spójność materiału w przeglądarce.",
-        "thumbnail_mode": "Sposób wyboru miniatury zdarzenia: first_detection (pierwsza detekcja), best_detection (najpewniejsza detekcja) albo first_frame (pierwsza klatka). Najczęściej rekomendowany jest best_detection dla czytelnej miniatury.",
-        "record_start_mode": "Sposób ustawienia początku klipu: detection_first (najpierw klatka detekcji) lub include_prerecord_first (najpierw materiał z prerecord). Opcja wpływa na to, co użytkownik widzi na starcie odtwarzania.",
-        "preview_fps_main": "Maksymalna częstotliwość odświeżania podglądu dla głównego/wybranego widoku kamery. Wyższa wartość poprawia płynność GUI, ale zwiększa obciążenie renderowania.",
-        "preview_fps_thumb": "Maksymalna częstotliwość odświeżania miniaturek i widoków pomocniczych. Obniżenie tej wartości zwykle znacząco zmniejsza obciążenie GUI przy wielu kamerach.",
-        "preview_pause_when_hidden": "Wstrzymuje lub silnie ogranicza odświeżanie podglądu, gdy kamera nie jest aktualnie widoczna. Pozwala oszczędzić zasoby GUI bez wyłączania detekcji i nagrywania w tle.",
-    }
 
     def __init__(self, parent=None, camera=None):
         super().__init__(parent)
@@ -703,9 +834,10 @@ class SingleCameraDialog(QDialog):
         path_layout = QHBoxLayout(); path_layout.addWidget(self.path_edit); path_layout.addWidget(self.btn_path)
 
         self._field_rows = {}
+        self._focus_help_widgets = {}
         self._add_field_row(form, "name", "Nazwa", self.name_edit)
         self._add_field_row(form, "type", "Typ źródła", self.type_combo)
-        self._add_field_row(form, "rtsp", "Adres/Urządzenie", self.source_stack)
+        self._add_field_row(form, "rtsp", "Adres/Urządzenie", self.source_stack, input_widget=self.rtsp_edit, focus_widgets=[self.rtsp_edit, self.device_combo, self.source_stack])
         self._add_field_row(form, "model", "Model detekcji", self.model_combo)
         self._add_field_row(form, "fps", "FPS/S DETECT", self.fps_spin)
         self._add_field_row(form, "rtsp_fps", "FPS/S RTSP", self.rtsp_fps_spin)
@@ -718,7 +850,7 @@ class SingleCameraDialog(QDialog):
         self._add_field_row(form, "detection_hours", "Godziny detekcji", self.hours_edit)
         self._add_field_row(form, "visible_classes", "Widoczne klasy", self.visible_edit)
         self._add_field_row(form, "record_classes", "Klasy nagrywane", self.record_edit)
-        self._add_field_row(form, "record_path", "Folder nagrań", path_layout)
+        self._add_field_row(form, "record_path", "Folder nagrań", path_layout, input_widget=self.path_edit, focus_widgets=[self.path_edit, self.btn_path])
         self._add_field_row(form, "pre_seconds", "Pre seconds", self.pre_spin)
         self._add_field_row(form, "lost_seconds", "Lost seconds", self.lost_spin)
         self._add_field_row(form, "post_seconds", "Post seconds", self.post_spin)
@@ -731,6 +863,16 @@ class SingleCameraDialog(QDialog):
         self._add_field_row(form, "preview_fps_thumb", "Preview FPS thumb", self.preview_fps_thumb_spin)
         self._add_field_row(form, "preview_pause_when_hidden", "Pauzuj preview gdy ukryta", self.preview_pause_chk)
         self._apply_all_tooltips()
+        self._apply_field_tooltip("record_path", None, self.btn_path)
+        self._apply_field_tooltip("rtsp", None, self.device_combo)
+        self._apply_field_tooltip("rtsp", None, self.source_stack)
+
+        self.help_panel = QTextEdit()
+        self.help_panel.setReadOnly(True)
+        self.help_panel.setMinimumHeight(130)
+        self.help_panel.setPlaceholderText("Kliknij lub zaznacz pole ustawień, aby zobaczyć szczegółowy opis.")
+        form.addRow("Pomoc do ustawienia", self.help_panel)
+        self._set_help_panel_text("name")
 
         self.test_btn = QPushButton("Test połączenia")
         self.test_status = QLabel("")
@@ -754,18 +896,47 @@ class SingleCameraDialog(QDialog):
             self.preview_fps_thumb_spin.setValue(float(DEFAULT_PREVIEW_FPS_THUMB))
             self.preview_pause_chk.setChecked(bool(DEFAULT_PREVIEW_PAUSE_WHEN_HIDDEN))
 
-    def _add_field_row(self, form: QFormLayout, field_key: str, label_text: str, widget):
+    def _add_field_row(self, form: QFormLayout, field_key: str, label_text: str, widget, input_widget=None, focus_widgets=None):
         label = QLabel(label_text)
         form.addRow(label, widget)
-        self._field_rows[field_key] = (label, widget)
+        field_input = input_widget or widget
+        self._field_rows[field_key] = (label, field_input)
+        self._register_focus_help(field_key, label)
+        widgets_for_focus = focus_widgets or [field_input]
+        for focus_widget in widgets_for_focus:
+            self._register_focus_help(field_key, focus_widget)
+
+    def _apply_field_tooltip(self, key: str, label_widget, input_widget):
+        text = CAMERA_SETTING_TOOLTIPS.get(key, "")
+        if text:
+            if label_widget is not None:
+                label_widget.setToolTip(text)
+                label_widget.setWhatsThis(text)
+            if input_widget is not None:
+                input_widget.setToolTip(text)
+                input_widget.setWhatsThis(text)
 
     def _apply_all_tooltips(self):
-        for key, (label, widget) in self._field_rows.items():
-            tooltip = self.TOOLTIP_MAP.get(key, "Ustawienie kamery wpływające na działanie detekcji, podglądu lub nagrywania.")
-            label.setToolTip(tooltip)
-            widget.setToolTip(tooltip)
-            label.setWhatsThis(tooltip)
-            widget.setWhatsThis(tooltip)
+        for key, (label, input_widget) in self._field_rows.items():
+            self._apply_field_tooltip(key, label, input_widget)
+
+    def _register_focus_help(self, key: str, widget):
+        if widget is None:
+            return
+        self._focus_help_widgets[widget] = key
+        widget.installEventFilter(self)
+
+    def _set_help_panel_text(self, key: str):
+        if not hasattr(self, "help_panel"):
+            return
+        self.help_panel.setPlainText(CAMERA_SETTING_TOOLTIPS.get(key, ""))
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.FocusIn:
+            key = self._focus_help_widgets.get(watched)
+            if key:
+                self._set_help_panel_text(key)
+        return super().eventFilter(watched, event)
 
     def _choose_path(self):
         initial_dir = self.path_edit.text() or str(DEFAULT_RECORD_PATH)
