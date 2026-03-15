@@ -45,55 +45,13 @@ from ..recordings import (
     RecordingMetadata,
     iter_catalog_entries,
     load_history_metadata,
+    thumbnail_candidates_for_entry,
 )
 from ..storage import remove_from_recordings_catalog
 
 
 def _thumbnail_candidates_for_entry(entry: RecordingMetadata) -> List[str]:
-    """Return possible thumbnail paths for a given recording entry."""
-
-    def _resolve(path: str) -> List[str]:
-        if not path:
-            return []
-        resolved: List[str] = [path]
-        if not os.path.isabs(path):
-            resolved.append(os.path.join(os.path.dirname(entry.filepath), path))
-        return [os.path.abspath(p) for p in resolved]
-
-    candidates: List[str] = []
-    explicit_thumb = entry.thumb_path or str(entry.extra.get("thumb", ""))
-    if explicit_thumb:
-        candidates.extend(_resolve(explicit_thumb))
-
-    base, _ext = os.path.splitext(entry.filepath)
-    for suffix in (".jpg", ".jpeg", ".JPG", ".JPEG"):
-        candidates.append(os.path.abspath(f"{base}{suffix}"))
-
-    for suffix in (".jpg", ".jpeg", ".JPG", ".JPEG"):
-        candidates.append(os.path.abspath(f"{entry.filepath}{suffix}"))
-
-    stem, ext = os.path.splitext(entry.filepath)
-    for replacement in (
-        "_thumb.jpg",
-        "_thumb.jpeg",
-        "_preview.jpg",
-        "_preview.jpeg",
-        "_THUMB.JPG",
-        "_THUMB.JPEG",
-        "_PREVIEW.JPG",
-        "_PREVIEW.JPEG",
-    ):
-        if ext:
-            candidates.append(os.path.abspath(f"{stem}{replacement}"))
-
-    seen: set[str] = set()
-    ordered: List[str] = []
-    for candidate in candidates:
-        if not candidate or candidate in seen:
-            continue
-        seen.add(candidate)
-        ordered.append(candidate)
-    return ordered
+    return thumbnail_candidates_for_entry(entry)
 
 
 class ThumbnailWorker(QObject, QRunnable):

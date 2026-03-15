@@ -154,6 +154,10 @@ def build_recording_sidecar_metadata(
     thumbnail_mode: str,
     inference_count: int,
     positive_detection_count: int,
+    record_start_mode: str = "detection_first",
+    min_record_seconds: int = 0,
+    required_hits_to_start_recording: int = 1,
+    required_misses_to_end_detection: int = 1,
 ) -> Dict[str, object]:
     """Build backward-compatible recording metadata payload."""
     return {
@@ -175,6 +179,10 @@ def build_recording_sidecar_metadata(
         "dropped_frames": int(dropped_frames),
         "inference_count": int(inference_count),
         "positive_detection_count": int(positive_detection_count),
+        "record_start_mode": record_start_mode,
+        "min_record_seconds": int(min_record_seconds),
+        "required_hits_to_start_recording": int(required_hits_to_start_recording),
+        "required_misses_to_end_detection": int(required_misses_to_end_detection),
     }
 
 
@@ -254,6 +262,53 @@ def build_recording_metadata(
         thumb_path=str(info.get("thumb", "")),
         extra={k: v for k, v in info.items() if k not in {"camera", "label", "confidence", "time", "thumb", "timestamp"}},
     )
+
+
+def thumbnail_candidates_for_entry(entry: RecordingMetadata) -> List[str]:
+    """Return possible thumbnail paths for a given recording entry."""
+
+    def _resolve(path: str) -> List[str]:
+        if not path:
+            return []
+        resolved: List[str] = [path]
+        if not os.path.isabs(path):
+            resolved.append(os.path.join(os.path.dirname(entry.filepath), path))
+        return [os.path.abspath(p) for p in resolved]
+
+    candidates: List[str] = []
+    explicit_thumb = entry.thumb_path or str(entry.extra.get("thumb", ""))
+    if explicit_thumb:
+        candidates.extend(_resolve(explicit_thumb))
+
+    base, _ext = os.path.splitext(entry.filepath)
+    for suffix in (".jpg", ".jpeg", ".JPG", ".JPEG"):
+        candidates.append(os.path.abspath(f"{base}{suffix}"))
+
+    for suffix in (".jpg", ".jpeg", ".JPG", ".JPEG"):
+        candidates.append(os.path.abspath(f"{entry.filepath}{suffix}"))
+
+    stem, ext = os.path.splitext(entry.filepath)
+    for replacement in (
+        "_thumb.jpg",
+        "_thumb.jpeg",
+        "_preview.jpg",
+        "_preview.jpeg",
+        "_THUMB.JPG",
+        "_THUMB.JPEG",
+        "_PREVIEW.JPG",
+        "_PREVIEW.JPEG",
+    ):
+        if ext:
+            candidates.append(os.path.abspath(f"{stem}{replacement}"))
+
+    seen: set[str] = set()
+    ordered: List[str] = []
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        ordered.append(candidate)
+    return ordered
 
 
 def iter_catalog_entries(

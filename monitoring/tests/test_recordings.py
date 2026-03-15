@@ -5,6 +5,11 @@ import os
 import sys
 from pathlib import Path
 
+import types
+
+if "cv2" not in sys.modules:
+    sys.modules["cv2"] = types.SimpleNamespace()
+
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from monitoring.recordings import (
@@ -13,6 +18,8 @@ from monitoring.recordings import (
     load_history_metadata,
     build_recording_sidecar_metadata,
 )
+from monitoring.runtime_helpers import compute_effective_writer_fps
+from monitoring.recordings import thumbnail_candidates_for_entry
 
 
 def test_build_recording_metadata_merges_sources(tmp_path):
@@ -49,6 +56,24 @@ def test_build_recording_metadata_merges_sources(tmp_path):
     assert metadata.display_time == "2024-01-02 03:04:05"
     assert metadata.timestamp == 123.0
     assert metadata.extra.get("custom") == "value"
+
+
+def test_build_recording_metadata_preserves_extended_fields(tmp_path):
+    root = tmp_path / "Cam1"
+    root.mkdir()
+    video = root / "clip_20240102_030405.mp4"
+    video.write_bytes(b"")
+    video.with_suffix(".mp4.json").write_text(
+        json.dumps({"writer_fps": 5.0, "source_fps": 25.0, "thumbnail_mode": "best_detection", "frames_written": 12}),
+        encoding="utf-8",
+    )
+
+    metadata = build_recording_metadata(str(video), [("Cam1", str(root))])
+
+    assert metadata.extra["writer_fps"] == 5.0
+    assert metadata.extra["source_fps"] == 25.0
+    assert metadata.extra["thumbnail_mode"] == "best_detection"
+    assert metadata.extra["frames_written"] == 12
 
 
 def test_camera_name_for_path_handles_unknown(tmp_path):
@@ -107,3 +132,34 @@ def test_build_recording_sidecar_metadata_contains_reliability_fields():
     assert payload["writer_fps"] == 5.0
     assert payload["thumbnail_mode"] == "first_detection"
     assert payload["frames_written"] == 12
+
+
+def test_thumbnail_candidates_prefer_explicit_thumb_path(tmp_path):
+    video = tmp_path / "x.mp4"
+    video.write_bytes(b"")
+    explicit = tmp_path / "explicit.jpg"
+    explicit.write_bytes(b"x")
+    metadata = build_recording_metadata(str(video), [("cam", str(tmp_path))], overrides={"thumb": str(explicit)})
+
+    candidates = thumbnail_candidates_for_entry(metadata)
+
+    assert candidates[0] == str(explicit.resolve())
+    assert str((tmp_path / "x.jpg").resolve()) in candidates
+
+
+def test_effective_writer_fps_helper():
+    assert compute_effective_writer_fps(5, 3.0, 25.0) == 5.0
+    assert compute_effective_writer_fps(0, 3.0, 25.0) == 3.0
+
+
+def test_old_metadata_without_new_fields_still_loads(tmp_path):
+    root = tmp_path / "Cam1"
+    root.mkdir()
+    video = root / "alert_20240102_030405.mp4"
+    video.write_bytes(b"")
+    video.with_suffix(".mp4.json").write_text(json.dumps({"label": "person", "time": "2024-01-02 03:04:05"}), encoding="utf-8")
+
+    metadata = build_recording_metadata(str(video), [("Cam1", str(root))])
+
+    assert metadata.label == "person"
+    assert metadata.display_time == "2024-01-02 03:04:05"
