@@ -108,6 +108,12 @@ Dialog „Nagrania” skanuje katalogi nagrań w tle, buduje listę plików MP4 
 ### Odtwarzacz nagrań
 Podwójne kliknięcie nagrania otwiera odtwarzacz z kontrolkami transportu, przełączaniem między plikami, zrzutem klatki i trybem pełnoekranowym.
 
+### Ustawienia kamery i opisy pól
+* Dialog ustawień kamery ma teraz komplet szczegółowych podpowiedzi (hover) dla wszystkich pól konfiguracyjnych.
+* Opisy wyjaśniają wpływ parametrów na detekcję, nagrywanie, wydajność GUI/CPU/GPU oraz stabilność logiki zdarzeń.
+* Ustawienia runtime są stosowane od razu tam, gdzie to możliwe, bez restartu całej aplikacji.
+* Tylko ustawienia krytyczne dla strumienia (np. źródło, typ lub model) powodują automatyczny restart wyłącznie zmienionej kamery.
+
 ## Detekcja i nagrywanie
 `CameraWorker` uruchamia strumień `degirum_tools.predict_stream`, nakłada ramki na obraz (tylko dla klas z `visible_classes`), generuje alerty/nagrania dla klas z `record_classes` i pilnuje harmonogramu `detection_hours`. Przed rozpoczęciem nagrywania utrzymywany jest bufor klatek z ostatnich `pre_seconds`, a po ustaniu detekcji nagranie trwa jeszcze `post_seconds`. Metadane (`.json`) i miniatury (`.jpg`) są zapisywane obok pliku MP4 oraz dopisywane do katalogu `recordings_catalog.json`.
 
