@@ -87,7 +87,9 @@ class AlertMemory:
             "label": alert_meta.get("label", ""),
             "confidence": float(alert_meta.get("confidence", 0.0)),
             "time": alert_meta.get("time", ""),
+            "timestamp": alert_meta.get("timestamp", ""),
             "filepath": alert_meta.get("filepath", ""),
+            "file": alert_meta.get("file", alert_meta.get("filepath", "")),
             "thumb": alert_meta.get("thumb", ""),
         }
         self.items.append(slim)

@@ -38,7 +38,7 @@ def test_normalise_catalog_entry_uses_project_root(tmp_path, monkeypatch):
     assert entries[0]["filepath"] == str((tmp_path / "relative" / "video.mp4").resolve())
 
 
-def test_fill_camera_defaults_maps_legacy_confidence():
+def test_config_backward_compat_threshold_mapping():
     from monitoring import config
 
     camera = {"name": "Cam", "confidence_threshold": 0.67}
@@ -47,3 +47,13 @@ def test_fill_camera_defaults_maps_legacy_confidence():
     assert updated["confidence_threshold_draw"] == 0.67
     assert updated["confidence_threshold_record"] == 0.67
     assert updated["thumbnail_mode"] == "first_detection"
+
+
+def test_fill_camera_defaults_adds_reliability_defaults():
+    from monitoring import config
+
+    camera = {"name": "Cam"}
+    updated = config.fill_camera_defaults(camera)
+
+    assert updated["required_misses_to_end_detection"] == 1
+    assert updated["min_record_seconds"] == 3

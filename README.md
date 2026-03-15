@@ -258,3 +258,32 @@ Provides low-overhead visibility for profiling and diagnosing bottlenecks in pro
 - **Why:** Rich metadata is required for reliable browsing, diagnostics, and backward-compatible catalog parsing.
 - **Modified file(s):** `monitoring/recordings.py`, `monitoring/storage.py`, `monitoring/workers.py`.
 - **Before / After:** Before metadata was minimal; after each event has enough context to debug recording cadence and detection behavior while old entries still load.
+
+### Detection reliability tuning (phase 2)
+- **Old behavior:** one threshold and frame-counter-based stop logic.
+- **New behavior:** independent `confidence_threshold_draw` and `confidence_threshold_record`, start/stop stabilization (`required_hits_to_start_recording`, `required_misses_to_end_detection`), and minimum clip duration (`min_record_seconds`).
+- **Practical effect:** fewer false starts/stops and easier tuning for noisy scenes.
+- **Files:** `monitoring/config.py`, `monitoring/app.py`, `monitoring/workers.py`.
+
+### Recording start policy
+- **Old behavior:** prerecord was always written before the event frame.
+- **New behavior:** configurable `record_start_mode`:
+  - `detection_first` (default): event frame starts the clip.
+  - `include_prerecord_first`: legacy prerecord-first behavior.
+- **Practical effect:** browser metadata/poster remains event-first while prerecord is still optionally available.
+- **Files:** `monitoring/config.py`, `monitoring/workers.py`, `monitoring/app.py`.
+
+### New camera settings and backward compatibility
+New per-camera keys in `config.json`:
+- `confidence_threshold_draw`
+- `confidence_threshold_record`
+- `required_hits_to_start_recording`
+- `required_misses_to_end_detection`
+- `min_record_seconds`
+- `thumbnail_mode` (`first_detection`, `best_detection`, `first_frame`)
+- `record_start_mode` (`detection_first`, `include_prerecord_first`)
+
+Backward compatibility:
+- legacy `confidence_threshold` is still accepted,
+- if split thresholds are missing they are auto-filled from legacy threshold,
+- old recording metadata/catalog entries still load.
