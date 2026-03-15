@@ -14,9 +14,12 @@ sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from monitoring.recordings import (
     build_recording_metadata,
-    camera_name_for_path,
-    load_history_metadata,
     build_recording_sidecar_metadata,
+    camera_name_for_path,
+    default_filter_bounds,
+    load_history_metadata,
+    load_recording_entries,
+    merge_recording_entries,
 )
 from monitoring.runtime_helpers import compute_effective_writer_fps
 from monitoring.recordings import thumbnail_candidates_for_entry
@@ -230,3 +233,79 @@ def test_metadata_preserves_phase4_diagnostics_fields():
     assert payload["overload_degraded_at_start"] is True
     assert payload["effective_detect_fps"] == 2.8
     assert payload["preview_frames_dropped"] == 33
+
+
+def test_load_recording_entries_uses_catalog_when_available(tmp_path, monkeypatch):
+    cam = tmp_path / "Cam1"
+    cam.mkdir()
+    mp4 = cam / "a_20240101_010101.mp4"
+    mp4.write_bytes(b"x")
+
+    monkeypatch.setattr("monitoring.recordings.iter_catalog_entries", lambda *_a, **_k: [build_recording_metadata(str(mp4), [("Cam1", str(cam))])])
+    monkeypatch.setattr("monitoring.recordings.discover_recordings", lambda *_a, **_k: [])
+
+    entries, diag = load_recording_entries([("Cam1", str(cam))], [])
+    assert len(entries) == 1
+    assert entries[0].filepath == str(mp4.resolve())
+    assert diag["used_disk_fallback"] is False
+
+
+def test_load_recording_entries_falls_back_to_disk_scan(tmp_path, monkeypatch):
+    cam = tmp_path / "Cam1"
+    cam.mkdir()
+    mp4 = cam / "b_20240101_010101.mp4"
+    mp4.write_bytes(b"x")
+
+    monkeypatch.setattr("monitoring.recordings.iter_catalog_entries", lambda *_a, **_k: [])
+    monkeypatch.setattr("monitoring.recordings.discover_recordings", lambda *_a, **_k: [build_recording_metadata(str(mp4), [("Cam1", str(cam))])])
+
+    entries, diag = load_recording_entries([("Cam1", str(cam))], [])
+    assert len(entries) == 1
+    assert diag["used_disk_fallback"] is True
+
+
+def test_load_recording_entries_deduplicates_catalog_and_disk_entries(tmp_path):
+    cam = tmp_path / "Cam1"
+    cam.mkdir()
+    mp4 = cam / "c_20240101_010101.mp4"
+    mp4.write_bytes(b"x")
+    catalog_entry = build_recording_metadata(str(mp4), [("Cam1", str(cam))], overrides={"label": "person"})
+    disk_entry = build_recording_metadata(str(mp4), [("Cam1", str(cam))], overrides={"label": "car"})
+
+    merged, disk_only = merge_recording_entries([catalog_entry], [disk_entry])
+    assert len(merged) == 1
+    assert disk_only == []
+    assert merged[0].label == "person"
+
+
+def test_default_filter_range_does_not_hide_old_recordings(tmp_path):
+    cam = tmp_path / "Cam1"
+    cam.mkdir()
+    old = cam / "x_20220101_010101.mp4"
+    new = cam / "x_20250101_010101.mp4"
+    old.write_bytes(b"x")
+    new.write_bytes(b"x")
+    entries = [
+        build_recording_metadata(str(old), [("Cam1", str(cam))]),
+        build_recording_metadata(str(new), [("Cam1", str(cam))]),
+    ]
+    dfrom, dto = default_filter_bounds(entries)
+    assert dfrom.year <= 2022
+    assert dto.year >= 2025
+
+
+def test_missing_catalog_entries_can_be_recovered_from_disk(tmp_path, monkeypatch):
+    cam = tmp_path / "Cam1"
+    cam.mkdir()
+    mp4 = cam / "d_20240101_010101.mp4"
+    mp4.write_bytes(b"x")
+
+    healed: list[dict] = []
+    monkeypatch.setattr("monitoring.recordings.iter_catalog_entries", lambda *_a, **_k: [])
+    monkeypatch.setattr("monitoring.recordings.discover_recordings", lambda *_a, **_k: [build_recording_metadata(str(mp4), [("Cam1", str(cam))])])
+    monkeypatch.setattr("monitoring.recordings.update_recordings_catalog", lambda payload: healed.append(payload))
+
+    entries, _ = load_recording_entries([("Cam1", str(cam))], [], heal_catalog=True)
+    assert len(entries) == 1
+    assert len(healed) == 1
+    assert healed[0]["filepath"] == str(mp4.resolve())

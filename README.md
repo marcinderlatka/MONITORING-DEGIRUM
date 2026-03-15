@@ -359,3 +359,46 @@ Phase 3 rozszerza pipeline o mechanizmy odporności i diagnostyki bez usuwania i
 - `overload_reduce_thumb_preview_fps: 1`
 - `overload_reduce_detect_fps_factor: 0.75`
 - `overload_disable_nonessential_overlays: true`
+
+## Recordings Browser Reliability and Tile View
+
+### Reliable loading from catalog and disk
+- **Old behavior:** browser primarily trusted `recordings_catalog.json`; stale or partial catalog could make recordings disappear.
+- **New behavior:** loading is now three-stage: catalog read, disk fallback scan, and merge/dedup by absolute filepath with newest-first sorting.
+- **Practical effect:** recordings are visible even when catalog is incomplete/corrupted or some catalog paths are stale.
+- **Changed files:** `monitoring/recordings.py`, `monitoring/widgets/recordings_browser.py`.
+
+### Default broad date filters
+- **Old behavior:** default date range was limited (last day), often hiding valid older recordings.
+- **New behavior:** default date bounds are derived from loaded data (`min..max` available date), with fallback to broad last-30-days range when empty.
+- **Practical effect:** opening browser shows all available recordings by default.
+- **Changed files:** `monitoring/recordings.py`, `monitoring/widgets/recordings_browser.py`.
+
+### Tile/card browser
+- **Old behavior:** recordings view defaulted to table/list.
+- **New behavior:** default mode is **Kafelki** (tile cards with thumbnail + metadata); optional **Lista** mode remains for diagnostics.
+- **Practical effect:** faster visual browsing while preserving sortable tabular diagnostics.
+- **Changed files:** `monitoring/widgets/recordings_browser.py`.
+
+### Safe thumbnail loading
+- **Old behavior:** thumbnail loading path could construct/use `QPixmap` in worker context and relied on noisy prints.
+- **New behavior:** worker decodes thumbnail/video frame to `QImage`; GUI thread converts to `QPixmap` and applies cache by absolute filepath.
+- **Practical effect:** thread-safe, non-blocking thumbnail refresh with less UI fragility.
+- **Changed files:** `monitoring/widgets/recordings_browser.py`.
+
+### Empty states and self-healing catalog
+- **Old behavior:** empty UI gave little guidance, and catalog omissions were not repaired.
+- **New behavior:** browser shows explicit empty-state diagnostics (no recordings, filters hide items, missing directories, disk fallback used). Disk-only files are optionally appended to catalog safely.
+- **Practical effect:** clearer operator feedback and automatic recovery of missing catalog entries.
+- **Changed files:** `monitoring/recordings.py`, `monitoring/widgets/recordings_browser.py`, `monitoring/storage.py`.
+
+### Recording start mode semantics
+- **Old behavior:** `include_prerecord_first` name did not match write order in runtime.
+- **New behavior:** `include_prerecord_first` now truly writes prerecord buffer frames before detection frame; `detection_first` remains default.
+- **Practical effect:** metadata/config semantics match actual clip ordering.
+- **Changed files:** `monitoring/workers.py`, `monitoring/tests/test_workers.py`.
+
+Additional notes:
+- Tile view is now the default browser mode.
+- List view remains available as a secondary mode.
+- Browser can recover and show recordings directly from disk when catalog data is stale.
