@@ -402,3 +402,14 @@ Additional notes:
 - Tile view is now the default browser mode.
 - List view remains available as a secondary mode.
 - Browser can recover and show recordings directly from disk when catalog data is stale.
+
+## Live Camera Settings and Detailed Tooltips
+
+- Po zapisaniu ustawień pojedynczej kamery aplikacja natychmiast zapisuje je do konfiguracji i próbuje zastosować „na żywo” bez restartu, kiedy dotyczy to pól bezpiecznych runtime (np. progi confidence, klasy, harmonogram, nagrywanie, pre/post, preview FPS).
+- Dla zmian krytycznych dla strumienia (np. RTSP/source, typ źródła, model) wykonywany jest automatyczny restart **tylko tej jednej kamery** — bez restartu całej aplikacji i bez wpływu na pozostałe kamery.
+- Po zapisie użytkownik dostaje czytelne potwierdzenie (status + komunikat), czy zmiany:
+  - zastosowano live bez restartu,
+  - wymagały i wykonały automatyczny restart tej kamery,
+  - zostały tylko zapisane (kamera była zatrzymana).
+- Dialog ustawień kamery zawiera teraz szczegółowe opisy (tooltip/what's this) dla wszystkich pól konfiguracyjnych; opisy pojawiają się zarówno po najechaniu etykiety, jak i kontrolki.
+- Zachowana jest kompatybilność ze starszym `config.json`, w tym polem legacy `confidence_threshold` mapowanym do nowych progów rysowania/nagrywania.

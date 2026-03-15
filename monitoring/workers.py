@@ -375,6 +375,64 @@ class CameraWorker(QThread):
         self.detection_hours = str(hours or "").strip() or "00:00-23:59"
         self.camera["detection_hours"] = self.detection_hours
 
+    def apply_runtime_settings(self, camera_config: dict) -> None:
+        """Apply runtime-safe camera settings without restarting worker thread."""
+        legacy_conf = float(camera_config.get("confidence_threshold", self.confidence_threshold_record))
+        self.set_fps(int(camera_config.get("fps", self.fps)))
+        self.rtsp_fps = int(camera_config.get("rtsp_fps", self.rtsp_fps))
+        self.camera["rtsp_fps"] = self.rtsp_fps
+        self.confidence_threshold = legacy_conf
+        self.confidence_threshold_draw = float(camera_config.get("confidence_threshold_draw", legacy_conf))
+        self.confidence_threshold_record = float(camera_config.get("confidence_threshold_record", legacy_conf))
+        self.camera["confidence_threshold"] = legacy_conf
+        self.camera["confidence_threshold_draw"] = self.confidence_threshold_draw
+        self.camera["confidence_threshold_record"] = self.confidence_threshold_record
+
+        self.set_draw_overlays(camera_config.get("draw_overlays", self.draw_overlays))
+        self.set_enable_detection(camera_config.get("enable_detection", self.enable_detection))
+        self.set_enable_recording(camera_config.get("enable_recording", self.enable_recording))
+        self.set_detection_schedule(camera_config.get("detection_hours", self.detection_hours))
+
+        self.visible_classes = list(camera_config.get("visible_classes", self.visible_classes))
+        self.record_classes = list(camera_config.get("record_classes", self.record_classes))
+        self.camera["visible_classes"] = list(self.visible_classes)
+        self.camera["record_classes"] = list(self.record_classes)
+        self.refresh_class_filters()
+
+        self.pre_seconds = int(camera_config.get("pre_seconds", self.pre_seconds))
+        self.lost_seconds = int(camera_config.get("lost_seconds", self.lost_seconds))
+        self.post_seconds = int(camera_config.get("post_seconds", self.post_seconds))
+        self.required_hits_to_start_recording = int(camera_config.get("required_hits_to_start_recording", self.required_hits_to_start_recording))
+        self.required_misses_to_end_detection = int(camera_config.get("required_misses_to_end_detection", self.required_misses_to_end_detection))
+        self.min_record_seconds = int(camera_config.get("min_record_seconds", self.min_record_seconds))
+        self.thumbnail_mode = str(camera_config.get("thumbnail_mode", self.thumbnail_mode))
+        self.record_start_mode = str(camera_config.get("record_start_mode", self.record_start_mode))
+
+        self.preview_fps_main = float(camera_config.get("preview_fps_main", self.preview_fps_main))
+        self.preview_fps_thumb = float(camera_config.get("preview_fps_thumb", self.preview_fps_thumb))
+        self.preview_pause_when_hidden = bool(camera_config.get("preview_pause_when_hidden", self.preview_pause_when_hidden))
+        self.camera["preview_fps_main"] = self.preview_fps_main
+        self.camera["preview_fps_thumb"] = self.preview_fps_thumb
+        self.camera["preview_pause_when_hidden"] = self.preview_pause_when_hidden
+
+        self.camera["pre_seconds"] = self.pre_seconds
+        self.camera["lost_seconds"] = self.lost_seconds
+        self.camera["post_seconds"] = self.post_seconds
+        self.camera["required_hits_to_start_recording"] = self.required_hits_to_start_recording
+        self.camera["required_misses_to_end_detection"] = self.required_misses_to_end_detection
+        self.camera["min_record_seconds"] = self.min_record_seconds
+        self.camera["thumbnail_mode"] = self.thumbnail_mode
+        self.camera["record_start_mode"] = self.record_start_mode
+
+        record_base = camera_config.get("record_path", self.camera.get("record_path", DEFAULT_RECORD_PATH))
+        self.camera["record_path"] = str(record_base)
+        self.output_dir = str(os.path.join(str(record_base), camera_config.get("name", self.camera.get("name", "camera"))))
+        os.makedirs(self.output_dir, exist_ok=True)
+
+        buffer_fps = self._get_prerecord_buffer_fps_basis()
+        self.prerecord_buffer = deque(self.prerecord_buffer, maxlen=max(1, int(self.pre_seconds * max(1.0, buffer_fps))))
+        self.camera.update(camera_config)
+
     def _is_within_schedule(self) -> bool:
         try:
             now = datetime.datetime.now().time()
