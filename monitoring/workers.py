@@ -255,6 +255,7 @@ class CameraWorker(QThread):
         self.record_thread: RecordingThread | None = None
         self.output_file: str | None = None
         self.stop_signal = False
+        self._current_stream = None
         self.record_lock = Lock()
         self.prerecord_buffer = deque(maxlen=max(1, int(self.pre_seconds * max(1, self.fps))))
 
@@ -782,6 +783,7 @@ class CameraWorker(QThread):
                 self.status_signal.emit("Łączenie…", self.index)
                 self.state.stream_start_ts = time.monotonic()
                 with degirum_tools.open_video_stream(src) as stream:
+                    self._current_stream = stream
                     stream_fps = float(stream.get(cv2.CAP_PROP_FPS) or 0.0)
                     if stream_fps <= 1e-2:
                         stream_fps = 30.0
@@ -854,6 +856,7 @@ class CameraWorker(QThread):
                         self._maybe_emit_heartbeat()
 
             except Exception as exc:  # pragma: no cover
+                self._current_stream = None
                 self._handle_stream_failure(exc)
                 if self.error_counter > 10:
                     QThread.msleep(2000)
@@ -861,17 +864,21 @@ class CameraWorker(QThread):
 
             if self.recording:
                 self._finalize_recording_session()
+            self._current_stream = None
             if self.stop_signal:
                 break
             QThread.msleep(300)
 
-    def stop(self) -> None:
+    def stop(self, timeout_ms: int = 3500) -> bool:
         self.stop_signal = True
         if self.recording:
             self._finalize_recording_session()
-        self.wait(3000)
-        if self.isRunning():
-            print(f"CameraWorker {self.camera.get('name', self.index)} did not stop in time")
+        stream = self._current_stream
+        if stream is not None:
+            with suppress(Exception):
+                stream.release()
+        self.wait(timeout_ms)
+        return not self.isRunning()
 
 
 __all__ = [

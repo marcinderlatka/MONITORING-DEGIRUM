@@ -419,3 +419,47 @@ Additional notes:
   - zostały tylko zapisane (kamera była zatrzymana).
 - Dialog ustawień kamery zawiera teraz szczegółowe opisy (tooltip/what's this) dla wszystkich pól konfiguracyjnych; opisy pojawiają się zarówno po najechaniu etykiety, jak i kontrolki.
 - Zachowana jest kompatybilność ze starszym `config.json`, w tym polem legacy `confidence_threshold` mapowanym do nowych progów rysowania/nagrywania.
+
+## UX refinement pass (alerty, nagrania, ustawienia, HUD, stop kamery)
+
+### 1) Szerokie miniatury alertów
+- **Stare zachowanie:** panel alertów był wąski, miniatury wyglądały na małe i niemal kwadratowe.
+- **Nowe zachowanie:** panel alertów został poszerzony, a miniatura alertu skaluje się proporcjonalnie do szerokości karty (16:9), prawie na pełną szerokość.
+- **Efekt praktyczny:** podgląd detekcji jest czytelniejszy i szybciej można ocenić kontekst zdarzenia.
+- **Pliki:** `monitoring/widgets/alerts.py`.
+
+### 2) Przeglądarka nagrań – kafelki z działającymi JPG
+- **Stare zachowanie:** nagrania ładowały się poprawnie, ale miniatury na kafelkach bywały puste.
+- **Nowe zachowanie:** domyślny widok kafelków ma większe karty; loader miniatur najpierw próbuje bezpośrednio wczytać JPG (QImage), potem fallback do OpenCV i dopiero potem klatkę z MP4.
+- **Efekt praktyczny:** jeśli plik JPG istnieje, miniatura jest widoczna na karcie; użytkownik nie widzi pustych pól.
+- **Pliki:** `monitoring/widgets/recordings_browser.py`, `monitoring/recordings.py`.
+
+### 3) Duże, poziome okno ustawień kamery
+- **Stare zachowanie:** pionowy, stosunkowo wąski dialog utrudniał wygodną edycję wielu pól.
+- **Nowe zachowanie:** dialog otwiera się na ~90% szerokości i ~86% wysokości ekranu; pola są rozłożone w trzech kolumnach z zachowaniem wszystkich dotychczasowych opcji.
+- **Efekt praktyczny:** szybsza konfiguracja i lepsza czytelność przy dużej liczbie parametrów.
+- **Pliki:** `monitoring/app.py`.
+
+### 4) Scalony HUD informacji o kamerze na obrazie
+- **Stare zachowanie:** status był rozdzielony między panel pod obrazem i górny overlay tekstowy.
+- **Nowe zachowanie:** informacje są scalone do jednego HUD na obrazie (prawy dolny róg), biały tekst na półprzezroczystym (50%) czarnym tle.
+- **Efekt praktyczny:** kluczowe dane (status, FPS, kolejka, dropy, flagi REC/DET/ERR/DEG) są w jednym miejscu bez dublowania.
+- **Pliki:** `monitoring/app.py`.
+
+### 5) Ustawienie ukrywania HUD
+- **Stare zachowanie:** brak dedykowanego przełącznika dla scalonego okna informacji.
+- **Nowe zachowanie:** dodano `show_camera_info_overlay` (domyślnie `true`) jako ustawienie kamery z opisem tooltip.
+- **Efekt praktyczny:** użytkownik może ukryć overlay bez wyłączania detekcji i nagrywania.
+- **Pliki:** `monitoring/config.py`, `monitoring/app.py`.
+
+### 6) Stabilniejsze zatrzymywanie pojedynczej kamery
+- **Stare zachowanie:** stop bywał niepewny i zostawiał niespójny stan UI.
+- **Nowe zachowanie:** worker zatrzymuje się kooperacyjnie, kończy zapis nagrania, próbuje zwolnić strumień i zwraca wynik stop; UI czyści stan klatki/FPS/statusu i odświeża wskaźniki.
+- **Efekt praktyczny:** kamera zatrzymuje się bez potrzeby restartu całej aplikacji.
+- **Pliki:** `monitoring/workers.py`, `monitoring/app.py`.
+
+### 7) Zapis ustawień – natychmiastowe zastosowanie + potwierdzenie
+- **Stare zachowanie:** część zmian była stosowana, ale UX po zapisie był niespójny.
+- **Nowe zachowanie:** zachowano podział na zmiany live/restart i komunikaty potwierdzające po zapisie.
+- **Efekt praktyczny:** użytkownik otrzymuje jasny komunikat czy zmiany weszły bez restartu, po auto-restarcie kamery, czy tylko zapisano konfigurację.
+- **Pliki:** `monitoring/app.py`, `monitoring/workers.py`.

@@ -7,7 +7,7 @@ from typing import Dict, List, Mapping, Sequence
 import cv2
 import numpy as np
 from PyQt5.QtCore import QDate, QObject, QPoint, QRunnable, QSize, Qt, QThreadPool, pyqtSignal
-from PyQt5.QtGui import QImage, QPalette, QPixmap, QColor
+from PyQt5.QtGui import QImage, QPalette, QPixmap, QColor, QPainter
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -56,10 +56,13 @@ class ThumbnailWorker(QObject, QRunnable):
         for candidate in thumbnail_candidates_for_entry(self._entry):
             if not os.path.exists(candidate):
                 continue
-            image = cv2.imread(candidate, cv2.IMREAD_COLOR)
-            if image is None:
+            image = QImage(candidate)
+            if not image.isNull():
+                return image
+            cv_img = cv2.imread(candidate, cv2.IMREAD_COLOR)
+            if cv_img is None:
                 continue
-            return self._qimage_from_bgr(image)
+            return self._qimage_from_bgr(cv_img)
 
         if os.path.exists(self._entry.filepath):
             cap = cv2.VideoCapture(self._entry.filepath)
@@ -133,7 +136,7 @@ class RecordingsBrowserDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Nagrania – przeglądarka")
         self.resize(1280, 760)
-        self._thumb_size = QSize(240, 160)
+        self._thumb_size = QSize(320, 180)
         self._camera_dirs = list(camera_dirs)
         self._history_path = str(history_path)
         self._history_items = [dict(item) for item in history_items] if history_items is not None else None
@@ -240,7 +243,7 @@ class RecordingsBrowserDialog(QDialog):
         self.tile_list.setResizeMode(QListWidget.Adjust)
         self.tile_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.tile_list.setSpacing(12)
-        self.tile_list.setGridSize(QSize(280, 290))
+        self.tile_list.setGridSize(QSize(360, 330))
         self.tile_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tile_list.customContextMenuRequested.connect(self._context_menu)
         self.tile_list.itemSelectionChanged.connect(self._sync_card_selection_state)
@@ -334,7 +337,7 @@ class RecordingsBrowserDialog(QDialog):
         self._rebuild_tile_view(self._filtered_entries)
         self._rebuild_table_view(self._filtered_entries)
         self._update_empty_state()
-        self.status_label.setText(f"Wczytano {len(self._entries)} nagrań, widoczne: {len(self._filtered_entries)}")
+        self.status_label.setText(f"Wczytano {len(self._entries)} nagrań, widoczne {len(self._filtered_entries)}")
 
     def _rebuild_tile_view(self, entries: Sequence[RecordingMetadata]) -> None:
         self.tile_list.clear()
@@ -345,7 +348,7 @@ class RecordingsBrowserDialog(QDialog):
             item.setData(Qt.UserRole, entry.filepath)
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable | Qt.ItemIsEnabled)
             item.setCheckState(Qt.Unchecked)
-            item.setSizeHint(QSize(270, 280))
+            item.setSizeHint(QSize(350, 320))
             self.tile_list.addItem(item)
             card = RecordingCardWidget(entry, self._thumb_size)
             card.set_thumbnail(self._placeholder_pixmap())
@@ -431,6 +434,12 @@ class RecordingsBrowserDialog(QDialog):
     def _placeholder_pixmap(self) -> QPixmap:
         pix = QPixmap(self._thumb_size)
         pix.fill(QColor("#e9edf3"))
+        painter = QPainter(pix)
+        try:
+            painter.setPen(QColor("#6b7280"))
+            painter.drawText(pix.rect(), Qt.AlignCenter, "Ładowanie miniatury...")
+        finally:
+            painter.end()
         return pix
 
     def _switch_view(self, mode: str) -> None:
