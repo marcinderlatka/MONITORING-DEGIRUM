@@ -305,3 +305,57 @@ Phase 3 rozszerza pipeline o mechanizmy odporności i diagnostyki bez usuwania i
 - Bardziej naturalna analiza jakości nagrań dzięki metadanym czasu trwania i statystykom zdarzenia.
 - Czytelniejsze miniatury dla operatora (obiekt jest centralny i wyraźny).
 - Szybsze diagnozowanie przeciążeń (drop frame, kolejka nagrywarki, rozjazdy FPS) bez zaglądania do kodu.
+
+## Scalable Multi-Camera Architecture Improvements
+
+### Preview rate limiting by camera role
+- **Old behavior:** all workers emitted preview frames at similar cadence.
+- **New behavior:** workers now expose `preview_role` (`main`, `thumb`, `hidden`) with separate limits (`preview_fps_main`, `preview_fps_thumb`) and optional hidden pause.
+- **Benefit:** selected camera remains responsive while non-selected cameras reduce GUI pressure.
+- **Files changed:** `monitoring/workers.py`, `monitoring/app.py`, `monitoring/config.py`.
+
+### Global overload protection
+- **Old behavior:** no centralized graceful degradation when many cameras were active.
+- **New behavior:** app-level overload mode monitors active cameras/GUI load and applies staged degradation (thumbnail FPS down first, slight detect-FPS reduction on non-priority cameras, optional nonessential overlay reduction).
+- **Benefit:** better stability under high camera count without silently disabling monitoring.
+- **Files changed:** `monitoring/app.py`, `monitoring/workers.py`, `monitoring/config.py`.
+
+### Fair inference scheduling
+- **Old behavior:** inference cadence was based primarily on last-run timing and could drift.
+- **New behavior:** workers keep monotonic `next_inference_due_ts` and advance it deterministically, tracking skipped cycles when behind.
+- **Benefit:** more predictable per-camera detection cadence and fairer scheduling.
+- **Files changed:** `monitoring/workers.py`.
+
+### Recording priority behavior
+- **Old behavior:** idle and recording cameras could be degraded similarly.
+- **New behavior:** recording cameras avoid extra detection throttling, remain prioritized, and expose status (`is_recording_active`, `is_overload_degraded`, `preview_role`) in heartbeats.
+- **Benefit:** recording correctness and responsiveness are preserved during overload.
+- **Files changed:** `monitoring/workers.py`, `monitoring/app.py`.
+
+### Overlay cost reduction
+- **Old behavior:** overlays could be drawn even for frames not emitted to preview.
+- **New behavior:** overlays are drawn only for preview frames that are emitted, while explicit event thumbnail overlay generation is preserved.
+- **Benefit:** lower per-frame CPU cost.
+- **Files changed:** `monitoring/workers.py`.
+
+### Staggered camera startup
+- **Old behavior:** all cameras started at once from `start_all`.
+- **New behavior:** `start_cameras_staggered(camera_names)` starts cameras with short `QTimer.singleShot` delays.
+- **Benefit:** reduced startup spikes in CPU/network/model init.
+- **Files changed:** `monitoring/app.py`.
+
+### Extended diagnostics metadata
+- **Old behavior:** metadata covered core recording values only.
+- **New behavior:** sidecar/catalog now include diagnostics fields such as `preview_role_at_start`, `overload_degraded_at_start`, `measured_capture_fps`, `effective_detect_fps`, `preview_frames_dropped`, `skipped_inference_cycles`.
+- **Benefit:** richer post-event diagnostics while preserving backward compatibility.
+- **Files changed:** `monitoring/workers.py`, `monitoring/recordings.py`, `monitoring/storage.py`, `monitoring/widgets/recordings_browser.py`.
+
+### New configuration keys (defaults)
+- `preview_fps_main: 15`
+- `preview_fps_thumb: 3`
+- `preview_pause_when_hidden: true`
+- `overload_protection_enabled: true`
+- `overload_camera_count_threshold: 6`
+- `overload_reduce_thumb_preview_fps: 1`
+- `overload_reduce_detect_fps_factor: 0.75`
+- `overload_disable_nonessential_overlays: true`

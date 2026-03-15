@@ -57,3 +57,26 @@ def test_fill_camera_defaults_adds_reliability_defaults():
 
     assert updated["required_misses_to_end_detection"] == 1
     assert updated["min_record_seconds"] == 3
+
+
+def test_preview_role_defaults_and_config_fill():
+    from monitoring import config
+
+    camera = {"name": "Cam"}
+    updated = config.fill_camera_defaults(camera)
+
+    assert updated["preview_fps_main"] == 15
+    assert updated["preview_fps_thumb"] == 3
+    assert updated["preview_pause_when_hidden"] is True
+
+
+def test_overload_config_backward_compat(tmp_path):
+    from monitoring.config import load_config
+
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text('{"cameras":[{"name":"c1","rtsp":"x"}]}', encoding="utf-8")
+    cfg = load_config(cfg_path)
+
+    assert cfg["overload_protection_enabled"] is True
+    assert cfg["overload_camera_count_threshold"] == 6
+    assert cfg["overload_reduce_thumb_preview_fps"] == 1

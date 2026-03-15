@@ -83,6 +83,14 @@ from .config import (
     DEFAULT_LOST_SECONDS,
     DEFAULT_MODEL,
     DEFAULT_POST_SECONDS,
+    DEFAULT_PREVIEW_FPS_MAIN,
+    DEFAULT_PREVIEW_FPS_THUMB,
+    DEFAULT_PREVIEW_PAUSE_WHEN_HIDDEN,
+    DEFAULT_OVERLOAD_PROTECTION_ENABLED,
+    DEFAULT_OVERLOAD_CAMERA_COUNT_THRESHOLD,
+    DEFAULT_OVERLOAD_REDUCE_THUMB_PREVIEW_FPS,
+    DEFAULT_OVERLOAD_REDUCE_DETECT_FPS_FACTOR,
+    DEFAULT_OVERLOAD_DISABLE_NONESSENTIAL_OVERLAYS,
     DEFAULT_PRE_SECONDS,
     DEFAULT_RECORD_PATH,
     DEFAULT_RECORD_START_MODE,
@@ -1152,8 +1160,18 @@ QToolButton:focus { outline: none; }
         self._last_error = {}
         self._last_fps_text = {}
         self._worker_diag: dict[str, dict[str, object]] = {}
+        self.worker_status: dict[str, dict[str, object]] = {}
         self.last_render_time = 0.0
         self._render_interval_s = 1 / 15
+        self.preview_fps_main = float(self.config.get("preview_fps_main", DEFAULT_PREVIEW_FPS_MAIN)) if hasattr(self, "config") else DEFAULT_PREVIEW_FPS_MAIN
+        self.preview_fps_thumb = float(self.config.get("preview_fps_thumb", DEFAULT_PREVIEW_FPS_THUMB)) if hasattr(self, "config") else DEFAULT_PREVIEW_FPS_THUMB
+        self.preview_pause_when_hidden = bool(self.config.get("preview_pause_when_hidden", DEFAULT_PREVIEW_PAUSE_WHEN_HIDDEN)) if hasattr(self, "config") else DEFAULT_PREVIEW_PAUSE_WHEN_HIDDEN
+        self.overload_protection_enabled = bool(self.config.get("overload_protection_enabled", DEFAULT_OVERLOAD_PROTECTION_ENABLED)) if hasattr(self, "config") else DEFAULT_OVERLOAD_PROTECTION_ENABLED
+        self.overload_camera_count_threshold = int(self.config.get("overload_camera_count_threshold", DEFAULT_OVERLOAD_CAMERA_COUNT_THRESHOLD)) if hasattr(self, "config") else DEFAULT_OVERLOAD_CAMERA_COUNT_THRESHOLD
+        self.overload_reduce_thumb_preview_fps = float(self.config.get("overload_reduce_thumb_preview_fps", DEFAULT_OVERLOAD_REDUCE_THUMB_PREVIEW_FPS)) if hasattr(self, "config") else DEFAULT_OVERLOAD_REDUCE_THUMB_PREVIEW_FPS
+        self.overload_reduce_detect_fps_factor = float(self.config.get("overload_reduce_detect_fps_factor", DEFAULT_OVERLOAD_REDUCE_DETECT_FPS_FACTOR)) if hasattr(self, "config") else DEFAULT_OVERLOAD_REDUCE_DETECT_FPS_FACTOR
+        self.overload_disable_nonessential_overlays = bool(self.config.get("overload_disable_nonessential_overlays", DEFAULT_OVERLOAD_DISABLE_NONESSENTIAL_OVERLAYS)) if hasattr(self, "config") else DEFAULT_OVERLOAD_DISABLE_NONESSENTIAL_OVERLAYS
+        self.overload_mode_active = False
 
         self.diag_panel = QLabel("Diagnostyka: brak danych")
         self.diag_panel.setStyleSheet("color: #dddddd; background: #111; padding: 8px; border: 1px solid #333;")
@@ -1370,6 +1388,67 @@ QToolButton:focus { outline: none; }
         self.log_window.add_entry("application", f"model załadowany: {model_name}")
         return model
 
+    def _apply_worker_preview_roles(self) -> None:
+        selected_idx = self.camera_list.currentRow()
+        for idx, worker in enumerate(self.workers):
+            if not isinstance(worker, CameraWorker):
+                continue
+            role = "main" if idx == selected_idx else "thumb"
+            worker.preview_fps_main = self.preview_fps_main
+            worker.preview_fps_thumb = self.preview_fps_thumb
+            worker.preview_pause_when_hidden = self.preview_pause_when_hidden
+            worker.set_preview_role(role)
+
+    def _evaluate_overload_mode(self) -> None:
+        active_workers = [w for w in self.workers if isinstance(w, CameraWorker) and w.isRunning()]
+        if not self.overload_protection_enabled:
+            overload_active = False
+        else:
+            active_count = len(active_workers)
+            recording_count = sum(1 for w in active_workers if w.recording)
+            gui_load = sum(max(0.0, float(st.get("stream_fps", 0.0))) for st in self.worker_status.values())
+            overload_active = active_count >= self.overload_camera_count_threshold or (active_count > 0 and gui_load > active_count * 10.0)
+            if recording_count > 0 and active_count <= self.overload_camera_count_threshold:
+                overload_active = False
+
+        if overload_active != self.overload_mode_active:
+            self.overload_mode_active = overload_active
+            mode = "enter" if overload_active else "exit"
+            self.log_window.add_entry("application", f"overload {mode}: cameras={len(active_workers)}")
+
+        selected_idx = self.camera_list.currentRow()
+        for idx, worker in enumerate(active_workers):
+            is_main = idx == selected_idx
+            detect_factor = 1.0 if is_main or worker.recording else (self.overload_reduce_detect_fps_factor if overload_active else 1.0)
+            thumb_fps = self.overload_reduce_thumb_preview_fps if overload_active else self.preview_fps_thumb
+            worker.set_overload_state(
+                overload_active=overload_active and not is_main,
+                detect_fps_factor=detect_factor,
+                thumb_preview_fps=thumb_fps,
+                disable_overlays=self.overload_disable_nonessential_overlays,
+            )
+
+    def _refresh_camera_status_indicators(self) -> None:
+        now = time.monotonic()
+        for idx, cam in enumerate(self.cameras):
+            name = str(cam.get("name", idx))
+            stat = self.worker_status.get(name, {})
+            flags = []
+            if bool(stat.get("recording_active", False)):
+                flags.append("REC")
+            det_seconds = float(stat.get("last_detection_seconds", -1.0))
+            if 0 <= det_seconds <= 10.0:
+                flags.append("DET")
+            if bool(stat.get("overload_degraded", False)):
+                flags.append("DEG")
+            if bool(stat.get("stream_error_active", False)):
+                flags.append("ERR")
+            suffix = f" [{' '.join(flags)}]" if flags else ""
+            if idx < len(self.camera_list.widgets):
+                self.camera_list.widgets[idx].text_label.setText(f"{name}{suffix}")
+            if idx < len(self.camera_grid.items):
+                self.camera_grid.items[idx].name_label.setText(f"{name}{suffix}")
+
     def start_camera(self, idx: int):
         if idx < 0 or idx >= len(self.cameras):
             return
@@ -1386,6 +1465,9 @@ QToolButton:focus { outline: none; }
             self.log_window.add_entry("error", f"model {model_name}: {e}")
             return
         w = CameraWorker(camera=cam, model=model, index=idx)
+        w.preview_fps_main = self.preview_fps_main
+        w.preview_fps_thumb = self.preview_fps_thumb
+        w.preview_pause_when_hidden = self.preview_pause_when_hidden
         w.frame_signal.connect(self.update_frame)
         w.alert_signal.connect(self.on_new_alert)
         w.error_signal.connect(self._worker_error)
@@ -1394,6 +1476,8 @@ QToolButton:focus { outline: none; }
         w.worker_status_signal.connect(self._on_worker_heartbeat)
         w.start()
         self.workers[idx] = w
+        self._apply_worker_preview_roles()
+        self._evaluate_overload_mode()
         self.log_window.add_entry("application", f"uruchomiono kamerę {cam.get('name', idx)}")
 
     def stop_camera(self, idx: int):
@@ -1404,6 +1488,8 @@ QToolButton:focus { outline: none; }
                 self.workers[idx] = None
                 cam = self.cameras[idx]
                 self.log_window.add_entry("application", f"zatrzymano kamerę {cam.get('name', idx)}")
+                self._evaluate_overload_mode()
+                self._refresh_camera_status_indicators()
 
 
     def _worker_status(self, text: str, idx: int):
@@ -1438,7 +1524,11 @@ QToolButton:focus { outline: none; }
             self._render_current()
 
     def _on_worker_heartbeat(self, camera_name: str, status: dict):
-        self._worker_diag[str(camera_name)] = dict(status or {})
+        payload = dict(status or {})
+        self._worker_diag[str(camera_name)] = payload
+        self.worker_status[str(camera_name)] = payload
+        self._evaluate_overload_mode()
+        self._refresh_camera_status_indicators()
 
     def _update_diagnostics_panel(self):
         idx = self.camera_list.currentRow()
@@ -1446,7 +1536,7 @@ QToolButton:focus { outline: none; }
             self.diag_panel.setText("Diagnostyka: brak wybranej kamery")
             return
         name = str(self.cameras[idx].get("name", idx))
-        stat = self._worker_diag.get(name, {})
+        stat = self.worker_status.get(name, {})
         if not stat:
             self.diag_panel.setText(f"Diagnostyka [{name}]: oczekiwanie na heartbeat")
             return
@@ -1459,11 +1549,12 @@ QToolButton:focus { outline: none; }
                     f"writer fps: {float(stat.get('writer_fps', 0.0)):.2f}",
                     f"recording queue size: {int(stat.get('queue_size', 0))}",
                     f"dropped frames: {int(stat.get('dropped_frames', 0))}",
+                    f"preview role: {stat.get('preview_role', '-')}",
+                    f"overload degraded: {bool(stat.get('overload_degraded', False))}",
                     f"last detection seconds: {float(stat.get('last_detection_seconds', -1.0)):.1f}",
                 ]
             )
         )
-        print(msg)
 
     # --- Zarządzanie kamerami (global) ---
     def add_camera_wizard(self):
@@ -1606,15 +1697,25 @@ QToolButton:focus { outline: none; }
         else:
             QMessageBox.warning(self, "Test połączenia", f"⚠️ Nie udało się odczytać klatki:\n{url}")
 
+    def start_cameras_staggered(self, camera_names):
+        names = list(camera_names or [])
+        for offset, name in enumerate(names):
+            def _start_one(cam_name=name):
+                for idx, cam in enumerate(self.cameras):
+                    if cam.get("name") == cam_name:
+                        self.start_camera(idx)
+                        return
+            QTimer.singleShot(int(offset * 200), _start_one)
+
     def start_all(self):
         self.stop_all()
         self.workers = [None] * len(self.cameras)
-        for idx in range(len(self.cameras)):
-            self.start_camera(idx)
+        self.start_cameras_staggered([str(c.get("name", "")) for c in self.cameras])
         if self.camera_list.currentRow() < 0 and self.cameras:
             self.camera_list.setCurrentRow(0)
         # przy starcie — brak klatki jeszcze: narysuj HUD "Łączenie…"
         self._last_status[self.camera_list.currentRow()] = "Łączenie…"
+        self._apply_worker_preview_roles()
         self._render_current()
 
     def stop_all(self):
@@ -1622,10 +1723,14 @@ QToolButton:focus { outline: none; }
             if isinstance(w, CameraWorker):
                 w.stop()
         self.workers = []
+        self.worker_status.clear()
+        self.overload_mode_active = False
 
     def switch_camera(self, idx):
         # odśwież HUD dla nowej kamery
         self.last_render_time = 0.0
+        self._apply_worker_preview_roles()
+        self._evaluate_overload_mode()
         self._render_current()
 
     def update_frame(self, frame, index):

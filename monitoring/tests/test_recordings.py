@@ -199,3 +199,34 @@ def test_old_metadata_without_new_fields_still_loads(tmp_path):
 
     assert metadata.label == "person"
     assert metadata.display_time == "2024-01-02 03:04:05"
+
+
+def test_metadata_preserves_phase4_diagnostics_fields():
+    payload = build_recording_sidecar_metadata(
+        camera="Cam1",
+        label="person",
+        confidence=0.8,
+        event_time="2024-01-01 00:00:00",
+        filepath="/tmp/z.mp4",
+        thumb="/tmp/z.jpg",
+        source_fps=20.0,
+        writer_fps=5.0,
+        detect_fps=3.0,
+        event_start_ts=1.0,
+        thumbnail_ts=1.2,
+        frames_written=10,
+        dropped_frames=1,
+        thumbnail_mode="first_detection",
+        inference_count=4,
+        positive_detection_count=2,
+        preview_role_at_start="thumb",
+        overload_degraded_at_start=True,
+        measured_capture_fps=19.5,
+        effective_detect_fps=2.8,
+        preview_frames_dropped=33,
+        skipped_inference_cycles=4,
+    )
+    assert payload["preview_role_at_start"] == "thumb"
+    assert payload["overload_degraded_at_start"] is True
+    assert payload["effective_detect_fps"] == 2.8
+    assert payload["preview_frames_dropped"] == 33

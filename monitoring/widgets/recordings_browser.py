@@ -1007,11 +1007,31 @@ class RecordingsBrowserDialog(QDialog):
     def _format_file_cell_text(self, entry: RecordingMetadata) -> str:
         mp4_path = entry.filepath
         thumb_path = self._resolve_thumbnail_path(entry)
+        lines = [self._shorten_path(mp4_path)]
         if thumb_path and thumb_path != mp4_path:
-            return "\n".join(
-                [self._shorten_path(mp4_path), self._shorten_path(thumb_path)]
-            )
-        return self._shorten_path(mp4_path)
+            lines.append(self._shorten_path(thumb_path))
+
+        diag_bits: list[str] = []
+        duration = float(entry.extra.get("duration", entry.extra.get("recording_duration", 0.0)) or 0.0)
+        if duration > 0:
+            diag_bits.append(f"dur={duration:.1f}s")
+        writer_fps = float(entry.extra.get("writer_fps", 0.0) or 0.0)
+        if writer_fps > 0:
+            diag_bits.append(f"writer={writer_fps:.2f}")
+        dropped = int(entry.extra.get("dropped_frames", 0) or 0)
+        if dropped > 0:
+            diag_bits.append(f"drop={dropped}")
+        role = str(entry.extra.get("preview_role_at_start", "") or "")
+        if role:
+            diag_bits.append(f"role={role}")
+        if bool(entry.extra.get("overload_degraded_at_start", False)):
+            diag_bits.append("degraded=1")
+        detect_fps = float(entry.extra.get("effective_detect_fps", 0.0) or 0.0)
+        if detect_fps > 0:
+            diag_bits.append(f"det={detect_fps:.2f}")
+        if diag_bits:
+            lines.append(" | ".join(diag_bits))
+        return "\n".join(lines)
 
     def _shorten_path(self, path: str, max_length: int = 60) -> str:
         if not path:

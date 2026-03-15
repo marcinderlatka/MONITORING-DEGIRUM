@@ -41,6 +41,15 @@ DEFAULT_RECORD_START_MODE = "detection_first"
 DEFAULT_REQUIRED_HITS_TO_START_RECORDING = 1
 DEFAULT_REQUIRED_MISSES_TO_END_DETECTION = 1
 DEFAULT_MIN_RECORD_SECONDS = 3
+DEFAULT_PREVIEW_FPS_MAIN = 15
+DEFAULT_PREVIEW_FPS_THUMB = 3
+DEFAULT_PREVIEW_PAUSE_WHEN_HIDDEN = True
+
+DEFAULT_OVERLOAD_PROTECTION_ENABLED = True
+DEFAULT_OVERLOAD_CAMERA_COUNT_THRESHOLD = 6
+DEFAULT_OVERLOAD_REDUCE_THUMB_PREVIEW_FPS = 1
+DEFAULT_OVERLOAD_REDUCE_DETECT_FPS_FACTOR = 0.75
+DEFAULT_OVERLOAD_DISABLE_NONESSENTIAL_OVERLAYS = True
 
 
 def _resolve_path(value: str | os.PathLike[str] | None, *, default: Path) -> Path:
@@ -77,6 +86,9 @@ def fill_camera_defaults(camera: MutableMapping[str, object]) -> MutableMapping[
         "required_hits_to_start_recording": DEFAULT_REQUIRED_HITS_TO_START_RECORDING,
         "required_misses_to_end_detection": DEFAULT_REQUIRED_MISSES_TO_END_DETECTION,
         "min_record_seconds": DEFAULT_MIN_RECORD_SECONDS,
+        "preview_fps_main": DEFAULT_PREVIEW_FPS_MAIN,
+        "preview_fps_thumb": DEFAULT_PREVIEW_FPS_THUMB,
+        "preview_pause_when_hidden": DEFAULT_PREVIEW_PAUSE_WHEN_HIDDEN,
         "type": "rtsp",
     }
 
@@ -136,6 +148,11 @@ def load_config(path: Path | None = None) -> Dict[str, object]:
 
     LOG_HISTORY_PATH = _resolve_path(cfg.get("log_history_path"), default=LOG_HISTORY_PATH)
     LOG_RETENTION_HOURS = int(cfg.get("log_retention_hours", LOG_RETENTION_HOURS))
+    cfg.setdefault("overload_protection_enabled", DEFAULT_OVERLOAD_PROTECTION_ENABLED)
+    cfg.setdefault("overload_camera_count_threshold", DEFAULT_OVERLOAD_CAMERA_COUNT_THRESHOLD)
+    cfg.setdefault("overload_reduce_thumb_preview_fps", DEFAULT_OVERLOAD_REDUCE_THUMB_PREVIEW_FPS)
+    cfg.setdefault("overload_reduce_detect_fps_factor", DEFAULT_OVERLOAD_REDUCE_DETECT_FPS_FACTOR)
+    cfg.setdefault("overload_disable_nonessential_overlays", DEFAULT_OVERLOAD_DISABLE_NONESSENTIAL_OVERLAYS)
 
     for camera in cfg.get("cameras", []):
         if isinstance(camera, MutableMapping):
@@ -178,6 +195,14 @@ __all__ = [
     "DEFAULT_REQUIRED_HITS_TO_START_RECORDING",
     "DEFAULT_REQUIRED_MISSES_TO_END_DETECTION",
     "DEFAULT_MIN_RECORD_SECONDS",
+    "DEFAULT_PREVIEW_FPS_MAIN",
+    "DEFAULT_PREVIEW_FPS_THUMB",
+    "DEFAULT_PREVIEW_PAUSE_WHEN_HIDDEN",
+    "DEFAULT_OVERLOAD_PROTECTION_ENABLED",
+    "DEFAULT_OVERLOAD_CAMERA_COUNT_THRESHOLD",
+    "DEFAULT_OVERLOAD_REDUCE_THUMB_PREVIEW_FPS",
+    "DEFAULT_OVERLOAD_REDUCE_DETECT_FPS_FACTOR",
+    "DEFAULT_OVERLOAD_DISABLE_NONESSENTIAL_OVERLAYS",
     "DEFAULT_THUMBNAIL_MODE",
     "ICON_DIR",
     "LOG_HISTORY_PATH",

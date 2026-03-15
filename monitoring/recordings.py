@@ -164,6 +164,14 @@ def build_recording_sidecar_metadata(
     max_confidence: float = 0.0,
     avg_confidence: float = 0.0,
     stream_fps: float = 0.0,
+    preview_role_at_start: str = "",
+    overload_degraded_at_start: bool = False,
+    measured_capture_fps: float = 0.0,
+    effective_detect_fps: float = 0.0,
+    preview_frames_dropped: int = 0,
+    skipped_inference_cycles: int = 0,
+    app_overload_mode: bool | None = None,
+    recorder_queue_peak: int = 0,
 ) -> Dict[str, object]:
     """Build backward-compatible recording metadata payload."""
     return {
@@ -196,6 +204,14 @@ def build_recording_sidecar_metadata(
         "avg_confidence": float(avg_confidence),
         "duration": float(recording_duration),
         "stream_fps": float(stream_fps),
+        "preview_role_at_start": str(preview_role_at_start),
+        "overload_degraded_at_start": bool(overload_degraded_at_start),
+        "measured_capture_fps": float(measured_capture_fps),
+        "effective_detect_fps": float(effective_detect_fps),
+        "preview_frames_dropped": int(preview_frames_dropped),
+        "skipped_inference_cycles": int(skipped_inference_cycles),
+        "app_overload_mode": bool(app_overload_mode) if app_overload_mode is not None else False,
+        "recorder_queue_peak": int(recorder_queue_peak),
     }
 
 

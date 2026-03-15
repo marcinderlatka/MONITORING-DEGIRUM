@@ -138,6 +138,12 @@ def _normalise_catalog_entry(entry: dict) -> dict | None:
     item.setdefault("max_confidence", float(item.get("max_confidence", 0.0) or 0.0))
     item.setdefault("avg_confidence", float(item.get("avg_confidence", 0.0) or 0.0))
     item.setdefault("detection_count", int(item.get("detection_count", 0) or 0))
+    item.setdefault("preview_role_at_start", str(item.get("preview_role_at_start", "") or ""))
+    item.setdefault("overload_degraded_at_start", bool(item.get("overload_degraded_at_start", False)))
+    item.setdefault("measured_capture_fps", float(item.get("measured_capture_fps", 0.0) or 0.0))
+    item.setdefault("effective_detect_fps", float(item.get("effective_detect_fps", 0.0) or 0.0))
+    item.setdefault("preview_frames_dropped", int(item.get("preview_frames_dropped", 0) or 0))
+    item.setdefault("skipped_inference_cycles", int(item.get("skipped_inference_cycles", 0) or 0))
     return item
 
 
