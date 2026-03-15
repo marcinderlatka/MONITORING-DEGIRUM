@@ -5,9 +5,43 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from threading import Lock, Timer
 from typing import Iterable, List
 
-from .config import ALERTS_HISTORY_PATH, RECORDINGS_CATALOG_PATH, BASE_DIR
+from .config import ALERTS_HISTORY_PATH, BASE_DIR, RECORDINGS_CATALOG_PATH
+
+
+class _DebouncedJsonWriter:
+    def __init__(self, path: Path | str, debounce_seconds: float = 1.0) -> None:
+        self.path = Path(path)
+        self.debounce_seconds = debounce_seconds
+        self._timer: Timer | None = None
+        self._lock = Lock()
+        self._pending: object | None = None
+
+    def schedule(self, payload: object) -> None:
+        with self._lock:
+            self._pending = payload
+            if self._timer is not None:
+                self._timer.cancel()
+            self._timer = Timer(self.debounce_seconds, self.flush)
+            self._timer.daemon = True
+            self._timer.start()
+
+    def flush(self) -> None:
+        with self._lock:
+            payload = self._pending
+            self._pending = None
+            timer = self._timer
+            self._timer = None
+        if timer is not None:
+            timer.cancel()
+        if payload is None:
+            return
+        try:
+            self.path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except Exception as exc:  # pragma: no cover - I/O errors
+            print("Nie udało się zapisać JSON:", exc)
 
 
 class AlertMemory:
@@ -17,6 +51,7 @@ class AlertMemory:
         self.path = Path(path)
         self.max_items = max_items
         self.items: List[dict] = []
+        self._writer = _DebouncedJsonWriter(self.path, debounce_seconds=1.0)
         self.load()
 
     def load(self) -> None:
@@ -33,11 +68,11 @@ class AlertMemory:
             self.items = []
 
     def save(self) -> None:
-        try:
-            payload = json.dumps(self.items[-self.max_items :], indent=2)
-            self.path.write_text(payload, encoding="utf-8")
-        except Exception as exc:  # pragma: no cover - log to stdout for now
-            print("Nie udało się zapisać historii alertów:", exc)
+        self._writer.schedule(self.items[-self.max_items :])
+
+    def flush(self) -> None:
+        self._writer.schedule(self.items[-self.max_items :])
+        self._writer.flush()
 
     def add(self, alert_meta: dict) -> None:
         slim = {
@@ -90,7 +125,77 @@ def _normalise_catalog_entry(entry: dict) -> dict | None:
     return item
 
 
-def load_recordings_catalog(path: Path | str = RECORDINGS_CATALOG_PATH) -> List[dict]:
+class _RecordingsCatalog:
+    def __init__(self, path: Path | str = RECORDINGS_CATALOG_PATH) -> None:
+        self.path = Path(path)
+        self._writer = _DebouncedJsonWriter(self.path, debounce_seconds=1.0)
+        self._lock = Lock()
+        self._loaded = False
+        self._entries: List[dict] = []
+
+    def _ensure_loaded(self) -> None:
+        if self._loaded:
+            return
+        self._entries = _load_recordings_catalog_sync(self.path)
+        self._loaded = True
+
+    def load(self) -> List[dict]:
+        with self._lock:
+            self._ensure_loaded()
+            return [dict(item) for item in self._entries]
+
+    def update(self, entry: dict) -> None:
+        filepath = entry.get("file") or entry.get("filepath")
+        if not filepath:
+            return
+        abs_target = os.path.abspath(filepath)
+        with self._lock:
+            self._ensure_loaded()
+            filtered: List[dict] = []
+            for item in self._entries:
+                fp = item.get("filepath") or item.get("file")
+                if fp and os.path.abspath(fp) == abs_target:
+                    continue
+                filtered.append(item)
+            new_entry = dict(entry)
+            new_entry.setdefault("filepath", filepath)
+            filtered.append(new_entry)
+            self._entries = filtered
+            self._writer.schedule(self._entries)
+
+    def remove(self, paths: Iterable[str]) -> bool:
+        targets = {os.path.abspath(p) for p in paths if p}
+        if not targets:
+            return False
+        with self._lock:
+            self._ensure_loaded()
+            remaining: List[dict] = []
+            removed = False
+            for item in self._entries:
+                fp = item.get("filepath") or item.get("file")
+                if fp and os.path.abspath(fp) in targets:
+                    removed = True
+                    continue
+                remaining.append(item)
+            if removed:
+                self._entries = remaining
+                self._writer.schedule(self._entries)
+            return removed
+
+    def save(self, entries: Iterable[dict]) -> None:
+        with self._lock:
+            self._entries = list(entries or [])
+            self._loaded = True
+            self._writer.schedule(self._entries)
+
+    def flush(self) -> None:
+        with self._lock:
+            self._ensure_loaded()
+            self._writer.schedule(self._entries)
+        self._writer.flush()
+
+
+def _load_recordings_catalog_sync(path: Path | str = RECORDINGS_CATALOG_PATH) -> List[dict]:
     catalog_path = Path(path)
     if not catalog_path.exists():
         return []
@@ -109,60 +214,80 @@ def load_recordings_catalog(path: Path | str = RECORDINGS_CATALOG_PATH) -> List[
     return cleaned
 
 
+_RECORDINGS_CATALOG = _RecordingsCatalog(RECORDINGS_CATALOG_PATH)
+
+
+def load_recordings_catalog(path: Path | str = RECORDINGS_CATALOG_PATH) -> List[dict]:
+    if Path(path) != RECORDINGS_CATALOG_PATH:
+        return _load_recordings_catalog_sync(path)
+    return _RECORDINGS_CATALOG.load()
+
+
 def save_recordings_catalog(entries: Iterable[dict], path: Path | str = RECORDINGS_CATALOG_PATH) -> None:
-    catalog_path = Path(path)
-    try:
-        payload = json.dumps(list(entries or []), indent=2)
-        catalog_path.write_text(payload, encoding="utf-8")
-    except Exception as exc:
-        print("Nie udało się zapisać katalogu nagrań:", exc)
+    if Path(path) != RECORDINGS_CATALOG_PATH:
+        try:
+            payload = json.dumps(list(entries or []), indent=2)
+            Path(path).write_text(payload, encoding="utf-8")
+        except Exception as exc:
+            print("Nie udało się zapisać katalogu nagrań:", exc)
+        return
+    _RECORDINGS_CATALOG.save(entries)
 
 
 def update_recordings_catalog(entry: dict, path: Path | str = RECORDINGS_CATALOG_PATH) -> None:
-    catalog_path = Path(path)
-    filepath = entry.get("file") or entry.get("filepath")
-    if not filepath:
+    if Path(path) != RECORDINGS_CATALOG_PATH:
+        catalog_path = Path(path)
+        filepath = entry.get("file") or entry.get("filepath")
+        if not filepath:
+            return
+        try:
+            catalog = _load_recordings_catalog_sync(catalog_path)
+            abs_target = os.path.abspath(filepath)
+            filtered: List[dict] = []
+            for item in catalog:
+                fp = item.get("filepath") or item.get("file")
+                if fp and os.path.abspath(fp) == abs_target:
+                    continue
+                filtered.append(item)
+            new_entry = dict(entry)
+            new_entry.setdefault("filepath", filepath)
+            filtered.append(new_entry)
+            catalog_path.write_text(json.dumps(filtered, indent=2), encoding="utf-8")
+        except Exception as exc:
+            print("Nie udało się zaktualizować katalogu nagrań:", exc)
         return
-    try:
-        catalog = load_recordings_catalog(catalog_path)
-        abs_target = os.path.abspath(filepath)
-        filtered: List[dict] = []
-        for item in catalog:
-            fp = item.get("filepath") or item.get("file")
-            if fp and os.path.abspath(fp) == abs_target:
-                continue
-            filtered.append(item)
-        new_entry = dict(entry)
-        new_entry.setdefault("filepath", filepath)
-        filtered.append(new_entry)
-        save_recordings_catalog(filtered, catalog_path)
-    except Exception as exc:
-        print("Nie udało się zaktualizować katalogu nagrań:", exc)
+    _RECORDINGS_CATALOG.update(entry)
 
 
 def remove_from_recordings_catalog(paths: Iterable[str], path: Path | str = RECORDINGS_CATALOG_PATH) -> bool:
-    catalog_path = Path(path)
-    targets = {os.path.abspath(p) for p in paths if p}
-    if not targets:
-        return False
-    try:
-        catalog = load_recordings_catalog(catalog_path)
-        if not catalog:
+    if Path(path) != RECORDINGS_CATALOG_PATH:
+        catalog_path = Path(path)
+        targets = {os.path.abspath(p) for p in paths if p}
+        if not targets:
             return False
-        remaining: List[dict] = []
-        removed = False
-        for item in catalog:
-            fp = item.get("filepath") or item.get("file")
-            if fp and os.path.abspath(fp) in targets:
-                removed = True
-                continue
-            remaining.append(item)
-        if removed:
-            save_recordings_catalog(remaining, catalog_path)
-        return removed
-    except Exception as exc:
-        print("Nie udało się zaktualizować katalogu nagrań przy usuwaniu:", exc)
-        return False
+        try:
+            catalog = _load_recordings_catalog_sync(catalog_path)
+            if not catalog:
+                return False
+            remaining: List[dict] = []
+            removed = False
+            for item in catalog:
+                fp = item.get("filepath") or item.get("file")
+                if fp and os.path.abspath(fp) in targets:
+                    removed = True
+                    continue
+                remaining.append(item)
+            if removed:
+                catalog_path.write_text(json.dumps(remaining, indent=2), encoding="utf-8")
+            return removed
+        except Exception as exc:
+            print("Nie udało się zaktualizować katalogu nagrań przy usuwaniu:", exc)
+            return False
+    return _RECORDINGS_CATALOG.remove(paths)
+
+
+def flush_storage() -> None:
+    _RECORDINGS_CATALOG.flush()
 
 
 __all__ = [
@@ -171,4 +296,5 @@ __all__ = [
     "save_recordings_catalog",
     "update_recordings_catalog",
     "remove_from_recordings_catalog",
+    "flush_storage",
 ]

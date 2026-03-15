@@ -97,6 +97,7 @@ from .config import (
 )
 from .storage import (
     AlertMemory,
+    flush_storage,
     load_recordings_catalog,
     remove_from_recordings_catalog,
     save_recordings_catalog,
@@ -1093,6 +1094,7 @@ QToolButton:focus { outline: none; }
 
         # backend
         self.workers = []
+        self.model_cache: dict[str, object] = {}
         self.camera_list.currentRowChanged.connect(self.switch_camera)
 
         self.alert_list.open_video.connect(self.open_video_file)
@@ -1103,6 +1105,8 @@ QToolButton:focus { outline: none; }
         self._last_status = {}
         self._last_error = {}
         self._last_fps_text = {}
+        self._last_preview_render_ts = 0.0
+        self._render_interval_s = 0.1
 
         # zacznij od startu wszystkich, ale z niewielkim opóźnieniem aby GUI
         # mogło się pojawić bez czekania na inicjalizację kamer
@@ -1297,6 +1301,19 @@ QToolButton:focus { outline: none; }
 
     # --- Zarządzanie kamerami ---
 
+    def _get_model(self, model_name: str):
+        if model_name in self.model_cache:
+            self.log_window.add_entry("application", f"model z cache: {model_name}")
+            return self.model_cache[model_name]
+        model = dg.load_model(
+            model_name=model_name,
+            inference_host_address="@local",
+            zoo_url=str(MODELS_PATH / model_name),
+        )
+        self.model_cache[model_name] = model
+        self.log_window.add_entry("application", f"model załadowany: {model_name}")
+        return model
+
     def start_camera(self, idx: int):
         if idx < 0 or idx >= len(self.cameras):
             return
@@ -1307,11 +1324,7 @@ QToolButton:focus { outline: none; }
         cam = self.cameras[idx]
         model_name = cam.get("model", DEFAULT_MODEL)
         try:
-            model = dg.load_model(
-                model_name=model_name,
-                inference_host_address="@local",
-                zoo_url=str(MODELS_PATH / model_name),
-            )
+            model = self._get_model(model_name)
         except Exception as e:
             QMessageBox.warning(self, "Model", f"Nie udało się załadować modelu '{model_name}': {e}")
             self.log_window.add_entry("error", f"model {model_name}: {e}")
@@ -1432,6 +1445,7 @@ QToolButton:focus { outline: none; }
                     w.set_detection_schedule(new_data.get("detection_hours", DEFAULT_DETECTION_HOURS))
                     w.visible_classes = list(new_data.get("visible_classes", VISIBLE_CLASSES))
                     w.record_classes = list(new_data.get("record_classes", RECORD_CLASSES))
+                    w.refresh_class_filters()
                     w.pre_seconds = int(new_data.get("pre_seconds", DEFAULT_PRE_SECONDS))
                     w.lost_seconds = int(new_data.get("lost_seconds", DEFAULT_LOST_SECONDS))
                     w.post_seconds = int(new_data.get("post_seconds", DEFAULT_POST_SECONDS))
@@ -1518,6 +1532,7 @@ QToolButton:focus { outline: none; }
 
     def switch_camera(self, idx):
         # odśwież HUD dla nowej kamery
+        self._last_preview_render_ts = 0.0
         self._render_current()
 
     def update_frame(self, frame, index):
@@ -1566,7 +1581,11 @@ QToolButton:focus { outline: none; }
         self._last_error.pop(idx, None)
 
         if idx == self.camera_list.currentRow():
-            self._render_current()
+            from time import perf_counter
+            now = perf_counter()
+            if now - self._last_preview_render_ts >= self._render_interval_s:
+                self._last_preview_render_ts = now
+                self._render_current()
 
     def _compose_letterboxed(self, frame, top_lines):
         # Create canvas matching label size, paste scaled frame centered
@@ -1683,6 +1702,8 @@ QToolButton:focus { outline: none; }
 
     def closeEvent(self, event):
         self.stop_all()
+        self.alert_mem.flush()
+        flush_storage()
         event.accept()
 
     def open_settings(self):
