@@ -1,13 +1,111 @@
-from monitoring.runtime_helpers import compute_effective_writer_fps
+from __future__ import annotations
+
+import sys
+import types
+from pathlib import Path
+
+import numpy as np
+
+if "cv2" not in sys.modules:
+    sys.modules["cv2"] = types.SimpleNamespace()
+cv2_stub = sys.modules["cv2"]
+if not hasattr(cv2_stub, "resize"):
+    cv2_stub.INTER_AREA = 0
+    cv2_stub.FONT_HERSHEY_SIMPLEX = 0
+    cv2_stub.resize = lambda frame, size, interpolation=0: np.zeros((size[1], size[0], 3), dtype=np.uint8)
+    cv2_stub.rectangle = lambda *args, **kwargs: None
+    cv2_stub.putText = lambda *args, **kwargs: None
+
+if "degirum_tools" not in sys.modules:
+    class _DummyVideoWriter:
+        def __init__(self, *_args, **_kwargs):
+            pass
+        def write(self, _frame):
+            return None
+        def release(self):
+            return None
+
+    class _DummyOpenStream:
+        def __init__(self, *_args, **_kwargs):
+            pass
+        def __enter__(self):
+            return types.SimpleNamespace(get=lambda *_a, **_k: 25.0)
+        def __exit__(self, *_args):
+            return False
+
+    sys.modules["degirum_tools"] = types.SimpleNamespace(
+        VideoWriter=_DummyVideoWriter,
+        open_video_stream=lambda *_a, **_k: _DummyOpenStream(),
+        video_source=lambda *_a, **_k: iter(()),
+    )
+
+if "PyQt5" not in sys.modules:
+    qtcore = types.ModuleType("PyQt5.QtCore")
+
+    class _QThread:
+        def __init__(self, *_args, **_kwargs):
+            pass
+        def wait(self, *_args, **_kwargs):
+            return True
+        @staticmethod
+        def msleep(_ms):
+            return None
+
+    class _Signal:
+        def __init__(self, *_args, **_kwargs):
+            pass
+        def emit(self, *_args, **_kwargs):
+            return None
+
+    qtcore.QThread = _QThread
+    qtcore.pyqtSignal = lambda *_args, **_kwargs: _Signal()
+    pyqt5 = types.ModuleType("PyQt5")
+    pyqt5.QtCore = qtcore
+    sys.modules["PyQt5"] = pyqt5
+    sys.modules["PyQt5.QtCore"] = qtcore
+
+sys.path.append(str(Path(__file__).resolve().parents[2]))
+
+from monitoring.workers import CameraWorker
 
 
-def test_compute_effective_writer_fps_prefers_rtsp_limit():
-    assert compute_effective_writer_fps(rtsp_fps=5, measured_fps=20.0, stream_fps=25.0) == 5.0
+class _DummyModel:
+    def predict(self, _frame):
+        return types.SimpleNamespace(results=[])
 
 
-def test_compute_effective_writer_fps_uses_measured_when_unthrottled():
-    assert compute_effective_writer_fps(rtsp_fps=0, measured_fps=7.5, stream_fps=25.0) == 7.5
+def _worker() -> CameraWorker:
+    return CameraWorker(camera={"name": "Cam", "rtsp": "rtsp://x"}, model=_DummyModel(), index=0)
 
 
-def test_compute_effective_writer_fps_falls_back_to_stream():
-    assert compute_effective_writer_fps(rtsp_fps=0, measured_fps=0.0, stream_fps=30.0) == 30.0
+def test_thumbnail_generation():
+    worker = _worker()
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    frame[120:320, 200:420] = (255, 255, 255)
+    thumb = worker._build_thumbnail_frame(frame, (200, 120, 420, 320), "person", 0.8)
+    assert thumb.shape[:2] == (240, 320)
+
+
+def test_writer_fps_computation():
+    worker = _worker()
+    worker.rtsp_fps = 8
+    worker.fps = 20
+    assert worker._compute_effective_writer_fps(25.0) == 8.0
+
+
+def test_stream_fps_estimation():
+    worker = _worker()
+    worker._stream_fps_window.extend([1.0, 1.5, 2.0, 2.5, 3.0])
+    worker._stream_fps_last_calc_ts = 0.0
+    est = worker._get_effective_stream_fps()
+    assert est == 2.0
+
+
+def test_detection_event_summary():
+    worker = _worker()
+    worker.current_event_detection_count = 4
+    worker.current_event_confidence_sum = 2.0
+    worker.current_event_max_confidence = 0.8
+    avg = worker.current_event_confidence_sum / worker.current_event_detection_count
+    assert avg == 0.5
+    assert worker.current_event_max_confidence == 0.8

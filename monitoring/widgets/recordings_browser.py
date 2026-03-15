@@ -163,7 +163,10 @@ class RecordingsBrowserDialog(QDialog):
     CAMERA_COLUMN = 3
     CLASS_COLUMN = 4
     CONF_COLUMN = 5
-    FILE_COLUMN = 6
+    DURATION_COLUMN = 6
+    WRITER_FPS_COLUMN = 7
+    DROPPED_COLUMN = 8
+    FILE_COLUMN = 9
 
     def __init__(
         self,
@@ -185,7 +188,7 @@ class RecordingsBrowserDialog(QDialog):
         self._history_items = [dict(item) for item in history_items] if history_items is not None else None
         self._entries: List[RecordingMetadata] = []
         self._row_lookup: Dict[str, int] = {}
-        self._thumbnail_cache: Dict[str, QPixmap] = {}
+        self.thumbnail_cache: Dict[str, QPixmap] = {}
         self._pending_thumbnails: set[str] = set()
         self._thumbnail_workers: Dict[str, ThumbnailWorker] = {}
         self._thumbnail_labels: Dict[str, QLabel] = {}
@@ -351,7 +354,7 @@ class RecordingsBrowserDialog(QDialog):
         self.loading_label.setMargin(40)
         self._table_stack.addWidget(self.loading_label)
 
-        self.table = QTableWidget(0, 7)
+        self.table = QTableWidget(0, 10)
         self.table.setHorizontalHeaderLabels(
             [
                 "Usuń",
@@ -360,6 +363,9 @@ class RecordingsBrowserDialog(QDialog):
                 "Kamera",
                 "Klasa",
                 "Pewność",
+                "Czas trwania",
+                "Writer FPS",
+                "Drop",
                 "Plik",
             ]
         )
@@ -378,6 +384,7 @@ class RecordingsBrowserDialog(QDialog):
         header = self.table.horizontalHeader()
         header.setStretchLastSection(True)
         header.setDefaultSectionSize(160)
+        self.table.setSortingEnabled(True)
         self.table.setColumnWidth(self.CHECK_COLUMN, 90)
         self.table.setColumnWidth(self.THUMB_COLUMN, self._thumb_size.width())
         self.table.verticalHeader().setDefaultSectionSize(self._thumb_size.height() + 20)
@@ -425,7 +432,7 @@ class RecordingsBrowserDialog(QDialog):
         try:
             self._entries = []
             self._row_lookup.clear()
-            self._thumbnail_cache.clear()
+            self.thumbnail_cache.clear()
             self._pending_thumbnails.clear()
             self._thumbnail_workers.clear()
             self._thumbnail_labels.clear()
@@ -493,7 +500,7 @@ class RecordingsBrowserDialog(QDialog):
         removed = set(paths)
         self._entries = [entry for entry in self._entries if entry.filepath not in removed]
         for path in removed:
-            self._thumbnail_cache.pop(path, None)
+            self.thumbnail_cache.pop(path, None)
             self._pending_thumbnails.discard(path)
 
         self._apply_filters()
@@ -726,6 +733,7 @@ class RecordingsBrowserDialog(QDialog):
 
         time_item = QTableWidgetItem(entry.display_time)
         time_item.setData(Qt.UserRole, entry.filepath)
+        time_item.setData(Qt.EditRole, float(entry.timestamp))
         time_item.setTextAlignment(Qt.AlignCenter)
         self.table.setItem(row, self.TIME_COLUMN, time_item)
 
@@ -741,8 +749,32 @@ class RecordingsBrowserDialog(QDialog):
 
         conf_item = QTableWidgetItem("-" if entry.confidence <= 0 else f"{entry.confidence:.2f}")
         conf_item.setData(Qt.UserRole, entry.filepath)
+        conf_item.setData(Qt.UserRole + 1, float(entry.confidence))
+        conf_item.setData(Qt.EditRole, float(entry.confidence))
         conf_item.setTextAlignment(Qt.AlignCenter)
         self.table.setItem(row, self.CONF_COLUMN, conf_item)
+
+        duration = float(entry.extra.get("duration", entry.extra.get("recording_duration", 0.0)) or 0.0)
+        duration_item = QTableWidgetItem("-" if duration <= 0 else f"{duration:.1f}s")
+        duration_item.setData(Qt.UserRole, entry.filepath)
+        duration_item.setData(Qt.UserRole + 1, duration)
+        duration_item.setData(Qt.EditRole, duration)
+        duration_item.setTextAlignment(Qt.AlignCenter)
+        self.table.setItem(row, self.DURATION_COLUMN, duration_item)
+
+        writer_fps = float(entry.extra.get("writer_fps", 0.0) or 0.0)
+        writer_item = QTableWidgetItem("-" if writer_fps <= 0 else f"{writer_fps:.2f}")
+        writer_item.setData(Qt.UserRole, entry.filepath)
+        writer_item.setData(Qt.UserRole + 1, writer_fps)
+        writer_item.setTextAlignment(Qt.AlignCenter)
+        self.table.setItem(row, self.WRITER_FPS_COLUMN, writer_item)
+
+        dropped = int(entry.extra.get("dropped_frames", 0) or 0)
+        dropped_item = QTableWidgetItem(str(dropped))
+        dropped_item.setData(Qt.UserRole, entry.filepath)
+        dropped_item.setData(Qt.UserRole + 1, dropped)
+        dropped_item.setTextAlignment(Qt.AlignCenter)
+        self.table.setItem(row, self.DROPPED_COLUMN, dropped_item)
 
         file_text = self._format_file_cell_text(entry)
         file_item = QTableWidgetItem(file_text)
@@ -753,8 +785,8 @@ class RecordingsBrowserDialog(QDialog):
         self.table.setItem(row, self.FILE_COLUMN, file_item)
 
         self._row_lookup[entry.filepath] = row
-        if entry.filepath in self._thumbnail_cache:
-            self._apply_thumbnail(entry.filepath, self._thumbnail_cache[entry.filepath])
+        if entry.filepath in self.thumbnail_cache:
+            self._apply_thumbnail(entry.filepath, self.thumbnail_cache[entry.filepath])
         else:
             self._request_thumbnail(entry)
         self._block_item_changed = previous_block
@@ -775,7 +807,7 @@ class RecordingsBrowserDialog(QDialog):
         return QColor("#f8f8f8")
 
     def _request_thumbnail(self, entry: RecordingMetadata) -> None:
-        if entry.filepath in self._pending_thumbnails or entry.filepath in self._thumbnail_cache:
+        if entry.filepath in self._pending_thumbnails or entry.filepath in self.thumbnail_cache:
             return
         thumb_path = self._resolve_thumbnail_path(entry)
         direct_pixmap = self._load_pixmap_from_disk(thumb_path)
@@ -943,7 +975,7 @@ class RecordingsBrowserDialog(QDialog):
             pixmap = self._placeholder_pixmap()
 
         # 🔹 Cache + aktualizacja widoku
-        self._thumbnail_cache[filepath] = pixmap
+        self.thumbnail_cache[filepath] = pixmap
         self._pending_thumbnails.discard(filepath)
         self._thumbnail_workers.pop(filepath, None)
 

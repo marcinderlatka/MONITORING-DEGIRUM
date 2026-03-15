@@ -168,6 +168,7 @@ class CameraWorker(QThread):
     error_signal = pyqtSignal(str, int)
     status_signal = pyqtSignal(str, int)
     record_signal = pyqtSignal(str, str)
+    worker_status_signal = pyqtSignal(str, object)
 
     def __init__(self, camera: dict, model: Any, index: int = 0) -> None:
         super().__init__()
@@ -217,8 +218,16 @@ class CameraWorker(QThread):
         self.source_fps = 0.0
         self.writer_fps = 0.0
         self.last_frame_ts = 0.0
+        self.last_stream_reset_ts = 0.0
+        self.stream_stall_seconds = 5.0
+        self.stream_start_ts = 0.0
+        self.frame_counter = 0
         self.loop_fps = 0.0
         self.restart_requested = False
+        self.error_counter = 0
+        self.last_heartbeat_ts = 0.0
+        self._stream_fps_window = deque(maxlen=300)
+        self._stream_fps_last_calc_ts = 0.0
 
         self.detection_active = False
         self.detection_last_seen_ts = 0.0
@@ -235,10 +244,86 @@ class CameraWorker(QThread):
         self.current_writer_fps = 0.0
         self.current_detection_frame_saved = False
         self.current_thumbnail_ts = 0.0
+        self.current_event_detection_count = 0
+        self.current_event_confidence_sum = 0.0
+        self.current_event_max_confidence = 0.0
 
         self.inference_count = 0
         self.positive_detection_count = 0
         self.last_metrics_log_ts = 0.0
+
+    @staticmethod
+    def _crop_with_margin(
+        frame: np.ndarray,
+        bbox: tuple[int, int, int, int] | None,
+        margin_ratio: float = 0.15,
+        min_size: int = 20,
+    ) -> np.ndarray:
+        if bbox is None:
+            return frame
+        x1, y1, x2, y2 = bbox
+        h, w = frame.shape[:2]
+        x1 = max(0, min(x1, w - 1))
+        x2 = max(0, min(x2, w - 1))
+        y1 = max(0, min(y1, h - 1))
+        y2 = max(0, min(y2, h - 1))
+        bw = max(0, x2 - x1)
+        bh = max(0, y2 - y1)
+        if bw < min_size or bh < min_size:
+            return frame
+        mx = int(bw * margin_ratio)
+        my = int(bh * margin_ratio)
+        cx1 = max(0, x1 - mx)
+        cy1 = max(0, y1 - my)
+        cx2 = min(w, x2 + mx)
+        cy2 = min(h, y2 + my)
+        crop = frame[cy1:cy2, cx1:cx2]
+        if crop.size == 0:
+            return frame
+        return crop
+
+    def _build_thumbnail_frame(
+        self,
+        preview_frame: np.ndarray,
+        best_bbox: tuple[int, int, int, int] | None,
+        best_label: str,
+        best_score: float,
+    ) -> np.ndarray:
+        cropped = self._crop_with_margin(preview_frame, best_bbox)
+        resized = cv2.resize(cropped, (320, 240), interpolation=cv2.INTER_AREA)
+        return self._make_detection_overlay_frame(resized, None, best_label, best_score)
+
+    def _get_effective_stream_fps(self) -> float:
+        now = time.monotonic()
+        if len(self._stream_fps_window) < 2:
+            return self.stream_fps
+        if self._stream_fps_last_calc_ts and now - self._stream_fps_last_calc_ts < 5.0:
+            return self.stream_fps
+        elapsed = self._stream_fps_window[-1] - self._stream_fps_window[0]
+        if elapsed <= 0:
+            return self.stream_fps
+        self.stream_fps = float((len(self._stream_fps_window) - 1) / elapsed)
+        self._stream_fps_last_calc_ts = now
+        return self.stream_fps
+
+    def _emit_heartbeat_if_needed(self) -> None:
+        now = time.monotonic()
+        if self.last_heartbeat_ts and now - self.last_heartbeat_ts < 10.0:
+            return
+        queue_size = self.record_thread.queue.qsize() if self.record_thread else 0
+        dropped = self.record_thread.dropped_frames if self.record_thread else 0
+        since_detect = (now - self.detection_last_seen_ts) if self.detection_last_seen_ts > 0 else -1.0
+        status = {
+            "stream_fps": float(self.stream_fps),
+            "detect_fps": float(max(0.0, self.fps)),
+            "writer_fps": float(self.current_writer_fps or self.writer_fps),
+            "queue_size": int(queue_size),
+            "dropped_frames": int(dropped),
+            "recording_active": bool(self.recording),
+            "last_detection_seconds": float(since_detect),
+        }
+        self.worker_status_signal.emit(str(self.camera.get("name", self.index)), status)
+        self.last_heartbeat_ts = now
 
     def refresh_class_filters(self) -> None:
         self.visible_classes_lower = {c.lower() for c in self.visible_classes}
@@ -345,6 +430,12 @@ class CameraWorker(QThread):
             min_record_seconds=self.min_record_seconds,
             required_hits_to_start_recording=self.required_hits_to_start_recording,
             required_misses_to_end_detection=self.required_misses_to_end_detection,
+            event_end_ts=kwargs.get("event_end_ts", 0.0),
+            recording_duration=kwargs.get("recording_duration", 0.0),
+            detection_count=kwargs.get("detection_count", 0),
+            max_confidence=kwargs.get("max_confidence", 0.0),
+            avg_confidence=kwargs.get("avg_confidence", 0.0),
+            stream_fps=kwargs.get("stream_fps", self.stream_fps),
         )
 
     def _save_recording_metadata(self, meta: dict) -> None:
@@ -374,7 +465,7 @@ class CameraWorker(QThread):
             return
 
         thumb_path = self.output_file + ".jpg"
-        thumb_frame = self._make_detection_overlay_frame(preview_frame, best_bbox, best_label, best_score)
+        thumb_frame = self._build_thumbnail_frame(preview_frame, best_bbox, best_label, best_score)
         if cv2.imwrite(thumb_path, thumb_frame):
             self.current_event_thumbnail_path = thumb_path
             self.current_thumbnail_ts = time.time()
@@ -434,6 +525,9 @@ class CameraWorker(QThread):
         self.current_event_label = best_label or "object"
         self.current_event_confidence = float(best_score)
         self.current_event_best_confidence = float(best_score)
+        self.current_event_detection_count = 0
+        self.current_event_confidence_sum = 0.0
+        self.current_event_max_confidence = 0.0
 
         # Detection-first default behavior.
         self.record_thread.write(raw_frame)
@@ -455,6 +549,12 @@ class CameraWorker(QThread):
             dropped_frames=0,
             thumbnail_ts=self.current_thumbnail_ts,
             thumbnail_mode=self.thumbnail_mode,
+            event_end_ts=0.0,
+            recording_duration=0.0,
+            detection_count=0,
+            max_confidence=0.0,
+            avg_confidence=0.0,
+            stream_fps=self.stream_fps,
         )
         self._save_recording_metadata(meta)
         self.record_signal.emit("start", self.output_file)
@@ -471,12 +571,17 @@ class CameraWorker(QThread):
             dropped_frames = self.record_thread.dropped_frames
             self.record_thread = None
 
+        event_end_ts = time.time()
+        event_start_ts = self.current_event_start_ts or event_end_ts
+        duration = max(0.0, event_end_ts - event_start_ts)
+        detection_count = int(self.current_event_detection_count)
+        avg_conf = float(self.current_event_confidence_sum / detection_count) if detection_count > 0 else 0.0
         meta = self._build_recording_meta(
             filepath=self.output_file,
             thumb_path=self.current_event_thumbnail_path,
             label=self.current_event_label or "object",
             confidence=self.current_event_confidence,
-            event_start_ts=self.current_event_start_ts or time.time(),
+            event_start_ts=event_start_ts,
             writer_fps=self.current_writer_fps or self.writer_fps,
             source_fps=self.source_fps,
             detect_fps=float(self.fps),
@@ -484,6 +589,12 @@ class CameraWorker(QThread):
             dropped_frames=dropped_frames,
             thumbnail_ts=self.current_thumbnail_ts or self.current_event_start_ts,
             thumbnail_mode=self.thumbnail_mode,
+            event_end_ts=event_end_ts,
+            recording_duration=duration,
+            detection_count=detection_count,
+            max_confidence=float(self.current_event_max_confidence),
+            avg_confidence=avg_conf,
+            stream_fps=self.stream_fps,
         )
         self._save_recording_metadata(meta)
         self.record_signal.emit("stop", self.output_file)
@@ -505,6 +616,9 @@ class CameraWorker(QThread):
         self.current_writer_fps = 0.0
         self.current_detection_frame_saved = False
         self.recording_started_ts = 0.0
+        self.current_event_detection_count = 0
+        self.current_event_confidence_sum = 0.0
+        self.current_event_max_confidence = 0.0
 
     def _log_metrics_if_needed(self, detect_interval: float) -> None:
         now = time.monotonic()
@@ -518,11 +632,11 @@ class CameraWorker(QThread):
         dropped = self.record_thread.dropped_frames if self.record_thread else 0
         since_detect = (now - self.detection_last_seen_ts) if self.detection_last_seen_ts > 0 else -1.0
         print(
-            f"[diag][{self.camera.get('name', self.index)}] source_fps={self.source_fps:.2f} "
-            f"writer_fps={self.current_writer_fps or self.writer_fps:.2f} detect_interval={detect_interval:.3f} "
-            f"effective_detect_fps={self._effective_detect_fps(elapsed):.2f} inference_count={self.inference_count} "
-            f"positive_detection_count={self.positive_detection_count} recording={self.recording} "
-            f"queue={queue_size} dropped={dropped} since_last_detection={since_detect:.2f}"
+            f"[perf] camera={self.camera.get('name', self.index)} "
+            f"stream_fps={self.stream_fps:.2f} detect_fps={self._effective_detect_fps(elapsed):.2f} "
+            f"writer_fps={self.current_writer_fps or self.writer_fps:.2f} queue_size={queue_size} "
+            f"dropped_frames={dropped} detections_last_window={self.positive_detection_count} "
+            f"detect_interval={detect_interval:.3f} since_last_detection={since_detect:.2f}"
         )
         self.last_metrics_log_ts = now
         self.inference_count = 0
@@ -533,6 +647,10 @@ class CameraWorker(QThread):
             try:
                 self.status_signal.emit("Łączenie…", self.index)
                 connected = False
+                self.stream_start_ts = time.monotonic()
+                self.last_frame_ts = self.stream_start_ts
+                self.frame_counter = 0
+                self._stream_fps_window.clear()
                 src = self.camera.get("rtsp")
                 if self.camera.get("type") == "usb":
                     with suppress(Exception):
@@ -549,21 +667,38 @@ class CameraWorker(QThread):
                     source_fps = self.rtsp_fps if self.rtsp_fps > 0 else None
 
                     for frame in degirum_tools.video_source(stream, fps=source_fps):
+                        now_mono = time.monotonic()
+                        if now_mono - self.last_frame_ts > self.stream_stall_seconds:
+                            print(
+                                f"[warn] camera={self.camera.get('name', self.index)} stream stalled for "
+                                f"{now_mono - self.last_frame_ts:.2f}s; reopening stream"
+                            )
+                            self.last_stream_reset_ts = now_mono
+                            self.error_counter += 1
+                            break
                         if self.stop_signal:
                             break
                         if frame is None:
                             self.error_signal.emit("Brak sygnału: pusta klatka", self.index)
+                            self.error_counter += 1
+                            if self.error_counter > 10:
+                                print(f"[recovery] camera={self.camera.get('name', self.index)} restarting after frame read failures")
+                                self.last_stream_reset_ts = time.monotonic()
+                                break
                             continue
                         if self.restart_requested:
                             self.restart_requested = False
                             break
 
-                        now_mono = time.monotonic()
+                        self.error_counter = 0
                         if self.last_frame_ts > 0:
                             delta = now_mono - self.last_frame_ts
                             if delta > 0:
                                 self.loop_fps = 1.0 / delta
                         self.last_frame_ts = now_mono
+                        self.frame_counter += 1
+                        self._stream_fps_window.append(now_mono)
+                        self._get_effective_stream_fps()
 
                         if not connected:
                             self.status_signal.emit("Połączono", self.index)
@@ -645,6 +780,9 @@ class CameraWorker(QThread):
 
                             if self.recording:
                                 self.current_event_confidence = max(self.current_event_confidence, best_score)
+                                self.current_event_detection_count += 1
+                                self.current_event_confidence_sum += float(best_score)
+                                self.current_event_max_confidence = max(self.current_event_max_confidence, float(best_score))
                                 self._update_event_thumbnail(preview_frame, best_bbox, best_label or "object", best_score)
                         else:
                             if inference_result is not None:
@@ -662,8 +800,10 @@ class CameraWorker(QThread):
 
                         self.frame_signal.emit(preview_frame, self.index)
                         self._log_metrics_if_needed(detection_interval)
+                        self._emit_heartbeat_if_needed()
 
             except Exception as exc:  # pragma: no cover
+                self.error_counter += 1
                 message = str(exc).lower()
                 if "401" in message or "unauthorized" in message or "auth" in message:
                     msg = "Auth/401"
@@ -678,6 +818,10 @@ class CameraWorker(QThread):
                 else:
                     msg = str(exc)
                 self.error_signal.emit(msg, self.index)
+                if self.error_counter > 10:
+                    print(f"[recovery] camera={self.camera.get('name', self.index)} reopening stream after repeated errors")
+                    QThread.msleep(2000)
+                    self.error_counter = 0
 
             if self.recording:
                 self._finalize_recording_session()

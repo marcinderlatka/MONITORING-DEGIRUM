@@ -287,3 +287,21 @@ Backward compatibility:
 - legacy `confidence_threshold` is still accepted,
 - if split thresholds are missing they are auto-filled from legacy threshold,
 - old recording metadata/catalog entries still load.
+
+## Stability and Recording Quality Improvements
+
+Phase 3 rozszerza pipeline o mechanizmy odporności i diagnostyki bez usuwania istniejących optymalizacji.
+
+- **RTSP watchdog i auto-recovery kamery**: worker monitoruje `last_frame_ts`, wykrywa stall strumienia oraz powtarzające się błędy/dekodowanie pustych klatek. Po przekroczeniu progów automatycznie zamyka i ponownie otwiera strumień, dzięki czemu wątek nie kończy się awarią.
+- **Lepsza poprawność pipeline FPS**: dodano estymację rzeczywistego `stream_fps` ze sliding window i logowanie metryk `[perf]` co 5 sekund (stream/detect/writer FPS, kolejka, dropy).
+- **Heartbeat workerów**: co 10 sekund emitowany jest status (`stream_fps`, `detect_fps`, `writer_fps`, `queue_size`, `dropped_frames`, `recording_active`, `last_detection_seconds`) do GUI.
+- **Panel diagnostyczny GUI**: główne okno pokazuje dla wybranej kamery żywe parametry diagnostyczne odświeżane co sekundę.
+- **Dokładniejsze metadane nagrań**: do sidecar i katalogu trafiają `event_end_ts`, `recording_duration`/`duration`, `detection_count`, `max_confidence`, `avg_confidence`, `stream_fps`.
+- **Lepsze miniatury zdarzeń**: miniatura jest tworzona z obszaru detekcji (crop + margin), skalowana do 320x240 i zapisywana z overlayem detekcji; przy niepoprawnym bbox następuje fallback do pełnej klatki.
+- **UX przeglądarki nagrań**: tabela zawiera nowe kolumny (`duration`, `writer_fps`, `dropped_frames`), wspiera sortowanie po czasie/pewności/czasie trwania i używa cache miniaturek w pamięci, by uniknąć wielokrotnego odczytu tych samych JPG.
+
+### Praktyczne korzyści
+- Mniej "zamrożonych" kamer po problemach sieciowych RTSP.
+- Bardziej naturalna analiza jakości nagrań dzięki metadanym czasu trwania i statystykom zdarzenia.
+- Czytelniejsze miniatury dla operatora (obiekt jest centralny i wyraźny).
+- Szybsze diagnozowanie przeciążeń (drop frame, kolejka nagrywarki, rozjazdy FPS) bez zaglądania do kodu.
