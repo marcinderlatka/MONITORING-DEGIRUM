@@ -218,7 +218,7 @@ CAMERA_SETTING_TOOLTIPS = {
     ),
     "show_camera_info_overlay": (
         "Pokazuje na obrazie kamery scalone informacje o statusie połączenia, FPS, stanie nagrywania i diagnostyce.\n\n"
-        "Wyłączenie ukrywa okno informacyjne, ale nie wyłącza samej detekcji ani nagrywania."
+        "Wyłączenie ukrywa okno informacyjne, ale nie wyłącza detekcji ani nagrywania."
     ),
     "enable_detection": (
         "Włącza analizę AI dla tej kamery.\n\n"
@@ -1798,6 +1798,8 @@ QToolButton:focus { outline: none; }
         self._refresh_camera_status_indicators()
 
     def _update_diagnostics_panel(self):
+        if not self.diag_panel.isVisible():
+            return
         idx = self.camera_list.currentRow()
         if idx < 0 or idx >= len(self.cameras):
             self.diag_panel.setText("Diagnostyka: brak wybranej kamery")
@@ -2110,6 +2112,45 @@ QToolButton:focus { outline: none; }
         lines.append(" | ".join(metric_parts))
         return lines
 
+    def _draw_camera_info_overlay(self, qimg: QImage, idx: int) -> QImage:
+        if qimg.isNull():
+            return qimg
+
+        cam = self.cameras[idx] if 0 <= idx < len(self.cameras) else {}
+        if not bool(cam.get("show_camera_info_overlay", DEFAULT_SHOW_CAMERA_INFO_OVERLAY)):
+            return qimg
+
+        lines = self._build_camera_hud_lines(idx)
+        if not lines:
+            return qimg
+
+        w_label = qimg.width()
+        h_label = qimg.height()
+        painter = QPainter(qimg)
+        try:
+            font = QFont("DejaVu Sans", 12 if w_label < 1100 else 14)
+            painter.setFont(font)
+            fm = painter.fontMetrics()
+            pad = 10
+            line_h = fm.height() + 2
+            text_w = max(fm.horizontalAdvance(line) for line in lines)
+            box_w = text_w + 2 * pad
+            box_h = line_h * len(lines) + 2 * pad
+            x = max(8, w_label - box_w - 16)
+            y = max(8, h_label - box_h - 16)
+
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(0, 0, 0, 128))
+            painter.drawRoundedRect(x, y, box_w, box_h, 8, 8)
+
+            painter.setPen(QColor(255, 255, 255))
+            for i, line in enumerate(lines):
+                painter.drawText(x + pad, y + pad + (i + 1) * line_h - 4, line)
+        finally:
+            painter.end()
+
+        return qimg
+
     def _compose_letterboxed(self, frame, idx: int):
         w_label = max(1, self.camera_view.width())
         h_label = max(1, self.camera_view.height())
@@ -2129,36 +2170,7 @@ QToolButton:focus { outline: none; }
         rgb = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
         qimg = QImage(rgb.data, w_label, h_label, rgb.strides[0], QImage.Format_RGB888).copy()
 
-        cam = self.cameras[idx] if 0 <= idx < len(self.cameras) else {}
-        if not bool(cam.get("show_camera_info_overlay", DEFAULT_SHOW_CAMERA_INFO_OVERLAY)):
-            return qimg
-
-        lines = self._build_camera_hud_lines(idx)
-        if not lines:
-            return qimg
-
-        painter = QPainter(qimg)
-        try:
-            font = QFont("DejaVu Sans", 12 if w_label < 1100 else 14)
-            painter.setFont(font)
-            fm = painter.fontMetrics()
-            pad = 10
-            line_h = fm.height() + 2
-            text_w = max(fm.horizontalAdvance(line) for line in lines)
-            box_w = text_w + 2 * pad
-            box_h = line_h * len(lines) + 2 * pad
-            x = max(8, w_label - box_w - 16)
-            y = max(8, h_label - box_h - 16)
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(0, 0, 0, 128))
-            painter.drawRoundedRect(x, y, box_w, box_h, 8, 8)
-            painter.setPen(QColor(255, 255, 255))
-            for i, line in enumerate(lines):
-                painter.drawText(x + pad, y + pad + (i + 1) * line_h - 4, line)
-        finally:
-            painter.end()
-
-        return qimg
+        return self._draw_camera_info_overlay(qimg, idx)
 
     def _render_current(self):
         now = time.time()
