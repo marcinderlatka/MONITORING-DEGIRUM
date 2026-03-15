@@ -1,25 +1,13 @@
-# Naprawa: Widoczne miniaturki + brak białego tła (obsługa błędów ładowania)
 from __future__ import annotations
 
 import datetime as _dt
 import os
-from contextlib import suppress
-from typing import Any, Dict, List, Mapping, Sequence
+from typing import Dict, List, Mapping, Sequence
 
 import cv2
 import numpy as np
-from PyQt5.QtCore import (
-    QDate,
-    QPoint,
-    QRunnable,
-    QSize,
-    Qt,
-    QThreadPool,
-    QTimer,
-    pyqtSignal,
-    QObject,
-)
-from PyQt5.QtGui import QBrush, QColor, QImage, QPalette, QPixmap
+from PyQt5.QtCore import QDate, QObject, QPoint, QRunnable, QSize, Qt, QThreadPool, pyqtSignal
+from PyQt5.QtGui import QImage, QPalette, QPixmap, QColor
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -29,6 +17,8 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMenu,
     QMessageBox,
     QPushButton,
@@ -39,134 +29,99 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from ..config import ALERTS_HISTORY_PATH, RECORDINGS_CATALOG_PATH, VISIBLE_CLASSES
+from ..config import ALERTS_HISTORY_PATH, VISIBLE_CLASSES
 from ..recordings import (
     CameraDirectory,
     RecordingMetadata,
-    iter_catalog_entries,
-    load_history_metadata,
+    default_filter_bounds,
+    load_recording_entries,
     thumbnail_candidates_for_entry,
 )
 from ..storage import remove_from_recordings_catalog
 
 
-def _thumbnail_candidates_for_entry(entry: RecordingMetadata) -> List[str]:
-    return thumbnail_candidates_for_entry(entry)
-
-
 class ThumbnailWorker(QObject, QRunnable):
-    """Asynchronously prepares preview images for recordings."""
-
     thumbnail_ready = pyqtSignal(str, object)
 
-    def __init__(self, entry: RecordingMetadata, target_size: QSize):
+    def __init__(self, entry: RecordingMetadata):
         super().__init__()
         QRunnable.__init__(self)
         self._entry = entry
-        self._size = target_size
 
-    def run(self) -> None:  # pragma: no cover - exercised via GUI
-        frame = self._load_image()
-        self.thumbnail_ready.emit(self._entry.filepath, frame)
+    def run(self) -> None:  # pragma: no cover - async GUI path
+        image = self._load_image()
+        self.thumbnail_ready.emit(self._entry.filepath, image)
 
-    def _load_image(self) -> np.ndarray | None:
-        for candidate in self._thumbnail_candidates():
-            image = self._load_thumbnail_file(candidate)
-            if image is not None:
-                return image
+    def _load_image(self) -> QImage:
+        for candidate in thumbnail_candidates_for_entry(self._entry):
+            if not os.path.exists(candidate):
+                continue
+            image = cv2.imread(candidate, cv2.IMREAD_COLOR)
+            if image is None:
+                continue
+            return self._qimage_from_bgr(image)
 
         if os.path.exists(self._entry.filepath):
             cap = cv2.VideoCapture(self._entry.filepath)
             try:
-                frame = self._extract_preview_frame(cap)
+                ok, frame = cap.read()
             finally:
                 cap.release()
-            if frame is not None:
-                return frame
-
-        return None
-
-    def _thumbnail_candidates(self) -> List[str]:
-        return _thumbnail_candidates_for_entry(self._entry)
-
-    def _load_thumbnail_file(self, path: str) -> object | None:
-        """Najprostsze i najpewniejsze ładowanie miniatury (bez QImageReader)."""
-        from PyQt5.QtGui import QPixmap
-
-        if not os.path.exists(path):
-            print("⚠️  Miniatura nie istnieje:", path)
-            return None
-
-        pix = QPixmap(path)
-        if pix.isNull():
-            print("❌ Nie udało się wczytać (pusty QPixmap):", path)
-            return None
-        print("✅ Wczytano miniaturę:", path)
-        return pix
-
-    def _extract_preview_frame(self, cap: cv2.VideoCapture) -> Any:
-        """Pick a representative non-dark frame from the video if possible."""
-
-        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        sample_indices: List[int] = []
-        if frame_count > 0:
-            sample_indices.extend(
-                sorted(
-                    {
-                        max(0, min(frame_count - 1, int(frame_count * ratio)))
-                        for ratio in (0.05, 0.15, 0.3, 0.5)
-                    }
-                )
-            )
-        sample_indices.append(0)
-
-        fallback: Any | None = None
-
-        for index in sample_indices:
-            if index:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, index)
-            ok, frame = cap.read()
-            if not ok or frame is None:
-                continue
-            if not self._is_dark(frame):
-                return frame
-            if fallback is None:
-                fallback = frame
-
-        # Fallback: scan first few frames sequentially in case seeking failed.
-        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-        for _ in range(30):
-            ok, frame = cap.read()
-            if not ok or frame is None:
-                break
-            if not self._is_dark(frame):
-                return frame
-            if fallback is None:
-                fallback = frame
-
-        return fallback
+            if ok and frame is not None:
+                return self._qimage_from_bgr(frame)
+        return QImage()
 
     @staticmethod
-    def _is_dark(frame: Any) -> bool:
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        return float(cv2.mean(gray)[0]) < 12.0
+    def _qimage_from_bgr(frame: np.ndarray) -> QImage:
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb.shape
+        return QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy()
+
+
+class RecordingCardWidget(QWidget):
+    def __init__(self, entry: RecordingMetadata, thumb_size: QSize, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._thumb_size = thumb_size
+        self._entry = entry
+        self.setObjectName("recordingCard")
+        self.thumb = QLabel()
+        self.thumb.setAlignment(Qt.AlignCenter)
+        self.thumb.setFixedSize(self._thumb_size)
+
+        self.title = QLabel(f"{entry.display_time}")
+        self.title.setWordWrap(True)
+        self.meta = QLabel(f"{entry.camera} • {entry.label}")
+        duration = float(entry.extra.get("duration", entry.extra.get("recording_duration", 0.0)) or 0.0)
+        confidence = float(entry.confidence or 0.0)
+        self.extra = QLabel(f"conf: {confidence:.2f} • dur: {duration:.1f}s")
+        writer_fps = float(entry.extra.get("writer_fps", 0.0) or 0.0)
+        dropped = int(entry.extra.get("dropped_frames", 0) or 0)
+        self.diag = QLabel(f"writer: {writer_fps:.2f} • drop: {dropped}")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.addWidget(self.thumb)
+        layout.addWidget(self.title)
+        layout.addWidget(self.meta)
+        layout.addWidget(self.extra)
+        layout.addWidget(self.diag)
+
+        self._set_selected(False)
+
+    def set_thumbnail(self, pixmap: QPixmap) -> None:
+        self.thumb.setPixmap(pixmap)
+
+    def _set_selected(self, selected: bool) -> None:
+        border = "#1d5fd1" if selected else "#d0d0d0"
+        bg = "#eaf1ff" if selected else "#ffffff"
+        self.setStyleSheet(
+            f"#recordingCard {{background: {bg}; border: 1px solid {border}; border-radius: 8px;}}"
+            "QLabel { color: #000000; }"
+        )
 
 
 class RecordingsBrowserDialog(QDialog):
-    """Interactive browser for reviewing, filtering and deleting recordings."""
-
     open_video = pyqtSignal(str)
-
-    CHECK_COLUMN = 0
-    THUMB_COLUMN = 1
-    TIME_COLUMN = 2
-    CAMERA_COLUMN = 3
-    CLASS_COLUMN = 4
-    CONF_COLUMN = 5
-    DURATION_COLUMN = 6
-    WRITER_FPS_COLUMN = 7
-    DROPPED_COLUMN = 8
-    FILE_COLUMN = 9
 
     def __init__(
         self,
@@ -177,114 +132,41 @@ class RecordingsBrowserDialog(QDialog):
     ):
         super().__init__(parent)
         self.setWindowTitle("Nagrania – przeglądarka")
-        self.resize(1200, 720)
-        self._apply_light_theme()
-
-        self._block_item_changed = False
-        self._syncing_select_all = False
-
+        self.resize(1280, 760)
+        self._thumb_size = QSize(240, 160)
         self._camera_dirs = list(camera_dirs)
         self._history_path = str(history_path)
         self._history_items = [dict(item) for item in history_items] if history_items is not None else None
         self._entries: List[RecordingMetadata] = []
-        self._row_lookup: Dict[str, int] = {}
+        self._filtered_entries: List[RecordingMetadata] = []
         self.thumbnail_cache: Dict[str, QPixmap] = {}
         self._pending_thumbnails: set[str] = set()
         self._thumbnail_workers: Dict[str, ThumbnailWorker] = {}
-        self._thumbnail_labels: Dict[str, QLabel] = {}
-        self._class_options: Dict[str, str] = {
-            cls.casefold(): cls for cls in VISIBLE_CLASSES
-        }
-        self._min_date: QDate | None = None
-        self._max_date: QDate | None = None
+        self._tile_items: Dict[str, QListWidgetItem] = {}
+        self._tile_cards: Dict[str, RecordingCardWidget] = {}
+        self._table_rows: Dict[str, int] = {}
+        self._load_diagnostics: Dict[str, object] = {}
+        self.thumbnail_pool = QThreadPool(self)
 
-        self._thumb_size = QSize(200, 150)
-        self._placeholder_pixmap_obj = self._create_placeholder_pixmap()
-        self.thumbnail_pool = QThreadPool()
+        self._class_options: Dict[str, str] = {str(c).casefold(): str(c) for c in VISIBLE_CLASSES}
+        self._apply_light_theme()
 
-        layout = QVBoxLayout(self)
-        layout.addLayout(self._build_filters())
-        layout.addWidget(self._build_table())
+        root = QVBoxLayout(self)
+        root.addLayout(self._build_filters())
+        root.addLayout(self._build_mode_row())
+        root.addLayout(self._build_views())
 
-        QTimer.singleShot(0, self.refresh)
+        self.refresh()
 
-    # ------------------------------------------------------------------ UI --
     def _apply_light_theme(self) -> None:
         palette = QPalette()
-        background = QColor("#ffffff")
-        surface = QColor("#f6f6f6")
-        accent = QColor("#1d5fd1")
-        text = QColor("#000000")
-        palette.setColor(QPalette.Window, background)
+        palette.setColor(QPalette.Window, QColor("#ffffff"))
         palette.setColor(QPalette.Base, QColor("#ffffff"))
-        palette.setColor(QPalette.AlternateBase, surface)
-        palette.setColor(QPalette.Text, text)
-        palette.setColor(QPalette.Button, QColor("#ffffff"))
-        palette.setColor(QPalette.ButtonText, text)
-        palette.setColor(QPalette.Highlight, accent)
-        palette.setColor(QPalette.HighlightedText, QColor("#ffffff"))
-        palette.setColor(QPalette.WindowText, text)
-        palette.setColor(QPalette.ToolTipBase, QColor("#ffffdc"))
-        palette.setColor(QPalette.ToolTipText, text)
-        self.setPalette(palette)
-        self.setAutoFillBackground(True)
-        self.setStyleSheet(
-            """
-            QDialog { background-color: #ffffff; color: #000000; }
-            QLabel { color: #000000; }
-            QLineEdit, QComboBox, QDateEdit {
-                background-color: #ffffff;
-                color: #000000;
-                border: 1px solid #c6c6c6;
-                padding: 4px 6px;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #ffffff;
-                color: #000000;
-                selection-background-color: #1d5fd1;
-                selection-color: #ffffff;
-            }
-            QPushButton {
-                background-color: #ffffff;
-                color: #000000;
-                border: 1px solid #bdbdbd;
-                padding: 6px 12px;
-            }
-            QPushButton:hover {
-                background-color: #f0f0f0;
-            }
-            QTableWidget {
-                background-color: #ffffff;
-                alternate-background-color: #f5f5f5;
-                color: #000000;
-                gridline-color: #d0d0d0;
-            }
-            QHeaderView::section {
-                background-color: #f0f0f0;
-                color: #000000;
-                padding: 4px;
-                border: 0px;
-                border-right: 1px solid #d0d0d0;
-            }
-        """
-        )
-
-    def _configure_table_palette(self) -> None:
-        if not hasattr(self, "table"):
-            return
-        palette = self.table.palette()
-        palette.setColor(QPalette.Base, QColor("#ffffff"))
-        palette.setColor(QPalette.AlternateBase, QColor("#f5f5f5"))
         palette.setColor(QPalette.Text, QColor("#000000"))
-        palette.setColor(QPalette.Highlight, QColor("#1d5fd1"))
-        palette.setColor(QPalette.HighlightedText, QColor("#ffffff"))
-        palette.setColor(QPalette.Button, QColor("#ffffff"))
-        palette.setColor(QPalette.ButtonText, QColor("#000000"))
-        self.table.setPalette(palette)
+        self.setPalette(palette)
 
     def _build_filters(self) -> QHBoxLayout:
         layout = QHBoxLayout()
-
         layout.addWidget(QLabel("Kamera:"))
         self.camera_filter = QComboBox()
         self.camera_filter.addItem("Wszystkie kamery")
@@ -309,185 +191,308 @@ class RecordingsBrowserDialog(QDialog):
         self.date_to.setCalendarPopup(True)
         layout.addWidget(self.date_to)
 
+        layout.addWidget(QLabel("Zakres:"))
+        self.quick_range = QComboBox()
+        self.quick_range.addItems(["Wszystkie", "Dzisiaj", "7 dni", "30 dni"])
+        layout.addWidget(self.quick_range)
+
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Filtruj po nazwie pliku lub etykiecie...")
         layout.addWidget(self.search_edit, stretch=1)
 
         self.refresh_btn = QPushButton("Odśwież")
-        layout.addWidget(self.refresh_btn)
-
         self.delete_btn = QPushButton("Usuń zaznaczone")
-        layout.addWidget(self.delete_btn)
-
         self.select_all_checkbox = QCheckBox("Zaznacz wszystko")
-        self.select_all_checkbox.setTristate(True)
-        self.select_all_checkbox.setCheckState(Qt.Unchecked)
+        layout.addWidget(self.refresh_btn)
+        layout.addWidget(self.delete_btn)
         layout.addWidget(self.select_all_checkbox)
-
-        layout.addStretch(1)
-
-        today = QDate.currentDate()
-        self.date_to.setDate(today)
-        self.date_from.setDate(today.addDays(-1))
 
         self.camera_filter.currentTextChanged.connect(self._apply_filters)
         self.class_filter.currentTextChanged.connect(self._apply_filters)
         self.date_from.dateChanged.connect(self._apply_filters)
         self.date_to.dateChanged.connect(self._apply_filters)
         self.search_edit.textChanged.connect(self._apply_filters)
+        self.quick_range.currentTextChanged.connect(self._apply_quick_range)
         self.refresh_btn.clicked.connect(self.refresh)
         self.delete_btn.clicked.connect(self.delete_selected)
-        self.select_all_checkbox.stateChanged.connect(self._handle_select_all_changed)
-
+        self.select_all_checkbox.stateChanged.connect(self._select_all_changed)
         return layout
 
-    def _build_table(self) -> QWidget:
-        container = QWidget()
-        self._table_stack = QStackedLayout(container)
+    def _build_mode_row(self) -> QHBoxLayout:
+        layout = QHBoxLayout()
+        self.view_mode = QComboBox()
+        self.view_mode.addItems(["Kafelki", "Lista"])
+        self.view_mode.setCurrentText("Kafelki")
+        self.view_mode.currentTextChanged.connect(self._switch_view)
+        self.status_label = QLabel("Wczytuję nagrania...")
+        layout.addWidget(QLabel("Widok:"))
+        layout.addWidget(self.view_mode)
+        layout.addStretch(1)
+        layout.addWidget(self.status_label)
+        return layout
 
-        self.loading_label = QLabel("Wczytuję Twoje nagrania...")
-        self.loading_label.setAlignment(Qt.AlignCenter)
-        self.loading_label.setWordWrap(True)
-        self.loading_label.setStyleSheet(
-            "color: #3a3a3a; font-size: 18px; background-color: #ffffff;"
-        )
-        self.loading_label.setMargin(40)
-        self._table_stack.addWidget(self.loading_label)
+    def _build_views(self) -> QHBoxLayout:
+        layout = QHBoxLayout()
+        self._view_stack = QStackedLayout()
 
-        self.table = QTableWidget(0, 10)
-        self.table.setHorizontalHeaderLabels(
-            [
-                "Usuń",
-                "Miniatura",
-                "Czas",
-                "Kamera",
-                "Klasa",
-                "Pewność",
-                "Czas trwania",
-                "Writer FPS",
-                "Drop",
-                "Plik",
-            ]
-        )
+        self.tile_list = QListWidget()
+        self.tile_list.setViewMode(QListWidget.IconMode)
+        self.tile_list.setResizeMode(QListWidget.Adjust)
+        self.tile_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.tile_list.setSpacing(12)
+        self.tile_list.setGridSize(QSize(280, 290))
+        self.tile_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tile_list.customContextMenuRequested.connect(self._context_menu)
+        self.tile_list.itemSelectionChanged.connect(self._sync_card_selection_state)
+        self.tile_list.itemDoubleClicked.connect(self._tile_double_clicked)
+        self._view_stack.addWidget(self.tile_list)
+
+        self.table = QTableWidget(0, 8)
+        self.table.setHorizontalHeaderLabels(["Usuń", "Miniatura", "Czas", "Kamera", "Klasa", "Pewność", "Czas trwania", "Plik"])
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.table.setAlternatingRowColors(False)
-        self.table.setIconSize(self._thumb_size)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.table.setStyleSheet(
-            "QTableWidget::item{selection-background-color: transparent;"
-            " background: transparent; border:0.5px solid transparent;}"
-            "QTableWidget::item:selected{selection-background-color: transparent;"
-            " background: transparent; color: inherit; border:0.5px solid transparent;}"
-        )
-        header = self.table.horizontalHeader()
-        header.setStretchLastSection(True)
-        header.setDefaultSectionSize(160)
-        self.table.setSortingEnabled(True)
-        self.table.setColumnWidth(self.CHECK_COLUMN, 90)
-        self.table.setColumnWidth(self.THUMB_COLUMN, self._thumb_size.width())
-        self.table.verticalHeader().setDefaultSectionSize(self._thumb_size.height() + 20)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._context_menu)
-        self.table.cellDoubleClicked.connect(self._cell_double_clicked)
-        self.table.itemChanged.connect(self._handle_item_changed)
-        self.table.itemSelectionChanged.connect(self._update_row_highlight)
+        self.table.cellDoubleClicked.connect(self._table_double_clicked)
+        self._view_stack.addWidget(self.table)
 
-        self._configure_table_palette()
+        holder = QWidget()
+        holder.setLayout(self._view_stack)
+        self._view_stack.setCurrentWidget(self.tile_list)
+        layout.addWidget(holder)
 
-        self._table_stack.addWidget(self.table)
-        self._table_stack.setCurrentWidget(self.loading_label)
-        return container
-
-    # --------------------------------------------------------------- actions --
-    def load_recordings(self) -> List[RecordingMetadata]:
-        catalog_path = os.path.abspath(str(RECORDINGS_CATALOG_PATH))
-        print(f"[RecordingsBrowser] Ładowanie katalogu nagrań z: {catalog_path}")
-        print(f"[RecordingsBrowser] Historia alertów: {self._history_path}")
-        try:
-            entries = self._load_entries_from_catalog()
-        except Exception as exc:  # pragma: no cover - diagnostyka GUI
-            print(f"[RecordingsBrowser] Błąd odczytu katalogu: {exc}")
-            return []
-
-        if not entries:
-            print("[RecordingsBrowser] Nie znaleziono żadnych wpisów w katalogu.")
-            return []
-
-        print(f"[RecordingsBrowser] Wczytano {len(entries)} wpisów.")
-        for entry in entries:
-            thumb_path = self._resolve_thumbnail_path(entry)
-            if thumb_path and os.path.exists(thumb_path):
-                print(f"  • {entry.filepath} | thumb: {thumb_path}")
-            else:
-                missing = thumb_path or "(brak informacji)"
-                print(f"  • {entry.filepath} | thumb brak ({missing})")
-        return entries
+        self.empty_label = QLabel("")
+        self.empty_label.setAlignment(Qt.AlignCenter)
+        self.empty_label.setStyleSheet("font-size: 16px; color: #555;")
+        layout.addWidget(self.empty_label)
+        self.empty_label.hide()
+        return layout
 
     def refresh(self) -> None:
         self.refresh_btn.setEnabled(False)
-        self._set_loading_state(True)
-
         try:
-            self._entries = []
-            self._row_lookup.clear()
-            self.thumbnail_cache.clear()
-            self._pending_thumbnails.clear()
-            self._thumbnail_workers.clear()
-            self._thumbnail_labels.clear()
-            self.table.setRowCount(0)
-            self._min_date = None
-            self._max_date = None
-            self._set_select_all_state(Qt.Unchecked)
+            history_source = self._history_items if self._history_items is not None else self._history_path
+            entries, diag = load_recording_entries(self._camera_dirs, history_source, prefer_catalog=True, allow_disk_fallback=True, heal_catalog=True)
+            self._entries = entries
+            self._load_diagnostics = diag
 
-            entries = self.load_recordings()
-            self._entries = list(entries)
-
-            for entry in self._entries:
-                self._update_class_options(entry.label)
-                self._update_date_range(entry)
-
+            self._ensure_class_filter_entries(entries)
+            self._set_default_date_bounds(entries)
             self._apply_filters()
         finally:
             self.refresh_btn.setEnabled(True)
-            self._set_loading_state(False)
 
-    def _set_loading_state(self, loading: bool) -> None:
-        if not hasattr(self, "_table_stack"):
+    def _set_default_date_bounds(self, entries: Sequence[RecordingMetadata]) -> None:
+        dfrom, dto = default_filter_bounds(entries)
+        qfrom = QDate(dfrom.year, dfrom.month, dfrom.day)
+        qto = QDate(dto.year, dto.month, dto.day)
+        self.date_from.setDate(qfrom)
+        self.date_to.setDate(qto)
+        self.date_from.setMinimumDate(qfrom)
+        self.date_to.setMinimumDate(qfrom)
+        self.date_from.setMaximumDate(qto)
+        self.date_to.setMaximumDate(qto)
+        self.quick_range.setCurrentText("Wszystkie")
+
+    def _apply_quick_range(self, value: str) -> None:
+        if value == "Wszystkie":
+            if self._entries:
+                self._set_default_date_bounds(self._entries)
             return
-        target = self.loading_label if loading else self.table
-        if self._table_stack.currentWidget() is not target:
-            self._table_stack.setCurrentWidget(target)
-        self.loading_label.setVisible(loading)
+        today = QDate.currentDate()
+        self.date_to.setDate(today)
+        if value == "Dzisiaj":
+            self.date_from.setDate(today)
+        elif value == "7 dni":
+            self.date_from.setDate(today.addDays(-6))
+        elif value == "30 dni":
+            self.date_from.setDate(today.addDays(-29))
+
+    def _matches_filters(self, entry: RecordingMetadata) -> bool:
+        camera_sel = self.camera_filter.currentText()
+        if camera_sel != "Wszystkie kamery" and entry.camera.casefold() != camera_sel.casefold():
+            return False
+        class_sel = self.class_filter.currentText()
+        if class_sel != "Wszystkie klasy" and entry.label.casefold() != class_sel.casefold():
+            return False
+
+        dt = _dt.datetime.fromtimestamp(entry.timestamp)
+        qdate = QDate(dt.year, dt.month, dt.day)
+        if qdate < self.date_from.date() or qdate > self.date_to.date():
+            return False
+
+        needle = self.search_edit.text().strip().lower()
+        if needle:
+            if needle not in f"{entry.filename} {entry.label}".lower():
+                return False
+        return True
+
+    def _apply_filters(self) -> None:
+        self._filtered_entries = [entry for entry in self._entries if self._matches_filters(entry)]
+        self._rebuild_tile_view(self._filtered_entries)
+        self._rebuild_table_view(self._filtered_entries)
+        self._update_empty_state()
+        self.status_label.setText(f"Wczytano {len(self._entries)} nagrań, widoczne: {len(self._filtered_entries)}")
+
+    def _rebuild_tile_view(self, entries: Sequence[RecordingMetadata]) -> None:
+        self.tile_list.clear()
+        self._tile_items.clear()
+        self._tile_cards.clear()
+        for entry in entries:
+            item = QListWidgetItem()
+            item.setData(Qt.UserRole, entry.filepath)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            item.setCheckState(Qt.Unchecked)
+            item.setSizeHint(QSize(270, 280))
+            self.tile_list.addItem(item)
+            card = RecordingCardWidget(entry, self._thumb_size)
+            card.set_thumbnail(self._placeholder_pixmap())
+            self.tile_list.setItemWidget(item, card)
+            self._tile_items[entry.filepath] = item
+            self._tile_cards[entry.filepath] = card
+            self._request_thumbnail(entry)
+
+    def _rebuild_table_view(self, entries: Sequence[RecordingMetadata]) -> None:
+        self.table.setSortingEnabled(False)
+        self.table.setRowCount(0)
+        self._table_rows.clear()
+        for row, entry in enumerate(entries):
+            self.table.insertRow(row)
+            chk = QTableWidgetItem()
+            chk.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            chk.setCheckState(Qt.Unchecked)
+            chk.setData(Qt.UserRole, entry.filepath)
+            self.table.setItem(row, 0, chk)
+
+            thumb_lbl = QLabel()
+            thumb_lbl.setAlignment(Qt.AlignCenter)
+            thumb_lbl.setPixmap(self.thumbnail_cache.get(entry.filepath, self._placeholder_pixmap()))
+            self.table.setCellWidget(row, 1, thumb_lbl)
+
+            self.table.setItem(row, 2, QTableWidgetItem(entry.display_time))
+            self.table.setItem(row, 3, QTableWidgetItem(entry.camera))
+            self.table.setItem(row, 4, QTableWidgetItem(entry.label))
+            self.table.setItem(row, 5, QTableWidgetItem("-" if entry.confidence <= 0 else f"{entry.confidence:.2f}"))
+            duration = float(entry.extra.get("duration", entry.extra.get("recording_duration", 0.0)) or 0.0)
+            self.table.setItem(row, 6, QTableWidgetItem("-" if duration <= 0 else f"{duration:.1f}s"))
+            file_item = QTableWidgetItem(entry.filepath)
+            file_item.setData(Qt.UserRole, entry.filepath)
+            self.table.setItem(row, 7, file_item)
+            self._table_rows[entry.filepath] = row
+            if entry.filepath not in self.thumbnail_cache:
+                self._request_thumbnail(entry)
+        self.table.setSortingEnabled(True)
+
+    def _update_empty_state(self) -> None:
+        message = ""
+        if not self._entries:
+            dirs_available = any(os.path.isdir(path) for _name, path in self._camera_dirs)
+            message = "Nie znaleziono żadnych nagrań." if dirs_available else "Folder z nagraniami jest niedostępny."
+        elif not self._filtered_entries:
+            message = "Brak nagrań dla bieżących filtrów."
+        elif self._load_diagnostics.get("used_disk_fallback") and self._load_diagnostics.get("catalog_entries", 0) == 0:
+            message = "Katalog był pusty lub niepełny — wczytano nagrania bezpośrednio z dysku."
+
+        if message:
+            self.empty_label.setText(message)
+            self.empty_label.show()
+        else:
+            self.empty_label.hide()
+
+    def _request_thumbnail(self, entry: RecordingMetadata) -> None:
+        if entry.filepath in self.thumbnail_cache or entry.filepath in self._pending_thumbnails:
+            return
+        worker = ThumbnailWorker(entry)
+        worker.thumbnail_ready.connect(self._apply_thumbnail)
+        self._thumbnail_workers[entry.filepath] = worker
+        self._pending_thumbnails.add(entry.filepath)
+        self.thumbnail_pool.start(worker)
+
+    def _apply_thumbnail(self, filepath: str, image: object) -> None:
+        self._pending_thumbnails.discard(filepath)
+        self._thumbnail_workers.pop(filepath, None)
+        pixmap = self._placeholder_pixmap()
+        if isinstance(image, QImage) and not image.isNull():
+            pixmap = QPixmap.fromImage(image).scaled(self._thumb_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.thumbnail_cache[filepath] = pixmap
+
+        card = self._tile_cards.get(filepath)
+        if card is not None:
+            card.set_thumbnail(pixmap)
+
+        row = self._table_rows.get(filepath)
+        if row is not None:
+            widget = self.table.cellWidget(row, 1)
+            if isinstance(widget, QLabel):
+                widget.setPixmap(pixmap)
+
+    def _placeholder_pixmap(self) -> QPixmap:
+        pix = QPixmap(self._thumb_size)
+        pix.fill(QColor("#e9edf3"))
+        return pix
+
+    def _switch_view(self, mode: str) -> None:
+        current = self._current_selected_path()
+        self._view_stack.setCurrentWidget(self.tile_list if mode == "Kafelki" else self.table)
+        if current:
+            self._restore_selection(current)
+
+    def _current_selected_path(self) -> str:
+        if self._view_stack.currentWidget() is self.tile_list:
+            item = self.tile_list.currentItem()
+            return str(item.data(Qt.UserRole)) if item else ""
+        row = self.table.currentRow()
+        if row < 0:
+            return ""
+        item = self.table.item(row, 7)
+        return str(item.data(Qt.UserRole)) if item else ""
+
+    def _restore_selection(self, filepath: str) -> None:
+        item = self._tile_items.get(filepath)
+        if item is not None:
+            self.tile_list.setCurrentItem(item)
+        row = self._table_rows.get(filepath)
+        if row is not None:
+            self.table.selectRow(row)
+
+    def _selected_paths(self) -> List[str]:
+        paths: List[str] = []
+        if self._view_stack.currentWidget() is self.tile_list:
+            for i in range(self.tile_list.count()):
+                item = self.tile_list.item(i)
+                if item.checkState() == Qt.Checked or item.isSelected():
+                    paths.append(str(item.data(Qt.UserRole)))
+        else:
+            for row in range(self.table.rowCount()):
+                chk = self.table.item(row, 0)
+                if chk and chk.checkState() == Qt.Checked:
+                    paths.append(str(chk.data(Qt.UserRole)))
+            for idx in self.table.selectionModel().selectedRows():
+                item = self.table.item(idx.row(), 7)
+                if item:
+                    paths.append(str(item.data(Qt.UserRole)))
+        # de-duplicate preserving order
+        seen = set()
+        out: List[str] = []
+        for p in paths:
+            if p not in seen:
+                out.append(p)
+                seen.add(p)
+        return out
 
     def delete_selected(self) -> None:
         paths = self._selected_paths()
         if not paths:
             QMessageBox.information(self, "Usuń nagrania", "Nie wybrano żadnych nagrań.")
             return
-
-        if len(paths) == 1:
-            msg = f"Czy na pewno usunąć nagranie?\n\n{os.path.basename(paths[0])}"
-        else:
-            msg = f"Czy na pewno usunąć {len(paths)} nagrań?"
-
-        if (
-            QMessageBox.question(
-                self,
-                "Potwierdzenie",
-                msg,
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
-            )
-            != QMessageBox.Yes
-        ):
+        if QMessageBox.question(self, "Potwierdzenie", f"Usunąć {len(paths)} nagrań?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
             return
 
         errors: List[str] = []
-        deleted = len(paths)
         for fp in paths:
-            for candidate in (fp, fp + ".json", fp + ".jpg"):
+            for candidate in (fp, fp + ".json", fp + ".mp4.json", fp + ".jpg"):
                 if not os.path.exists(candidate):
                     continue
                 try:
@@ -496,602 +501,74 @@ class RecordingsBrowserDialog(QDialog):
                     errors.append(f"{os.path.basename(candidate)}: {exc}")
 
         remove_from_recordings_catalog(paths)
-
         removed = set(paths)
         self._entries = [entry for entry in self._entries if entry.filepath not in removed]
         for path in removed:
             self.thumbnail_cache.pop(path, None)
-            self._pending_thumbnails.discard(path)
-
         self._apply_filters()
-
         if errors:
-            QMessageBox.warning(
-                self,
-                "Usunięto z błędami",
-                "Usunięto: {} (część z błędami):\n- {}".format(deleted, "\n- ".join(errors)),
-            )
-        else:
-            QMessageBox.information(self, "Usunięto", f"Usunięto {deleted} nagrań.")
+            QMessageBox.warning(self, "Usuń nagrania", "Częściowo usunięto pliki:\n" + "\n".join(errors))
 
-    # -------------------------------------------------------------- handlers --
-    def _load_entries_from_catalog(self) -> List[RecordingMetadata]:
-        history_source: (
-            Mapping[str, Mapping[str, object]]
-            | Sequence[Mapping[str, object]]
-            | str
-        )
-        if self._history_items is not None:
-            history_source = self._history_items
-        else:
-            history_source = self._history_path
-
-        history = load_history_metadata(history_source)
-        try:
-            entries = list(iter_catalog_entries(self._camera_dirs, history_meta=history))
-        except Exception:
-            entries = []
-
-        entries.sort(key=lambda item: (-item.timestamp, item.filename))
-        return entries
-
-    def _cell_double_clicked(self, row: int, column: int) -> None:
-        path = self._row_filepath(row)
-        if path and os.path.exists(path):
-            self.open_video.emit(path)
+    def _open_selected(self) -> None:
+        paths = self._selected_paths()
+        if paths:
+            self.open_video.emit(paths[0])
 
     def _context_menu(self, pos: QPoint) -> None:
         menu = QMenu(self)
         open_action = menu.addAction("Otwórz")
-        delete_action = menu.addAction("Usuń")
-        selected_action = menu.exec_(self.table.mapToGlobal(pos))
-        if selected_action == open_action:
-            selected = self.table.currentRow()
-            if selected >= 0:
-                self._cell_double_clicked(selected, self.THUMB_COLUMN)
-        elif selected_action == delete_action:
+        del_action = menu.addAction("Usuń")
+        show_action = menu.addAction("Pokaż w folderze")
+        action = menu.exec_(self.sender().mapToGlobal(pos))
+        if action == open_action:
+            self._open_selected()
+        elif action == del_action:
             self.delete_selected()
+        elif action == show_action:
+            paths = self._selected_paths()
+            if paths:
+                QMessageBox.information(self, "Folder", os.path.dirname(paths[0]))
 
-    # --------------------------------------------------------------- helpers --
-    def _row_filepath(self, row: int) -> str | None:
-        for column in range(self.table.columnCount()):
-            item = self.table.item(row, column)
-            if not item:
-                continue
+    def _tile_double_clicked(self, item: QListWidgetItem) -> None:
+        path = item.data(Qt.UserRole)
+        if path:
+            self.open_video.emit(str(path))
+
+    def _table_double_clicked(self, row: int, _col: int) -> None:
+        item = self.table.item(row, 7)
+        if item:
             path = item.data(Qt.UserRole)
             if path:
-                return str(path)
-        return None
+                self.open_video.emit(str(path))
 
-    def _handle_item_changed(self, item: QTableWidgetItem) -> None:
-        if self._block_item_changed:
-            return
-        if item.column() != self.CHECK_COLUMN:
-            return
-        self._sync_select_all_checkbox()
-
-    def _handle_select_all_changed(self, state: int) -> None:
-        if self._syncing_select_all:
-            return
-        if state == Qt.PartiallyChecked:
-            return
-        target = Qt.Checked if state == Qt.Checked else Qt.Unchecked
-        self._set_all_checkboxes(target)
-
-    def _set_all_checkboxes(self, state: Qt.CheckState) -> None:
-        self._block_item_changed = True
-        for row in range(self.table.rowCount()):
-            item = self.table.item(row, self.CHECK_COLUMN)
-            if item:
-                item.setCheckState(state)
-        self._block_item_changed = False
-        self._sync_select_all_checkbox()
-
-    def _set_select_all_state(self, state: Qt.CheckState) -> None:
-        if not hasattr(self, "select_all_checkbox"):
-            return
-        self._syncing_select_all = True
-        self.select_all_checkbox.setCheckState(state)
-        self._syncing_select_all = False
-
-    def _sync_select_all_checkbox(self) -> None:
-        if not hasattr(self, "select_all_checkbox"):
-            return
-        total = self.table.rowCount()
-        checked = 0
-        for row in range(total):
-            item = self.table.item(row, self.CHECK_COLUMN)
-            if item and item.checkState() == Qt.Checked:
-                checked += 1
-        if total == 0 or checked == 0:
-            state = Qt.Unchecked
-        elif checked == total:
-            state = Qt.Checked
+    def _select_all_changed(self, state: int) -> None:
+        checked = state == Qt.Checked
+        if self._view_stack.currentWidget() is self.tile_list:
+            for i in range(self.tile_list.count()):
+                self.tile_list.item(i).setCheckState(Qt.Checked if checked else Qt.Unchecked)
         else:
-            state = Qt.PartiallyChecked
-        self._set_select_all_state(state)
+            for row in range(self.table.rowCount()):
+                item = self.table.item(row, 0)
+                if item:
+                    item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
 
-    def _selected_paths(self) -> List[str]:
-        paths: List[str] = []
-        for row in range(self.table.rowCount()):
-            item = self.table.item(row, self.CHECK_COLUMN)
-            if not item:
+    def _ensure_class_filter_entries(self, entries: Sequence[RecordingMetadata]) -> None:
+        for entry in entries:
+            key = entry.label.casefold()
+            if not key or key in self._class_options:
                 continue
-            if item.checkState() == Qt.Checked:
-                path = item.data(Qt.UserRole)
-                if path:
-                    paths.append(str(path))
-        if paths:
-            return paths
+            self._class_options[key] = entry.label
+            self.class_filter.addItem(entry.label)
 
-        for item in self.table.selectedItems():
-            if item.column() != self.THUMB_COLUMN:
-                continue
-            path = item.data(Qt.UserRole)
-            if path:
-                paths.append(str(path))
-        if not paths and self.table.currentRow() >= 0:
-            item = self.table.item(self.table.currentRow(), self.THUMB_COLUMN)
-            if item:
-                path = item.data(Qt.UserRole)
-                if path:
-                    paths.append(str(path))
-        return paths
+    def _sync_card_selection_state(self) -> None:
+        selected = {self.tile_list.row(item) for item in self.tile_list.selectedItems()}
+        for idx in range(self.tile_list.count()):
+            item = self.tile_list.item(idx)
+            path = str(item.data(Qt.UserRole))
+            card = self._tile_cards.get(path)
+            if card:
+                card._set_selected(idx in selected)
 
-    def _update_class_options(self, label: str) -> None:
-        if not label:
-            return
-        key = label.casefold()
-        if key in self._class_options:
-            return
-        self._class_options[key] = label
-        self.class_filter.addItem(label)
-
-    def _update_date_range(self, entry: RecordingMetadata) -> None:
-        dt = _dt.datetime.fromtimestamp(entry.timestamp)
-        qdate = QDate(dt.year, dt.month, dt.day)
-        changed = False
-        if self._min_date is None or qdate < self._min_date:
-            self._min_date = qdate
-            changed = True
-        if self._max_date is None or qdate > self._max_date:
-            self._max_date = qdate
-            changed = True
-        if changed:
-            with suppress(Exception):
-                if self._min_date:
-                    self.date_from.setMinimumDate(self._min_date)
-                    self.date_to.setMinimumDate(self._min_date)
-                if self._max_date:
-                    self.date_from.setMaximumDate(self._max_date)
-                    self.date_to.setMaximumDate(self._max_date)
-
-    def _matches_filters(self, entry: RecordingMetadata) -> bool:
-        camera_sel = self.camera_filter.currentText()
-        if (
-            camera_sel
-            and camera_sel != "Wszystkie kamery"
-            and entry.camera.casefold() != camera_sel.casefold()
-        ):
-            return False
-        class_sel = self.class_filter.currentText()
-        if (
-            class_sel
-            and class_sel != "Wszystkie klasy"
-            and entry.label.casefold() != class_sel.casefold()
-        ):
-            return False
-
-        qfrom = self.date_from.date()
-        qto = self.date_to.date()
-        dt = _dt.datetime.fromtimestamp(entry.timestamp)
-        qdate = QDate(dt.year, dt.month, dt.day)
-        if qdate < qfrom or qdate > qto:
-            return False
-
-        needle = self.search_edit.text().strip().lower()
-        if needle:
-            haystack = f"{entry.filename} {entry.label}".lower()
-            if needle not in haystack:
-                return False
-        return True
-
-    def _insert_row(self, entry: RecordingMetadata, row: int | None = None) -> None:
-        previous_block = self._block_item_changed
-        self._block_item_changed = True
-        if row is None:
-            row = self.table.rowCount()
-        self.table.insertRow(row)
-        for path, current_row in list(self._row_lookup.items()):
-            if current_row >= row:
-                self._row_lookup[path] = current_row + 1
-
-        check_item = QTableWidgetItem()
-        check_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
-        check_item.setCheckState(Qt.Unchecked)
-        check_item.setData(Qt.UserRole, entry.filepath)
-        check_item.setTextAlignment(Qt.AlignCenter)
-        self.table.setItem(row, self.CHECK_COLUMN, check_item)
-
-        thumb_item = QTableWidgetItem()
-        thumb_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-        thumb_item.setData(Qt.UserRole, entry.filepath)
-        thumb_item.setTextAlignment(Qt.AlignCenter)
-        self.table.setItem(row, self.THUMB_COLUMN, thumb_item)
-
-        thumb_label = QLabel()
-        thumb_label.setFixedSize(self._thumb_size)
-        thumb_label.setAlignment(Qt.AlignCenter)
-        thumb_label.setStyleSheet(
-            "border: 0.5px solid #d0d0d0; background-color: {};".format(
-                self._thumbnail_background_color().name()
-            )
-        )
-        thumb_label.setPixmap(self._placeholder_pixmap())
-        self.table.setCellWidget(row, self.THUMB_COLUMN, thumb_label)
-        self._thumbnail_labels[entry.filepath] = thumb_label
-
-        time_item = QTableWidgetItem(entry.display_time)
-        time_item.setData(Qt.UserRole, entry.filepath)
-        time_item.setData(Qt.EditRole, float(entry.timestamp))
-        time_item.setTextAlignment(Qt.AlignCenter)
-        self.table.setItem(row, self.TIME_COLUMN, time_item)
-
-        cam_item = QTableWidgetItem(entry.camera)
-        cam_item.setData(Qt.UserRole, entry.filepath)
-        cam_item.setTextAlignment(Qt.AlignCenter)
-        self.table.setItem(row, self.CAMERA_COLUMN, cam_item)
-
-        label_item = QTableWidgetItem(entry.label)
-        label_item.setData(Qt.UserRole, entry.filepath)
-        label_item.setTextAlignment(Qt.AlignCenter)
-        self.table.setItem(row, self.CLASS_COLUMN, label_item)
-
-        conf_item = QTableWidgetItem("-" if entry.confidence <= 0 else f"{entry.confidence:.2f}")
-        conf_item.setData(Qt.UserRole, entry.filepath)
-        conf_item.setData(Qt.UserRole + 1, float(entry.confidence))
-        conf_item.setData(Qt.EditRole, float(entry.confidence))
-        conf_item.setTextAlignment(Qt.AlignCenter)
-        self.table.setItem(row, self.CONF_COLUMN, conf_item)
-
-        duration = float(entry.extra.get("duration", entry.extra.get("recording_duration", 0.0)) or 0.0)
-        duration_item = QTableWidgetItem("-" if duration <= 0 else f"{duration:.1f}s")
-        duration_item.setData(Qt.UserRole, entry.filepath)
-        duration_item.setData(Qt.UserRole + 1, duration)
-        duration_item.setData(Qt.EditRole, duration)
-        duration_item.setTextAlignment(Qt.AlignCenter)
-        self.table.setItem(row, self.DURATION_COLUMN, duration_item)
-
-        writer_fps = float(entry.extra.get("writer_fps", 0.0) or 0.0)
-        writer_item = QTableWidgetItem("-" if writer_fps <= 0 else f"{writer_fps:.2f}")
-        writer_item.setData(Qt.UserRole, entry.filepath)
-        writer_item.setData(Qt.UserRole + 1, writer_fps)
-        writer_item.setTextAlignment(Qt.AlignCenter)
-        self.table.setItem(row, self.WRITER_FPS_COLUMN, writer_item)
-
-        dropped = int(entry.extra.get("dropped_frames", 0) or 0)
-        dropped_item = QTableWidgetItem(str(dropped))
-        dropped_item.setData(Qt.UserRole, entry.filepath)
-        dropped_item.setData(Qt.UserRole + 1, dropped)
-        dropped_item.setTextAlignment(Qt.AlignCenter)
-        self.table.setItem(row, self.DROPPED_COLUMN, dropped_item)
-
-        file_text = self._format_file_cell_text(entry)
-        file_item = QTableWidgetItem(file_text)
-        file_item.setData(Qt.UserRole, entry.filepath)
-        if "\n" in file_text:
-            file_item.setToolTip(file_text)
-        file_item.setTextAlignment(Qt.AlignCenter)
-        self.table.setItem(row, self.FILE_COLUMN, file_item)
-
-        self._row_lookup[entry.filepath] = row
-        if entry.filepath in self.thumbnail_cache:
-            self._apply_thumbnail(entry.filepath, self.thumbnail_cache[entry.filepath])
-        else:
-            self._request_thumbnail(entry)
-        self._block_item_changed = previous_block
-        self._sync_select_all_checkbox()
-        self._update_row_highlight()
-
-    def _create_placeholder_pixmap(self) -> QPixmap:
-        pixmap = QPixmap(self._thumb_size)
-        pixmap.fill(QColor("#f0f0f0"))
-        return pixmap
-
-    def _placeholder_pixmap(self) -> QPixmap:
-        if not hasattr(self, "_placeholder_pixmap_obj"):
-            self._placeholder_pixmap_obj = self._create_placeholder_pixmap()
-        return self._placeholder_pixmap_obj
-
-    def _thumbnail_background_color(self) -> QColor:
-        return QColor("#f8f8f8")
-
-    def _request_thumbnail(self, entry: RecordingMetadata) -> None:
-        if entry.filepath in self._pending_thumbnails or entry.filepath in self.thumbnail_cache:
-            return
-        thumb_path = self._resolve_thumbnail_path(entry)
-        direct_pixmap = self._load_pixmap_from_disk(thumb_path)
-        if direct_pixmap is not None:
-            self._apply_thumbnail(entry.filepath, direct_pixmap)
-            return
-        worker = ThumbnailWorker(entry, self._thumb_size)
-        worker.thumbnail_ready.connect(self._apply_thumbnail)
-        self._pending_thumbnails.add(entry.filepath)
-        self._thumbnail_workers[entry.filepath] = worker
-        self.thumbnail_pool.start(worker)
-
-    def _scale_pixmap(self, pixmap: QPixmap) -> QPixmap:
-        if pixmap.isNull():
-            return self._placeholder_pixmap()
-
-        scaled = pixmap.scaled(
-            self._thumb_size,
-            Qt.KeepAspectRatio,
-            Qt.SmoothTransformation,
-        )
-        if scaled.isNull() or not scaled.width() or not scaled.height():
-            return self._placeholder_pixmap()
-
-        return scaled
-
-    def _normalise_qimage(self, image: QImage) -> QImage:
-        if image.isNull():
-            return image
-
-        fmt = image.format()
-        if fmt == QImage.Format_Invalid:
-            return QImage()
-
-        def formats(*names: str) -> set[int]:
-            return {getattr(QImage, name) for name in names if hasattr(QImage, name)}
-
-        grayscale_formats = formats(
-            "Format_Indexed8",
-            "Format_Alpha8",
-            "Format_Grayscale8",
-            "Format_Grayscale16",
-            "Format_Mono",
-            "Format_MonoLSB",
-        )
-
-        rgb_like = formats(
-            "Format_RGB888",
-            "Format_BGR888",
-            "Format_RGB16",
-            "Format_RGB555",
-            "Format_RGB666",
-            "Format_RGB444",
-            "Format_RGB30",
-            "Format_BGR30",
-        )
-
-        if fmt in grayscale_formats:
-            target = QImage.Format_Grayscale8
-        elif fmt in rgb_like:
-            target = QImage.Format_RGB888
-        else:
-            # Always drop alpha to avoid fully transparent thumbnails rendering black.
-            target = QImage.Format_RGB888
-
-        if fmt == target and not image.hasAlphaChannel():
-            return image.copy()
-
-        converted = image.convertToFormat(target)
-        if converted.isNull():
-            return QImage()
-        return converted.copy()
-
-    def _qimage_from_frame(self, frame: np.ndarray) -> QImage:
-        if frame.size == 0:
-            return QImage()
-
-        array = frame
-        if array.dtype != np.uint8:
-            try:
-                array = cv2.normalize(array, None, 0, 255, cv2.NORM_MINMAX)
-            except cv2.error:
-                return QImage()
-            array = array.astype(np.uint8)
-
-        if array.ndim == 2:
-            gray = np.ascontiguousarray(array)
-            height, width = gray.shape
-            return QImage(
-                gray.data,
-                width,
-                height,
-                int(gray.strides[0]),
-                QImage.Format_Grayscale8,
-            ).copy()
-
-        if array.ndim != 3:
-            return QImage()
-
-        height, width, channels = array.shape
-
-        try:
-            if channels == 1:
-                gray = np.ascontiguousarray(array.reshape(height, width))
-                return QImage(
-                    gray.data,
-                    width,
-                    height,
-                    int(gray.strides[0]),
-                    QImage.Format_Grayscale8,
-                ).copy()
-
-            if channels == 3:
-                rgb = cv2.cvtColor(array, cv2.COLOR_BGR2RGB)
-                rgb = np.ascontiguousarray(rgb)
-                return QImage(
-                    rgb.data,
-                    width,
-                    height,
-                    int(rgb.strides[0]),
-                    QImage.Format_RGB888,
-                ).copy()
-
-            if channels == 4:
-                rgba = cv2.cvtColor(array, cv2.COLOR_BGRA2RGBA)
-                rgba = np.ascontiguousarray(rgba)
-                return QImage(
-                    rgba.data,
-                    width,
-                    height,
-                    int(rgba.strides[0]),
-                    QImage.Format_RGBA8888,
-                ).copy()
-        except cv2.error:
-            return QImage()
-
-        return QImage()
-
-
-    def _pixmap_from_frame(self, frame: np.ndarray) -> QPixmap:
-        image = self._qimage_from_frame(frame)
-        if image.isNull():
-            return self._placeholder_pixmap()
-        return self._scale_pixmap(QPixmap.fromImage(image))
-
-    def _compose_thumbnail(self, source: object) -> QPixmap:
-        if isinstance(source, QPixmap):
-            return self._scale_pixmap(source)
-        if isinstance(source, QImage):
-            return self._scale_pixmap(QPixmap.fromImage(source))
-        if isinstance(source, np.ndarray):
-            return self._pixmap_from_frame(source)
-        return self._placeholder_pixmap()
-
-    def _apply_thumbnail(self, filepath: str, image: object) -> None:
-        # 🔹 Jeśli już mamy gotowy QPixmap – nie konwertujemy
-        if isinstance(image, QPixmap) and not image.isNull():
-            pixmap = image.scaled(self._thumb_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        elif isinstance(image, np.ndarray):
-            pixmap = self._pixmap_from_frame(image)
-        elif isinstance(image, QImage) and not image.isNull():
-            pixmap = QPixmap.fromImage(image)
-            pixmap = self._scale_pixmap(pixmap)
-        else:
-            pixmap = self._placeholder_pixmap()
-
-        # 🔹 Cache + aktualizacja widoku
-        self.thumbnail_cache[filepath] = pixmap
-        self._pending_thumbnails.discard(filepath)
-        self._thumbnail_workers.pop(filepath, None)
-
-        row = self._row_lookup.get(filepath)
-        if row is None:
-            return
-
-        label = self._thumbnail_labels.get(filepath)
-        if label is not None:
-            label.setPixmap(pixmap)
-
-    def _apply_filters(self) -> None:
-        if not self._entries:
-            self.table.setRowCount(0)
-            self._row_lookup.clear()
-            self._thumbnail_labels.clear()
-            self._sync_select_all_checkbox()
-            return
-
-        self.table.setRowCount(0)
-        self._row_lookup.clear()
-        self._thumbnail_labels.clear()
-        for entry in self._entries:
-            if self._matches_filters(entry):
-                self._insert_row(entry)
-        self._sync_select_all_checkbox()
-        self._update_row_highlight()
-
-    def _format_file_cell_text(self, entry: RecordingMetadata) -> str:
-        mp4_path = entry.filepath
-        thumb_path = self._resolve_thumbnail_path(entry)
-        lines = [self._shorten_path(mp4_path)]
-        if thumb_path and thumb_path != mp4_path:
-            lines.append(self._shorten_path(thumb_path))
-
-        diag_bits: list[str] = []
-        duration = float(entry.extra.get("duration", entry.extra.get("recording_duration", 0.0)) or 0.0)
-        if duration > 0:
-            diag_bits.append(f"dur={duration:.1f}s")
-        writer_fps = float(entry.extra.get("writer_fps", 0.0) or 0.0)
-        if writer_fps > 0:
-            diag_bits.append(f"writer={writer_fps:.2f}")
-        dropped = int(entry.extra.get("dropped_frames", 0) or 0)
-        if dropped > 0:
-            diag_bits.append(f"drop={dropped}")
-        role = str(entry.extra.get("preview_role_at_start", "") or "")
-        if role:
-            diag_bits.append(f"role={role}")
-        if bool(entry.extra.get("overload_degraded_at_start", False)):
-            diag_bits.append("degraded=1")
-        detect_fps = float(entry.extra.get("effective_detect_fps", 0.0) or 0.0)
-        if detect_fps > 0:
-            diag_bits.append(f"det={detect_fps:.2f}")
-        if diag_bits:
-            lines.append(" | ".join(diag_bits))
-        return "\n".join(lines)
-
-    def _shorten_path(self, path: str, max_length: int = 60) -> str:
-        if not path:
-            return ""
-        normalized = os.path.normpath(str(path))
-        if len(normalized) <= max_length:
-            return normalized
-        ellipsis = "…"
-        keep = max(max_length - len(ellipsis), 4)
-        head = keep // 2
-        tail = keep - head
-        return f"{normalized[:head]}{ellipsis}{normalized[-tail:]}"
-
-    def _resolve_thumbnail_path(self, entry: RecordingMetadata) -> str:
-        candidates = _thumbnail_candidates_for_entry(entry)
-        for candidate in candidates:
-            if os.path.exists(candidate):
-                return candidate
-        return candidates[0] if candidates else ""
-
-    def _load_pixmap_from_disk(self, thumb_path: str) -> QPixmap | None:
-        if not thumb_path:
-            return None
-        if not os.path.exists(thumb_path):
-            print(f"[RecordingsBrowser] Brak miniatury na dysku: {thumb_path}")
-            return None
-        pixmap = QPixmap(thumb_path)
-        if pixmap.isNull():
-            print(f"[RecordingsBrowser] Nieprawidłowy plik miniatury: {thumb_path}")
-            return None
-        return pixmap
-
-    def _update_row_highlight(self) -> None:
-        if not hasattr(self, "table"):
-            return
-        selection = self.table.selectionModel()
-        if selection is None:
-            return
-        selected_rows = {index.row() for index in selection.selectedRows()}
-        transparent_brush = QBrush()
-        for row in range(self.table.rowCount()):
-            is_selected = row in selected_rows
-            for col in range(self.table.columnCount()):
-                item = self.table.item(row, col)
-                if item is not None:
-                    item.setBackground(transparent_brush)
-            check_item = self.table.item(row, self.CHECK_COLUMN)
-            filepath = check_item.data(Qt.UserRole) if check_item else ""
-            thumb_label = self._thumbnail_labels.get(filepath)
-            if thumb_label:
-                thumb_label.setStyleSheet(
-                    "border: 0.5px solid {border}; background-color: {bg};".format(
-                        border="#ff3333" if is_selected else "#d0d0d0",
-                        bg="rgba(255,0,0,0.05)"
-                        if is_selected
-                        else self._thumbnail_background_color().name(),
-                    )
-                )
-
-    # ------------------------------------------------------------ lifecycle --
     def closeEvent(self, event):  # noqa: D401
         self.thumbnail_pool.clear()
         super().closeEvent(event)

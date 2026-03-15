@@ -16,7 +16,7 @@ import os
 from pathlib import Path
 from typing import Dict, Iterable, Iterator, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
-from .storage import load_recordings_catalog
+from .storage import load_recordings_catalog, update_recordings_catalog
 
 
 @dataclass(slots=True)
@@ -376,13 +376,123 @@ def walk_recordings(camera_dirs: Sequence[CameraDirectory]) -> Iterator[Path]:
 
 def discover_recordings(
     camera_dirs: Sequence[CameraDirectory],
-    history_path: Path | str,
+    history_path: HistorySource,
 ) -> Iterator[RecordingMetadata]:
     """Iterate over :class:`RecordingMetadata` instances for on-disk files."""
 
     history = load_history_metadata(history_path)
     for path in walk_recordings(camera_dirs):
         yield build_recording_metadata(str(path), camera_dirs, history_meta=history)
+
+
+def merge_recording_entries(
+    catalog_entries: Sequence[RecordingMetadata],
+    disk_entries: Sequence[RecordingMetadata],
+    *,
+    hide_missing_files: bool = True,
+) -> tuple[List[RecordingMetadata], List[RecordingMetadata]]:
+    """Merge catalog + disk entries by absolute filepath.
+
+    Returns ``(merged_entries, disk_only_entries)``.
+    """
+
+    disk_map = {os.path.abspath(entry.filepath): entry for entry in disk_entries}
+    merged_map: Dict[str, RecordingMetadata] = {}
+
+    for entry in catalog_entries:
+        path = os.path.abspath(entry.filepath)
+        disk_entry = disk_map.get(path)
+        if hide_missing_files and disk_entry is None and not os.path.exists(path):
+            continue
+        if disk_entry is None:
+            merged_map[path] = entry
+            continue
+
+        extra = dict(disk_entry.extra)
+        extra.update(entry.extra)
+        merged_map[path] = RecordingMetadata(
+            filepath=path,
+            camera=entry.camera or disk_entry.camera,
+            label=entry.label or disk_entry.label,
+            confidence=entry.confidence or disk_entry.confidence,
+            timestamp=entry.timestamp or disk_entry.timestamp,
+            display_time=entry.display_time or disk_entry.display_time,
+            thumb_path=entry.thumb_path or disk_entry.thumb_path,
+            extra=extra,
+        )
+
+    disk_only: List[RecordingMetadata] = []
+    for path, entry in disk_map.items():
+        if path in merged_map:
+            continue
+        merged_map[path] = entry
+        disk_only.append(entry)
+
+    merged = sorted(merged_map.values(), key=lambda item: item.timestamp, reverse=True)
+    return merged, disk_only
+
+
+def default_filter_bounds(entries: Sequence[RecordingMetadata], now: Optional[_dt.datetime] = None) -> tuple[_dt.date, _dt.date]:
+    """Return a broad, data-driven default date range for recordings filters."""
+
+    if entries:
+        dates = [_dt.datetime.fromtimestamp(item.timestamp).date() for item in entries]
+        return min(dates), max(dates)
+    anchor = (now or _dt.datetime.now()).date()
+    return anchor - _dt.timedelta(days=30), anchor
+
+
+def load_recording_entries(
+    camera_dirs: Sequence[CameraDirectory],
+    history_source: HistorySource,
+    *,
+    prefer_catalog: bool = True,
+    allow_disk_fallback: bool = True,
+    heal_catalog: bool = True,
+) -> tuple[List[RecordingMetadata], Dict[str, object]]:
+    """Load recordings reliably using catalog first with disk fallback.
+
+    Returns ``(entries, diagnostics)``.
+    """
+
+    history = load_history_metadata(history_source)
+    catalog_entries = list(iter_catalog_entries(camera_dirs, history_meta=history)) if prefer_catalog else []
+    valid_catalog_entries = [entry for entry in catalog_entries if os.path.exists(entry.filepath)]
+    should_scan_disk = allow_disk_fallback and (
+        not valid_catalog_entries
+        or len(valid_catalog_entries) < len(catalog_entries)
+    )
+
+    disk_entries: List[RecordingMetadata] = []
+    if should_scan_disk:
+        disk_entries = list(discover_recordings(camera_dirs, history))
+
+    merged, disk_only = merge_recording_entries(valid_catalog_entries, disk_entries, hide_missing_files=True)
+
+    if heal_catalog and disk_only:
+        for entry in disk_only:
+            payload: Dict[str, object] = {
+                "filepath": entry.filepath,
+                "file": entry.filepath,
+                "camera": entry.camera,
+                "label": entry.label,
+                "confidence": entry.confidence,
+                "time": entry.display_time,
+                "timestamp": entry.timestamp,
+                "thumb": entry.thumb_path,
+            }
+            payload.update(entry.extra)
+            update_recordings_catalog(payload)
+
+    diagnostics: Dict[str, object] = {
+        "catalog_entries": len(catalog_entries),
+        "valid_catalog_entries": len(valid_catalog_entries),
+        "disk_entries": len(disk_entries),
+        "disk_only_entries": len(disk_only),
+        "used_disk_fallback": bool(should_scan_disk and disk_entries),
+        "catalog_incomplete": len(valid_catalog_entries) < len(catalog_entries),
+    }
+    return merged, diagnostics
 
 
 __all__ = [
@@ -392,7 +502,10 @@ __all__ = [
     "build_recording_sidecar_metadata",
     "camera_name_for_path",
     "discover_recordings",
+    "default_filter_bounds",
     "iter_catalog_entries",
+    "load_recording_entries",
+    "merge_recording_entries",
     "load_history_metadata",
     "walk_recordings",
 ]

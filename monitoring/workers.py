@@ -507,10 +507,12 @@ class CameraWorker(QThread):
         self.current_event_detection_count = 0
         self.current_event_confidence_sum = 0.0
         self.current_event_max_confidence = 0.0
-        self.record_thread.write(raw_frame)
         if self.record_start_mode == "include_prerecord_first":
             for buffer_frame in list(self.prerecord_buffer):
                 self.record_thread.write(buffer_frame)
+            self.record_thread.write(raw_frame)
+        else:
+            self.record_thread.write(raw_frame)
         self._update_event_thumbnail(preview_frame, best_bbox, self.current_event_label, best_score)
         meta = self._build_recording_meta(
             filepath=self.output_file, thumb_path=self.current_event_thumbnail_path, label=self.current_event_label, confidence=self.current_event_confidence,

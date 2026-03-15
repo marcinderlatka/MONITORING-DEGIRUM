@@ -139,3 +139,39 @@ def test_hidden_preview_role_does_not_break_recording_state():
     worker.is_recording_active = True
     assert worker.preview_role == "hidden"
     assert worker.is_recording_active is True
+
+
+def test_record_start_mode_semantics_for_include_prerecord_first(monkeypatch):
+    worker = _worker()
+    worker.enable_recording = True
+    worker.record_start_mode = "include_prerecord_first"
+    worker.prerecord_buffer.clear()
+    prerecord_a = np.ones((2, 2, 3), dtype=np.uint8) * 10
+    prerecord_b = np.ones((2, 2, 3), dtype=np.uint8) * 20
+    detection = np.ones((2, 2, 3), dtype=np.uint8) * 30
+    worker.prerecord_buffer.extend([prerecord_a, prerecord_b])
+
+    writes: list[np.ndarray] = []
+
+    class DummyThread:
+        def __init__(self, *_a, **_k):
+            self.frames_written = 0
+            self.dropped_frames = 0
+            self.queue_peak = 0
+        def start(self):
+            return None
+        def write(self, frame):
+            writes.append(frame.copy())
+        def stop(self):
+            return None
+
+    monkeypatch.setattr("monitoring.workers.RecordingThread", DummyThread)
+    monkeypatch.setattr(worker, "_save_recording_metadata", lambda *_a, **_k: None)
+    monkeypatch.setattr(worker, "_update_event_thumbnail", lambda *_a, **_k: None)
+
+    ok = worker._start_recording_session(detection, detection, "person", 0.9, None, 25.0, 3.0)
+    assert ok is True
+    assert len(writes) == 3
+    assert np.array_equal(writes[0], prerecord_a)
+    assert np.array_equal(writes[1], prerecord_b)
+    assert np.array_equal(writes[2], detection)
