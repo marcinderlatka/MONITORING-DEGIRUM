@@ -66,7 +66,7 @@ if "PyQt5" not in sys.modules:
 
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
-from monitoring.workers import CameraWorker
+from monitoring.workers import CameraWorker, _advance_next_due, _preview_interval_for_role
 
 
 class _DummyModel:
@@ -109,3 +109,33 @@ def test_detection_event_summary():
     avg = worker.current_event_confidence_sum / worker.current_event_detection_count
     assert avg == 0.5
     assert worker.current_event_max_confidence == 0.8
+
+
+def test_effective_preview_emit_policy_for_roles():
+    main_i = _preview_interval_for_role("main", 15, 3, True)
+    thumb_i = _preview_interval_for_role("thumb", 15, 3, True)
+    hidden_i = _preview_interval_for_role("hidden", 15, 3, True)
+    assert main_i < thumb_i
+    assert hidden_i == float("inf")
+
+
+def test_inference_schedule_next_due_logic():
+    next_due, skipped = _advance_next_due(now_ts=10.0, next_due_ts=8.0, interval=0.5)
+    assert next_due >= 9.5
+    assert skipped >= 2
+
+
+def test_prerecord_buffer_basis_helper():
+    worker = _worker()
+    worker.rtsp_fps = 0
+    worker.stream_fps = 7.5
+    assert worker._get_prerecord_buffer_fps_basis() == 7.5
+
+
+def test_hidden_preview_role_does_not_break_recording_state():
+    worker = _worker()
+    worker.set_preview_role("hidden")
+    worker.recording = True
+    worker.is_recording_active = True
+    assert worker.preview_role == "hidden"
+    assert worker.is_recording_active is True
