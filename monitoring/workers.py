@@ -8,7 +8,7 @@ import os
 import time
 from collections import deque
 from contextlib import suppress
-from queue import Empty, Queue
+from queue import Empty, Full, Queue
 from threading import Lock
 from typing import Any
 
@@ -119,9 +119,11 @@ class RecordingThread(QThread):
         self.width = width
         self.height = height
         self.fps = fps
-        self.queue: "Queue[np.ndarray]" = Queue()
+        queue_size = max(10, int(max(1, fps) * 3))
+        self.queue: "Queue[np.ndarray]" = Queue(maxsize=queue_size)
         self._stop = False
         self.writer = None
+        self.dropped_frames = 0
 
     def run(self) -> None:
         self.writer = degirum_tools.VideoWriter(self.filepath, self.width, self.height, self.fps)
@@ -138,7 +140,18 @@ class RecordingThread(QThread):
 
     def write(self, frame: np.ndarray) -> None:
         if not self._stop:
-            self.queue.put(frame)
+            try:
+                self.queue.put_nowait(frame)
+            except Full:
+                try:
+                    self.queue.get_nowait()
+                except Empty:
+                    pass
+                try:
+                    self.queue.put_nowait(frame)
+                except Full:
+                    pass
+                self.dropped_frames += 1
 
     def stop(self) -> None:
         self._stop = True
@@ -169,6 +182,8 @@ class CameraWorker(QThread):
         self.detection_hours = str(self.camera.get("detection_hours", DEFAULT_DETECTION_HOURS))
         self.visible_classes = list(self.camera.get("visible_classes", VISIBLE_CLASSES))
         self.record_classes = list(self.camera.get("record_classes", RECORD_CLASSES))
+        self.visible_classes_lower = {c.lower() for c in self.visible_classes}
+        self.record_classes_lower = {c.lower() for c in self.record_classes}
         self.pre_seconds = int(self.camera.get("pre_seconds", DEFAULT_PRE_SECONDS))
         self.post_seconds = int(self.camera.get("post_seconds", DEFAULT_POST_SECONDS))
         rec_path = str(self.camera.get("record_path", DEFAULT_RECORD_PATH))
@@ -189,6 +204,44 @@ class CameraWorker(QThread):
 
         self.prerecord_buffer = deque(maxlen=int(self.pre_seconds * self.fps))
         self.frame: np.ndarray | None = None
+        self.last_metrics_log_ts = 0.0
+        self.metrics = {
+            "capture": 0.0,
+            "inference": 0.0,
+            "overlay": 0.0,
+            "emit": 0.0,
+            "record_enqueue": 0.0,
+            "frames": 0,
+            "recorder_drops": 0,
+        }
+
+    def refresh_class_filters(self) -> None:
+        self.visible_classes_lower = {c.lower() for c in self.visible_classes}
+        self.record_classes_lower = {c.lower() for c in self.record_classes}
+
+    def _log_metrics_if_needed(self) -> None:
+        now = time.monotonic()
+        if self.last_metrics_log_ts == 0.0:
+            self.last_metrics_log_ts = now
+            return
+        elapsed = now - self.last_metrics_log_ts
+        if elapsed < 5.0 or self.metrics["frames"] <= 0:
+            return
+        frames = max(1, int(self.metrics["frames"]))
+        print(
+            f"[perf][{self.camera.get('name', self.index)}] "
+            f"capture={self.metrics['capture'] / frames * 1000:.1f}ms "
+            f"infer={self.metrics['inference'] / frames * 1000:.1f}ms "
+            f"overlay={self.metrics['overlay'] / frames * 1000:.1f}ms "
+            f"emit={self.metrics['emit'] / frames * 1000:.1f}ms "
+            f"enqueue={self.metrics['record_enqueue'] / frames * 1000:.1f}ms "
+            f"drops={self.metrics['recorder_drops']}"
+        )
+        self.last_metrics_log_ts = now
+        for key in ("capture", "inference", "overlay", "emit", "record_enqueue"):
+            self.metrics[key] = 0.0
+        self.metrics["frames"] = 0
+        self.metrics["recorder_drops"] = 0
 
     def _stop_recording(self) -> None:
         if self.record_thread:
@@ -270,7 +323,6 @@ class CameraWorker(QThread):
                         maxlen=max(1, int(self.pre_seconds * stream_fps))
                     )
                     last_inference_time = 0.0
-                    last_overlays: list[tuple[int, int, int, int, str, float, tuple[int, int, int]]] = []
                     detection_interval = 1.0 / max(1, self.fps)
 
                     source_fps = self.rtsp_fps if self.rtsp_fps > 0 else None
@@ -286,8 +338,12 @@ class CameraWorker(QThread):
                             self.status_signal.emit("Połączono", self.index)
                             connected = True
 
-                        self.prerecord_buffer.append(frame.copy())
-                        display_frame = frame.copy()
+                        frame_start = time.perf_counter()
+                        raw_frame = frame
+                        should_buffer = self.enable_recording or self.detection_active
+                        if should_buffer:
+                            self.prerecord_buffer.append(raw_frame.copy())
+                        preview_frame = raw_frame
 
                         run_inference = self.enable_detection or self.draw_overlays
                         now = time.monotonic()
@@ -297,7 +353,9 @@ class CameraWorker(QThread):
                             or now - last_inference_time >= detection_interval
                         ):
                             last_inference_time = now
-                            inference_result = self.model.predict(frame)
+                            infer_start = time.perf_counter()
+                            inference_result = self.model.predict(raw_frame)
+                            self.metrics["inference"] += time.perf_counter() - infer_start
 
                         if inference_result is not None:
                             detected = False
@@ -319,36 +377,34 @@ class CameraWorker(QThread):
                                 if (
                                     self.draw_overlays
                                     and confidence >= self.confidence_threshold
-                                    and label in [c.lower() for c in self.visible_classes]
+                                    and label in self.visible_classes_lower
                                 ):
-                                    x1, y1, x2, y2 = _scale_bbox(
-                                        bbox, display_frame.shape, source_size
-                                    )
+                                    x1, y1, x2, y2 = _scale_bbox(bbox, raw_frame.shape, source_size)
                                     color = _label_color(label)
                                     overlays.append((x1, y1, x2, y2, label, confidence, color))
 
                                 if (
                                     self.enable_detection
                                     and self._is_within_schedule()
-                                    and label in [c.lower() for c in self.record_classes]
+                                    and label in self.record_classes_lower
                                     and confidence >= self.confidence_threshold
                                 ):
                                     detected = True
                                     if confidence > best_score:
                                         best_score = confidence
                                         best_label = label
-                                        best_bbox = _scale_bbox(
-                                            bbox, display_frame.shape, source_size
-                                        )
+                                        best_bbox = _scale_bbox(bbox, raw_frame.shape, source_size)
 
-                            if self.draw_overlays:
+                            if self.draw_overlays and overlays:
+                                overlay_start = time.perf_counter()
+                                preview_frame = raw_frame.copy()
                                 for x1, y1, x2, y2, label, confidence, color in overlays:
                                     cv2.rectangle(
-                                        display_frame, (x1, y1), (x2, y2), color, 2
+                                        preview_frame, (x1, y1), (x2, y2), color, 2
                                     )
                                     text = f"{label}: {confidence * 100:.1f}%"
                                     cv2.putText(
-                                        display_frame,
+                                        preview_frame,
                                         text,
                                         (x1, y1 - 10),
                                         cv2.FONT_HERSHEY_SIMPLEX,
@@ -356,7 +412,7 @@ class CameraWorker(QThread):
                                         color,
                                         2,
                                     )
-                                last_overlays = overlays
+                                self.metrics["overlay"] += time.perf_counter() - overlay_start
 
                             if detected:
                                 if not self.detection_active:
@@ -398,7 +454,7 @@ class CameraWorker(QThread):
                                                 self.output_dir,
                                                 f"nagranie_{self.camera['name']}_{timestamp}.mp4",
                                             )
-                                            h, w = display_frame.shape[:2]
+                                            h, w = raw_frame.shape[:2]
                                             record_fps = int(max(1, round(stream_fps)))
                                             self.record_thread = RecordingThread(
                                                 self.output_file, w, h, record_fps
@@ -411,7 +467,7 @@ class CameraWorker(QThread):
                                             self.post_countdown_frames = 0
                                             thumb_path = self.output_file + ".jpg"
                                             try:
-                                                cv2.imwrite(thumb_path, display_frame)
+                                                cv2.imwrite(thumb_path, preview_frame)
                                             except Exception as exc:
                                                 print("Nie zapisano miniatury:", exc)
                                             alert["filepath"] = self.output_file
@@ -476,26 +532,21 @@ class CameraWorker(QThread):
                                 else:
                                     self.no_detection_frames = 0
                                     self.post_countdown_frames = 0
-                        elif self.draw_overlays and last_overlays:
-                            for x1, y1, x2, y2, label, confidence, color in last_overlays:
-                                cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, 2)
-                                text = f"{label}: {confidence * 100:.1f}%"
-                                cv2.putText(
-                                    display_frame,
-                                    text,
-                                    (x1, y1 - 10),
-                                    cv2.FONT_HERSHEY_SIMPLEX,
-                                    0.7,
-                                    color,
-                                    2,
-                                )
+                        self.frame = preview_frame
 
-                        self.frame = display_frame
-
+                        enqueue_start = time.perf_counter()
                         if self.recording and self.record_thread:
-                            self.record_thread.write(display_frame)
+                            self.record_thread.write(raw_frame)
+                            self.metrics["recorder_drops"] += self.record_thread.dropped_frames
+                            self.record_thread.dropped_frames = 0
+                        self.metrics["record_enqueue"] += time.perf_counter() - enqueue_start
 
-                        self.frame_signal.emit(display_frame, self.index)
+                        emit_start = time.perf_counter()
+                        self.frame_signal.emit(preview_frame, self.index)
+                        self.metrics["emit"] += time.perf_counter() - emit_start
+                        self.metrics["capture"] += time.perf_counter() - frame_start
+                        self.metrics["frames"] += 1
+                        self._log_metrics_if_needed()
 
             except Exception as exc:  # pragma: no cover - interacts with hardware
                 message = str(exc).lower()
@@ -530,10 +581,9 @@ class CameraWorker(QThread):
     def stop(self) -> None:
         self.stop_signal = True
         self._stop_recording()
-        self.wait(2000)
+        self.wait(3000)
         if self.isRunning():
-            self.terminate()
-            self.wait()
+            print(f"CameraWorker {self.camera.get('name', self.index)} did not stop in time")
 
 
 __all__ = ["CameraWorker", "RecordingThread"]
