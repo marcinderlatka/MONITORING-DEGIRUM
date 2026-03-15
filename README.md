@@ -463,3 +463,25 @@ Additional notes:
 - **Nowe zachowanie:** zachowano podział na zmiany live/restart i komunikaty potwierdzające po zapisie.
 - **Efekt praktyczny:** użytkownik otrzymuje jasny komunikat czy zmiany weszły bez restartu, po auto-restarcie kamery, czy tylko zapisano konfigurację.
 - **Pliki:** `monitoring/app.py`, `monitoring/workers.py`.
+
+## Aktualizacje UI/miniatur (regresje)
+
+### Alerty: miniatury sceny zamiast cropów obiektu
+- Lista alertów została rozdzielona semantycznie od miniatur posterów nagrań.
+- Alerty preferują miniatury sceny (`alert_thumb` / `*.alert.jpg` / `*.scene.jpg`), a dopiero na końcu starsze pole `thumb`.
+- Widżet alertu zachowuje format prostokątny (16:9), więc po restarcie aplikacji miniatury nie zapadają się do kwadratu i nie pokazują wyłącznie przybliżonego obiektu.
+
+### Overlay informacji kamery bezpośrednio na obrazie
+- HUD kamery (status, FPS, queue/drop i flagi REC/DET/ERR/DEG) jest rysowany bezpośrednio na podglądzie.
+- Pozycjonowanie overlayu liczone jest względem faktycznie widocznego prostokąta obrazu po letterboxie, nie względem całego widgetu.
+- Overlay jest osadzony w lewym-dolnym rogu obrazu, z półprzezroczystym tłem dla czytelności.
+
+### Przeglądarka nagrań: kafelki miniatur JPG
+- Pipeline miniatur kafelków został dopięty do końca: worker → sygnał → mapowanie po absolutnej ścieżce → render w głównym wątku.
+- Wczytywanie preferuje jawny `thumb_path`, potem pliki sidecar JPG/JPEG, a na końcu fallback z pierwszej klatki MP4.
+- Kafelki zawsze kończą w stanie końcowym: miniatura albo placeholder „brak miniatury” (bez wiecznego „trwa wczytywanie”).
+
+### Rozdział ról miniatur
+- `alert_thumb` reprezentuje podgląd sceny dla listy alertów.
+- `thumb` pozostaje posterem nagrania używanym przez przeglądarkę nagrań.
+- Zachowana kompatybilność ze starszymi metadanymi i historią.
