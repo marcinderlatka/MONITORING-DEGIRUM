@@ -11,6 +11,9 @@ import os
 import re
 import sys
 import time
+import traceback
+import threading
+import faulthandler
 import uuid
 import wave
 from glob import glob
@@ -33,6 +36,8 @@ from PyQt5.QtCore import (
     QSize,
     QEvent,
     pyqtSignal,
+    qInstallMessageHandler,
+    QtMsgType,
 )
 from PyQt5.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPixmap, QClipboard
 from PyQt5.QtMultimedia import QSoundEffect
@@ -122,7 +127,14 @@ from .storage import (
     update_recordings_catalog,
 )
 from .workers import CameraWorker
-from .runtime_helpers import camera_overlay_anchor, classify_camera_setting_changes, compute_letterboxed_rect
+from .runtime_helpers import (
+    app_log,
+    camera_overlay_anchor,
+    classify_camera_setting_changes,
+    compute_letterboxed_rect,
+    evaluate_heartbeat_health,
+    register_app_logger,
+)
 from .widgets.alerts import AlertDialog, AlertListWidget
 from .widgets.camera_grid import CameraGridWidget
 from .widgets.camera_list import CameraListWidget
@@ -1201,6 +1213,123 @@ class CameraListDialog(QDialog):
 logger = logging.getLogger(__name__)
 
 
+class AppLogBridge(QObject):
+    entry_signal = pyqtSignal(object)
+
+    def __init__(self, target_window=None) -> None:
+        super().__init__()
+        self._target_window = target_window
+        self.entry_signal.connect(self._deliver, Qt.QueuedConnection)
+
+    def set_target(self, target_window) -> None:
+        self._target_window = target_window
+
+    def log(self, group: str, message: str, camera: str = "", source: str = "", level: str = "INFO", details: str = "", traceback_text: str = "", action: str = "") -> None:
+        payload = {
+            "group": group,
+            "camera": camera,
+            "source": source,
+            "level": level,
+            "action": action or message,
+            "details": details,
+            "traceback": traceback_text,
+        }
+        self.entry_signal.emit(payload)
+
+    def info(self, group: str, message: str, **kwargs) -> None:
+        self.log(group=group, message=message, level="INFO", **kwargs)
+
+    def warning(self, group: str, message: str, **kwargs) -> None:
+        self.log(group=group, message=message, level="WARNING", **kwargs)
+
+    def error(self, group: str, message: str, **kwargs) -> None:
+        self.log(group=group, message=message, level="ERROR", **kwargs)
+
+    def exception(self, group: str, message: str, exc: BaseException | None = None, **kwargs) -> None:
+        tb_text = kwargs.pop("traceback_text", "")
+        if not tb_text:
+            if exc is not None:
+                tb_text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+            else:
+                tb_text = traceback.format_exc()
+        self.log(group=group, message=message, level="CRITICAL", traceback_text=tb_text, details=tb_text, **kwargs)
+
+    def _deliver(self, payload: object) -> None:
+        if self._target_window is None or not isinstance(payload, dict):
+            return
+        try:
+            self._target_window.log_window.add_structured_entry(payload)
+        except Exception:
+            print("AppLogBridge delivery failed", file=sys.stderr)
+
+
+class UILoggingHandler(logging.Handler):
+    def __init__(self, bridge: AppLogBridge) -> None:
+        super().__init__(level=logging.INFO)
+        self.bridge = bridge
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.name.startswith("PyQt5"):
+            return
+        level = record.levelname.upper()
+        group = "application"
+        if level in {"ERROR", "CRITICAL"}:
+            group = "error"
+        elif level == "WARNING":
+            group = "warning"
+        tb_text = ""
+        if record.exc_info:
+            tb_text = "".join(traceback.format_exception(*record.exc_info))
+        self.bridge.log(
+            group=group,
+            message=record.getMessage(),
+            source=record.name,
+            level=level,
+            details=tb_text,
+            traceback_text=tb_text,
+        )
+
+
+APP_LOG_BRIDGE = AppLogBridge()
+_QT_HANDLER_INSTALLED = False
+
+
+def install_global_exception_hooks() -> None:
+    def _sys_hook(exc_type, exc, tb):
+        tb_text = "".join(traceback.format_exception(exc_type, exc, tb))
+        logger.critical("Unhandled exception", exc_info=(exc_type, exc, tb))
+        APP_LOG_BRIDGE.log(group="error", message=str(exc), source="global-exception", level="CRITICAL", details=tb_text, traceback_text=tb_text, action="Unhandled application exception")
+        sys.__excepthook__(exc_type, exc, tb)
+
+    def _thread_hook(args):
+        tb_text = "".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback))
+        logger.critical("Unhandled thread exception", exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+        APP_LOG_BRIDGE.log(group="error", message=str(args.exc_value), source="thread-exception", level="CRITICAL", details=tb_text, traceback_text=tb_text, action=f"Unhandled exception in thread {args.thread.name}")
+
+    sys.excepthook = _sys_hook
+    if hasattr(threading, "excepthook"):
+        threading.excepthook = _thread_hook
+
+
+def install_qt_message_handler() -> None:
+    global _QT_HANDLER_INSTALLED
+    if _QT_HANDLER_INSTALLED:
+        return
+
+    def _handler(mode, context, message):
+        msg = str(message)
+        source = "qt"
+        if mode == QtMsgType.QtWarningMsg:
+            APP_LOG_BRIDGE.warning("warning", msg, source=source)
+        elif mode in (QtMsgType.QtCriticalMsg, QtMsgType.QtFatalMsg):
+            APP_LOG_BRIDGE.log("error", msg, source=source, level="CRITICAL" if mode == QtMsgType.QtFatalMsg else "ERROR")
+        else:
+            APP_LOG_BRIDGE.info("ui", msg, source=source)
+
+    qInstallMessageHandler(_handler)
+    _QT_HANDLER_INSTALLED = True
+
+
 class MainWindow(QMainWindow):
     def __init__(self, cameras):
         super().__init__()
@@ -1238,7 +1367,7 @@ class MainWindow(QMainWindow):
             self.alert_sound.setLoopCount(1)
             self.alert_sound.setVolume(self.sound_volume)
         except Exception as e:
-            print(f"Failed to initialize alert sound: {e}")
+            self._log_exception("error", f"Failed to initialize alert sound: {e}", exc=e, source="audio")
 
         main_widget = QWidget()
         main_widget.setStyleSheet("background-color: black;")
@@ -1263,6 +1392,8 @@ class MainWindow(QMainWindow):
 
         self.log_window = LogWindow(LOG_HISTORY_PATH, LOG_RETENTION_HOURS)
         self.log_window.load_history()
+        APP_LOG_BRIDGE.set_target(self)
+        register_app_logger(APP_LOG_BRIDGE.log)
         main_hlayout.addWidget(self.log_window)
 
         # Centrum: panel z obrazem
@@ -1292,7 +1423,7 @@ class MainWindow(QMainWindow):
         btn_recordings = QToolButton()
         btn_recordings.setIcon(QIcon(str(ICON_DIR / "folder.svg")))
         if btn_recordings.icon().isNull():
-            print("Ostrzeżenie: nie udało się załadować ikony folder.svg")
+            self._log_warning("ui", "nie udało się załadować ikony folder.svg", source="ui")
         btn_recordings.setIconSize(QSize(50, 50))
         btn_recordings.clicked.connect(self.open_recordings_browser)
 
@@ -1373,7 +1504,11 @@ QToolButton:focus { outline: none; }
 
         self.setCentralWidget(main_widget)
 
-        self.log_window.add_entry("application", "aplikacja uruchomiona")
+        self._heartbeat_last_seen: dict[str, float] = {}
+        self._heartbeat_alerted: set[str] = set()
+        self._watchdog_flags: set[str] = set()
+        self._last_frame_update_ts: dict[int, float] = {}
+        self._log_info("application", "aplikacja uruchomiona", source="startup")
 
         # Track windowed geometry so fullscreen toggle can restore it reliably
         self._is_fullscreen = False
@@ -1415,9 +1550,53 @@ QToolButton:focus { outline: none; }
         self.diag_timer.timeout.connect(self._update_diagnostics_panel)
         self.diag_timer.start(1000)
 
+        self.watchdog_timer = QTimer(self)
+        self.watchdog_timer.timeout.connect(self._run_watchdogs)
+        self.watchdog_timer.start(5000)
+
         # zacznij od startu wszystkich, ale z niewielkim opóźnieniem aby GUI
         # mogło się pojawić bez czekania na inicjalizację kamer
         QTimer.singleShot(0, self.start_all)
+
+    def _log_info(self, group: str, message: str, **kwargs) -> None:
+        APP_LOG_BRIDGE.info(group, message, **kwargs)
+
+    def _log_warning(self, group: str, message: str, **kwargs) -> None:
+        APP_LOG_BRIDGE.warning(group, message, **kwargs)
+
+    def _log_error(self, group: str, message: str, **kwargs) -> None:
+        APP_LOG_BRIDGE.error(group, message, **kwargs)
+
+    def _log_exception(self, group: str, message: str, exc: BaseException | None = None, **kwargs) -> None:
+        APP_LOG_BRIDGE.exception(group, message, exc=exc, **kwargs)
+
+    def _run_watchdogs(self) -> None:
+        active = {}
+        for idx, cam in enumerate(self.cameras):
+            name = str(cam.get("name", idx))
+            worker = self.workers[idx] if idx < len(self.workers) else None
+            active[name] = isinstance(worker, CameraWorker) and worker.isRunning()
+        stale = evaluate_heartbeat_health(active, self._heartbeat_last_seen, timeout_seconds=15.0)
+        stale_set = set(stale)
+        for name in stale:
+            if name not in self._heartbeat_alerted:
+                self._heartbeat_alerted.add(name)
+                self._log_warning("performance", f"Brak heartbeat >15s dla {name}", source="heartbeat-watchdog", camera=name)
+        self._heartbeat_alerted.intersection_update(stale_set)
+
+        now = time.monotonic()
+        for idx, cam in enumerate(self.cameras):
+            name = str(cam.get("name", idx))
+            worker = self.workers[idx] if idx < len(self.workers) else None
+            is_running = isinstance(worker, CameraWorker) and worker.isRunning()
+            frame_age = now - float(self._last_frame_update_ts.get(idx, 0.0) or 0.0)
+            key = f"{name}:noframe"
+            if is_running and frame_age > 20.0:
+                if key not in self._watchdog_flags:
+                    self._watchdog_flags.add(key)
+                    self._log_warning("performance", f"Brak aktualizacji klatki od {frame_age:.1f}s", source="gui-watchdog", camera=name)
+            else:
+                self._watchdog_flags.discard(key)
 
     def restart_app(self):
         if QMessageBox.question(
@@ -1525,7 +1704,7 @@ QToolButton:focus { outline: none; }
             try:
                 self.alert_sound.play()
             except Exception as e:
-                print(f"Alert sound playback failed: {e}")
+                self._log_exception("error", f"Alert sound playback failed: {e}", exc=e, source="audio")
 
     def open_alert_dialog(self):
         dlg = AlertDialog(self)
@@ -1685,6 +1864,7 @@ QToolButton:focus { outline: none; }
     def start_camera(self, idx: int):
         if idx < 0 or idx >= len(self.cameras):
             return
+        self._log_info("worker", "camera start requested", source="app", camera=str(self.cameras[idx].get("name", idx)))
         if idx < len(self.workers) and isinstance(self.workers[idx], CameraWorker) and self.workers[idx].isRunning():
             return
         while len(self.workers) < len(self.cameras):
@@ -1695,7 +1875,7 @@ QToolButton:focus { outline: none; }
             model = self._get_model(model_name)
         except Exception as e:
             QMessageBox.warning(self, "Model", f"Nie udało się załadować modelu '{model_name}': {e}")
-            self.log_window.add_entry("error", f"model {model_name}: {e}")
+            self._log_error("error", f"model {model_name}: {e}", source="app", camera=str(cam.get("name", idx)))
             return
         w = CameraWorker(camera=cam, model=model, index=idx)
         w.preview_fps_main = self.preview_fps_main
@@ -1711,11 +1891,13 @@ QToolButton:focus { outline: none; }
         self.workers[idx] = w
         self._apply_worker_preview_roles()
         self._evaluate_overload_mode()
-        self.log_window.add_entry("application", f"uruchomiono kamerę {cam.get('name', idx)}")
+        self._log_info("worker", f"uruchomiono kamerę {cam.get('name', idx)}", source="app", camera=str(cam.get("name", idx)))
 
     def stop_camera(self, idx: int):
         if not (0 <= idx < len(self.workers)):
             return
+        if 0 <= idx < len(self.cameras):
+            self._log_info("worker", "camera stop requested", source="app", camera=str(self.cameras[idx].get("name", idx)))
         w = self.workers[idx]
         if not isinstance(w, CameraWorker):
             return
@@ -1723,7 +1905,7 @@ QToolButton:focus { outline: none; }
         cam = self.cameras[idx]
         stopped = w.stop()
         if not stopped:
-            self.log_window.add_entry("warning", f"kamera {cam.get('name', idx)} nie zatrzymała się w czasie")
+            self._log_warning("worker", f"kamera {cam.get('name', idx)} nie zatrzymała się w czasie", source="app", camera=str(cam.get("name", idx)))
 
         with suppress(Exception):
             w.frame_signal.disconnect(self.update_frame)
@@ -1753,7 +1935,7 @@ QToolButton:focus { outline: none; }
         if idx == self.camera_list.currentRow():
             self._render_current()
 
-        self.log_window.add_entry("application", f"zatrzymano kamerę {cam.get('name', idx)}")
+        self._log_info("worker", f"zatrzymano kamerę {cam.get('name', idx)}", source="app", camera=str(cam.get("name", idx)))
         self._evaluate_overload_mode()
         self._refresh_camera_status_indicators()
 
@@ -1783,16 +1965,19 @@ QToolButton:focus { outline: none; }
             cause = str(msg)
         self._last_error[idx] = cause
         cam_name = self.cameras[idx]["name"] if idx < len(self.cameras) else str(idx)
-        self.log_window.add_entry("error", f"{cam_name}: {cause}")
+        self._log_error("error", f"{cam_name}: {cause}", source="worker", camera=str(cam_name))
         if "Brak sygnału" in cause:
-            self.log_window.add_entry("application", "brak sygnału RTSP")
+            self._log_warning("worker", "brak sygnału RTSP", source="worker", camera=str(cam_name))
         if idx == self.camera_list.currentRow():
             self._render_current()
 
     def _on_worker_heartbeat(self, camera_name: str, status: dict):
         payload = dict(status or {})
-        self._worker_diag[str(camera_name)] = payload
-        self.worker_status[str(camera_name)] = payload
+        cam_name = str(camera_name)
+        self._worker_diag[cam_name] = payload
+        self.worker_status[cam_name] = payload
+        self._heartbeat_last_seen[cam_name] = time.monotonic()
+        self._heartbeat_alerted.discard(cam_name)
         self._evaluate_overload_mode()
         self._refresh_camera_status_indicators()
 
@@ -1863,6 +2048,8 @@ QToolButton:focus { outline: none; }
     def _restart_camera_with_new_settings(self, idx: int, was_running: bool) -> bool:
         if not was_running:
             return False
+        camera_name = str(self.cameras[idx].get("name", idx)) if idx < len(self.cameras) else str(idx)
+        self._log_info("settings", "automatic restart due to settings change", source="app", camera=camera_name)
         self.stop_camera(idx)
         self.start_camera(idx)
         return True
@@ -1935,7 +2122,7 @@ QToolButton:focus { outline: none; }
             )
             self._show_camera_settings_result_message(new_data.get("name", "kamera"), result)
         except Exception as exc:
-            self.log_window.add_entry("error", f"błąd zapisu ustawień kamery {new_data.get('name', 'unknown')}: {exc}")
+            self._log_exception("error", f"błąd zapisu ustawień kamery {new_data.get('name', 'unknown')}: {exc}", exc=exc, source="ui", camera=str(new_data.get("name", "unknown")))
             QMessageBox.critical(self, "Błąd ustawień", f"Nie udało się zapisać ustawień kamery: {exc}")
 
     def delete_camera(self, idx: int):
@@ -2000,6 +2187,7 @@ QToolButton:focus { outline: none; }
             QTimer.singleShot(int(offset * 200), _start_one)
 
     def start_all(self):
+        self._log_info("worker", "start_all requested", source="app")
         self.stop_all()
         self.workers = [None] * len(self.cameras)
         self.start_cameras_staggered([str(c.get("name", "")) for c in self.cameras])
@@ -2011,6 +2199,7 @@ QToolButton:focus { outline: none; }
         self._render_current()
 
     def stop_all(self):
+        self._log_info("worker", "stop_all requested", source="app")
         for w in self.workers:
             if isinstance(w, CameraWorker):
                 w.stop()
@@ -2049,6 +2238,7 @@ QToolButton:focus { outline: none; }
 
         self.camera_list.update_thumbnail(idx, frame)
         self.camera_grid.update_frame(idx, frame)
+        self._last_frame_update_ts[idx] = time.monotonic()
 
         # FPS liczenie dla tej kamery
         from time import perf_counter
@@ -2195,12 +2385,12 @@ QToolButton:focus { outline: none; }
 
 
     def open_video_file(self, filepath: str):
-        self.log_window.add_entry("application", f"odtworzono nagranie {os.path.basename(filepath)}")
+        self._log_info("browser", f"odtworzono nagranie {os.path.basename(filepath)}", source="ui")
         dlg = VideoPlayerDialog(filepath, self)
         dlg.exec_()
 
     def open_recordings_browser(self):
-        self.log_window.add_entry("application", "otwarto przeglądarkę nagrań")
+        self._log_info("browser", "otwarto przeglądarkę nagrań", source="ui")
         camera_dirs = []
         for cam in self.cameras:
             name = cam.get("name") or "camera"
@@ -2263,11 +2453,23 @@ class SettingsHub(QDialog):
 
 # --- START ---
 def main(windowed: bool = False):
+    faulthandler.enable()
+    install_global_exception_hooks()
+    install_qt_message_handler()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
     cfg = load_config()
     app = QApplication(sys.argv)
     win = MainWindow(cameras=cfg.get("cameras", []))
+    ui_handler = UILoggingHandler(APP_LOG_BRIDGE)
+    ui_handler.setFormatter(logging.Formatter("%(levelname)s [%(name)s] %(message)s"))
+    root_logger = logging.getLogger()
+    if not any(isinstance(h, UILoggingHandler) for h in root_logger.handlers):
+        root_logger.addHandler(ui_handler)
+    APP_LOG_BRIDGE.info("application", "startup completed", source="startup")
     if windowed:
         win.show()
     else:
         win.showFullScreen()
-    sys.exit(app.exec_())
+    code = app.exec_()
+    APP_LOG_BRIDGE.info("application", "app shutdown", source="shutdown")
+    sys.exit(code)

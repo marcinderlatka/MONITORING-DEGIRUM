@@ -1,12 +1,11 @@
-"""Logging widgets."""
-
 from __future__ import annotations
 
 import datetime
 import json
 import os
+import sys
 import uuid
-from typing import List
+from typing import Any, List
 
 from PyQt5.QtCore import QEvent, QPoint, Qt, QTimer
 from PyQt5.QtWidgets import (
@@ -28,41 +27,68 @@ from PyQt5.QtWidgets import (
 
 from ..config import LOG_HISTORY_PATH, LOG_RETENTION_HOURS
 
+SUPPORTED_LOG_GROUPS = {
+    "detection",
+    "error",
+    "warning",
+    "application",
+    "settings",
+    "worker",
+    "ui",
+    "browser",
+    "recording",
+    "performance",
+}
+
 
 class LogEntryWidget(QFrame):
     BASE_STYLE = (
         "#logEntry{border:0.5px solid transparent; border-radius:10px;"
-        " background:rgba(0,0,0,0.4);}"  # noqa: E501
+        " background:rgba(0,0,0,0.4);}"
     )
     SELECTED_STYLE = (
         "#logEntry{border:0.5px solid #ff3333; border-radius:10px;"
-        " background:rgba(255,0,0,0.05);}"  # noqa: E501
+        " background:rgba(255,0,0,0.05);}"
     )
-    def __init__(
-        self,
-        entry_id: str,
-        group: str,
-        ts: str,
-        camera: str = "",
-        action: str = "",
-        detected: str = "",
-        recording: str = "",
-    ) -> None:
+
+    def __init__(self, entry: dict[str, Any]) -> None:
         super().__init__()
-        self.group = group
-        self.entry_id = entry_id
+        self.group = str(entry.get("group", "application"))
+        self.entry_id = str(entry.get("id", ""))
+        level = str(entry.get("level", "INFO")).upper()
+        source = str(entry.get("source", "")).strip()
+        camera = str(entry.get("camera", "")).strip()
+        action = str(entry.get("action", "")).strip()
+        details = str(entry.get("details", "")).strip()
+        traceback_text = str(entry.get("traceback", "")).strip()
+        detected = str(entry.get("detected", "")).strip()
+        recording = str(entry.get("recording", "")).strip()
+        ts = str(entry.get("timestamp", ""))
+
         colors = {
             "application": "#4aa3ff",
             "detection": "#4caf50",
             "error": "#ff4444",
+            "warning": "#ffb300",
+            "worker": "#8bc34a",
+            "ui": "#8e44ad",
+            "browser": "#8bc6ff",
+            "recording": "#29b6f6",
+            "performance": "#ffd54f",
+            "settings": "#90caf9",
         }
+        if level in {"ERROR", "CRITICAL"}:
+            color = "#ff4444"
+        elif level == "WARNING" or self.group == "warning":
+            color = "#ffb300"
+        else:
+            color = colors.get(self.group, "#fff")
+
         self.setObjectName("logEntry")
         self.setStyleSheet(self.BASE_STYLE)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 5, 10, 5)
         layout.setAlignment(Qt.AlignLeft)
-
-        color = colors.get(group, "#fff")
 
         dt = None
         try:
@@ -73,53 +99,49 @@ class LogEntryWidget(QFrame):
         header_widget = QWidget()
         header_layout = QHBoxLayout(header_widget)
         header_layout.setContentsMargins(0, 0, 0, 0)
-        header_layout.setAlignment(Qt.AlignLeft)
         header_widget.setStyleSheet(f"border-bottom:1px solid {color};")
 
-        self.group_label = QLabel(group.upper())
-        self.group_label.setAlignment(Qt.AlignLeft)
+        group_title = self.group.upper()
+        if source:
+            group_title += f" • {source}"
+        self.group_label = QLabel(group_title)
         self.group_label.setStyleSheet(f"color:{color}; font-size:15px; font-weight:600;")
-        self.group_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         header_layout.addWidget(self.group_label)
 
         date_str = dt.strftime("%Y-%m-%d") if dt else ""
         self.date_label = QLabel(date_str)
-        self.date_label.setAlignment(Qt.AlignLeft)
         self.date_label.setStyleSheet(f"color:{color}; font-size:15px;")
-        header_layout.addWidget(self.date_label)
         header_layout.addStretch()
-
+        header_layout.addWidget(self.date_label)
         layout.addWidget(header_widget)
 
-        def add_line(text: str, text_color: str) -> None:
+        def add_line(text: str, text_color: str = "#ddd") -> None:
             label = QLabel(text)
-            label.setAlignment(Qt.AlignLeft)
             label.setWordWrap(True)
-            label.setStyleSheet(f"color:{text_color}; font-size:15px;")
+            label.setAlignment(Qt.AlignLeft)
+            label.setStyleSheet(f"color:{text_color}; font-size:14px;")
             label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
             layout.addWidget(label)
 
         time_weekday_layout = QHBoxLayout()
-        time_label = QLabel(dt.strftime("%H:%M:%S") if dt else ts)
-        time_label.setAlignment(Qt.AlignLeft)
-        time_label.setStyleSheet("color:#ff8800; font-size:15px;")
-        weekday_str = dt.strftime("%A").capitalize() if dt else ""
-        weekday_label = QLabel(weekday_str)
-        weekday_label.setAlignment(Qt.AlignRight)
-        weekday_label.setStyleSheet("color:#ff8800; font-size:15px;")
-        time_weekday_layout.addWidget(time_label)
+        time_weekday_layout.addWidget(QLabel(dt.strftime("%H:%M:%S") if dt else ts))
         time_weekday_layout.addStretch()
-        time_weekday_layout.addWidget(weekday_label)
+        time_weekday_layout.addWidget(QLabel(dt.strftime("%A").capitalize() if dt else ""))
         layout.addLayout(time_weekday_layout)
 
         if camera:
-            add_line(camera, "#4aa3ff")
+            add_line(f"Kamera: {camera}", "#4aa3ff")
         if detected:
-            add_line(detected.upper(), "#4caf50")
-        if group != "detection" and action:
-            add_line(action, "#ff8800")
+            add_line(f"Detekcja: {detected.upper()}", "#4caf50")
+        if action:
+            add_line(action, "#ff8800" if self.group == "detection" else "#ddd")
 
-        if group == "detection":
+        preview = details or traceback_text
+        if preview:
+            first = preview.splitlines()[0][:180]
+            add_line(f"Szczegóły: {first}", "#cfcfcf")
+
+        if self.group == "detection":
             action_row = QHBoxLayout()
             self.rec_dot = QLabel()
             self.rec_dot.setFixedSize(10, 10)
@@ -129,12 +151,8 @@ class LogEntryWidget(QFrame):
             layout.addLayout(action_row)
             self.rec_dot.hide()
             self.rec_text.hide()
-
             self._blink_timer = QTimer(self)
-            self._blink_timer.timeout.connect(
-                lambda: self.rec_dot.setVisible(not self.rec_dot.isVisible())
-            )
-
+            self._blink_timer.timeout.connect(lambda: self.rec_dot.setVisible(not self.rec_dot.isVisible()))
             if recording == "started":
                 self.start_recording()
             elif recording == "finished":
@@ -155,81 +173,81 @@ class LogEntryWidget(QFrame):
         self.rec_text.setText("Recording started")
         self.rec_text.setStyleSheet("color:red; font-size:15px;")
         self.rec_dot.setStyleSheet("background:red; border-radius:5px;")
-        self.rec_dot.show()
-        self.rec_text.show()
-        self.rec_dot.setVisible(True)
+        self.rec_dot.show(); self.rec_text.show(); self.rec_dot.setVisible(True)
         self._blink_timer.start(500)
 
     def finish_recording(self) -> None:
         self.rec_text.setText("Recording finished")
         self.rec_text.setStyleSheet("color:red; font-size:15px;")
         self.rec_dot.setStyleSheet("background:red; border-radius:5px;")
-        self.rec_dot.show()
-        self.rec_text.show()
-        self._blink_timer.stop()
-        self.rec_dot.setVisible(True)
+        self.rec_dot.show(); self.rec_text.show(); self._blink_timer.stop(); self.rec_dot.setVisible(True)
 
     def start_detection(self) -> None:
         self.rec_text.setText("Detection started")
         self.rec_text.setStyleSheet("color:green; font-size:15px;")
         self.rec_dot.setStyleSheet("background:green; border-radius:5px;")
-        self.rec_dot.show()
-        self.rec_text.show()
-        self.rec_dot.setVisible(True)
+        self.rec_dot.show(); self.rec_text.show(); self.rec_dot.setVisible(True)
         self._blink_timer.start(500)
 
     def finish_detection(self) -> None:
         self.rec_text.setText("Detection finished")
         self.rec_text.setStyleSheet("color:green; font-size:15px;")
         self.rec_dot.setStyleSheet("background:green; border-radius:5px;")
-        self.rec_dot.show()
-        self.rec_text.show()
-        self._blink_timer.stop()
-        self.rec_dot.setVisible(True)
+        self.rec_dot.show(); self.rec_text.show(); self._blink_timer.stop(); self.rec_dot.setVisible(True)
 
 
 class LogWindow(QListWidget):
     """Widget prezentujący logi oraz zapisujący je do pliku."""
 
-    def __init__(
-        self,
-        log_path: str = str(LOG_HISTORY_PATH),
-        retention_hours: int = LOG_RETENTION_HOURS,
-    ) -> None:
+    def __init__(self, log_path: str = str(LOG_HISTORY_PATH), retention_hours: int = LOG_RETENTION_HOURS) -> None:
         super().__init__()
         self.setFixedWidth(300)
         self.setFrameShape(QFrame.NoFrame)
         self.setSpacing(8)
-        self.setStyleSheet(
-            "\n".join(
-                [
-                    "QListWidget{background:transparent; border:none;}",
-                    "QListWidget::item:selected{background: transparent; color: inherit;}",
-                    "QListWidget::item:selected:active{background: transparent; color: inherit;}",
-                    "QListWidget::item:selected:!active{background: transparent; color: inherit;}",
-                ]
-            )
-        )
+        self.setStyleSheet("\n".join([
+            "QListWidget{background:transparent; border:none;}",
+            "QListWidget::item:selected{background: transparent; color: inherit;}",
+            "QListWidget::item:selected:active{background: transparent; color: inherit;}",
+            "QListWidget::item:selected:!active{background: transparent; color: inherit;}",
+        ]))
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-
         self.itemSelectionChanged.connect(self._update_selection_highlight)
         self._selected_rows: set[int] = set()
-
         self.log_path = log_path
         self.retention_hours = retention_hours
-        self.history: List[dict] = []
+        self.history: List[dict[str, Any]] = []
 
-    def _add_widget_entry(self, entry: dict) -> None:
-        widget = LogEntryWidget(
-            entry.get("id", ""),
-            entry.get("group", ""),
-            entry.get("timestamp", ""),
-            entry.get("camera", ""),
-            entry.get("action", ""),
-            entry.get("detected", ""),
-            entry.get("recording", ""),
-        )
+    @staticmethod
+    def normalize_entry(entry: dict[str, Any]) -> dict[str, Any]:
+        normalized = {
+            "id": str(entry.get("id") or uuid.uuid4().hex),
+            "group": str(entry.get("group") or "application"),
+            "camera": str(entry.get("camera") or ""),
+            "action": str(entry.get("action") or ""),
+            "detected": str(entry.get("detected") or ""),
+            "timestamp": str(entry.get("timestamp") or datetime.datetime.now().strftime("%A %H:%M:%S %Y-%m-%d")),
+            "recording": str(entry.get("recording") or ""),
+            "level": str(entry.get("level") or "INFO"),
+            "source": str(entry.get("source") or ""),
+            "details": str(entry.get("details") or ""),
+            "traceback": str(entry.get("traceback") or ""),
+        }
+        if normalized["group"] == "detection object":
+            normalized["group"] = "detection"
+        if normalized["group"] not in SUPPORTED_LOG_GROUPS:
+            normalized["group"] = "application"
+        return normalized
+
+    def _persist_history(self) -> None:
+        try:
+            with open(self.log_path, "w", encoding="utf-8") as handle:
+                json.dump(self.history, handle, indent=2)
+        except Exception as exc:
+            print(f"Log history save failed: {exc}", file=sys.stderr)
+
+    def _add_widget_entry(self, entry: dict[str, Any]) -> None:
+        widget = LogEntryWidget(entry)
         item = QListWidgetItem(self)
         self.addItem(item)
         self.setItemWidget(item, widget)
@@ -244,6 +262,19 @@ class LogWindow(QListWidget):
             self.scrollToItem(self.item(self.count() - 1))
         self._update_selection_highlight()
 
+    def _retention_filtered(self, entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        cutoff = datetime.datetime.now() - datetime.timedelta(hours=self.retention_hours)
+        filtered: list[dict[str, Any]] = []
+        for raw in entries:
+            entry = self.normalize_entry(raw)
+            try:
+                ts_dt = datetime.datetime.strptime(entry["timestamp"], "%A %H:%M:%S %Y-%m-%d")
+            except Exception:
+                continue
+            if ts_dt >= cutoff:
+                filtered.append(entry)
+        return filtered
+
     def load_history(self) -> None:
         self.history = []
         try:
@@ -251,87 +282,28 @@ class LogWindow(QListWidget):
                 with open(self.log_path, "r", encoding="utf-8") as handle:
                     data = json.load(handle)
                     if isinstance(data, list):
-                        self.history = data
-                    else:
-                        self.history = []
+                        self.history = self._retention_filtered(data)
         except Exception:
             self.history = []
-
-        cutoff = datetime.datetime.now() - datetime.timedelta(hours=self.retention_hours)
-        filtered: List[dict] = []
-        allowed = {"detection", "error", "application", "settings"}
-        for entry in self.history:
-            if entry.get("group") not in allowed:
-                continue
-            ts_str = entry.get("timestamp")
-            try:
-                ts_dt = datetime.datetime.strptime(ts_str, "%A %H:%M:%S %Y-%m-%d")
-            except Exception:
-                continue
-            if ts_dt >= cutoff:
-                filtered.append(entry)
-        self.history = filtered
         self._refresh_widget()
 
-    def add_entry(
-        self,
-        group: str,
-        camera: str = "",
-        action: str = "",
-        detected: str = "",
-    ) -> str:
-        if group == "detection object":
-            group = "detection"
-        allowed = {"detection", "error", "application", "settings"}
-        if group not in allowed:
-            return ""
-
-        ts = datetime.datetime.now().strftime("%A %H:%M:%S %Y-%m-%d")
-        entry_id = uuid.uuid4().hex
-        entry = {
-            "id": entry_id,
-            "group": group,
-            "camera": camera,
-            "action": action,
-            "detected": detected,
-            "timestamp": ts,
-            "recording": "",
-        }
-        self.history.append(entry)
-
-        cutoff = datetime.datetime.now() - datetime.timedelta(hours=self.retention_hours)
-        filtered: List[dict] = []
-        for item in self.history:
-            try:
-                ts_dt = datetime.datetime.strptime(
-                    item.get("timestamp", ""), "%A %H:%M:%S %Y-%m-%d"
-                )
-            except Exception:
-                continue
-            if ts_dt >= cutoff:
-                filtered.append(item)
-        self.history = filtered
-
+    def add_structured_entry(self, entry: dict[str, Any]) -> str:
+        normalized = self.normalize_entry(entry)
+        self.history.append(normalized)
+        self.history = self._retention_filtered(self.history)
         self._refresh_widget()
+        self._persist_history()
+        return normalized["id"]
 
-        try:
-            with open(self.log_path, "w", encoding="utf-8") as handle:
-                json.dump(self.history, handle, indent=2)
-        except Exception as exc:
-            print("Nie udało się zapisać historii logów:", exc)
-        return entry_id
+    def add_entry(self, group: str, camera: str = "", action: str = "", detected: str = "") -> str:
+        return self.add_structured_entry({"group": group, "camera": camera, "action": action, "detected": detected})
 
     def update_recording_by_id(self, entry_id: str, status: str) -> None:
         for entry in self.history:
             if entry.get("id") == entry_id:
                 entry["recording"] = status
                 break
-
-        try:
-            with open(self.log_path, "w", encoding="utf-8") as handle:
-                json.dump(self.history, handle, indent=2)
-        except Exception as exc:
-            print("Nie udało się zaktualizować logów:", exc)
+        self._persist_history()
 
     def set_retention_hours(self, hours: int) -> None:
         hours = max(1, int(hours))
@@ -343,11 +315,7 @@ class LogWindow(QListWidget):
     def clear_history(self) -> None:
         self.history = []
         self._refresh_widget()
-        try:
-            with open(self.log_path, "w", encoding="utf-8") as handle:
-                json.dump(self.history, handle, indent=2)
-        except Exception as exc:
-            print("Nie udało się wyczyścić historii logów:", exc)
+        self._persist_history()
 
     def delete_history_file(self) -> None:
         self.history = []
@@ -356,7 +324,7 @@ class LogWindow(QListWidget):
             if os.path.exists(self.log_path):
                 os.remove(self.log_path)
         except Exception as exc:
-            print("Nie udało się usunąć pliku logów:", exc)
+            print(f"Log history delete failed: {exc}", file=sys.stderr)
 
     def reload(self) -> None:
         self.load_history()
@@ -379,6 +347,8 @@ class LogWindow(QListWidget):
         detections = [e for e in self.history if e.get("group") == "detection"]
         return detections[-limit:]
 
+
+# Keep existing dialog class from original file appended later.
 
 class LogSettingsDialog(QDialog):
     def __init__(self, main_window) -> None:

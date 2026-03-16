@@ -1,5 +1,32 @@
 """Runtime helper utilities that are test-friendly and dependency-light."""
 
+from __future__ import annotations
+
+import time
+from threading import Lock
+from typing import Callable
+
+
+_APP_LOGGER: Callable[..., object] | None = None
+_LOGGER_LOCK = Lock()
+
+
+def register_app_logger(logger_callable: Callable[..., object] | None) -> None:
+    """Register global callable used by non-UI modules to push structured logs."""
+    global _APP_LOGGER
+    with _LOGGER_LOCK:
+        _APP_LOGGER = logger_callable
+
+
+def app_log(group: str, message: str, **kwargs) -> bool:
+    """Forward a structured log entry to UI bridge if available."""
+    with _LOGGER_LOCK:
+        logger_callable = _APP_LOGGER
+    if logger_callable is None:
+        return False
+    logger_callable(group=group, message=message, **kwargs)
+    return True
+
 
 def classify_camera_setting_changes(old_camera: dict, new_camera: dict, restart_required_fields: set[str]) -> tuple[list[str], list[str]]:
     """Return changed camera keys and subset that require worker restart."""
@@ -53,3 +80,24 @@ def thumbnail_load_outcome(image: object) -> str:
         except Exception:
             return "fallback"
     return "success"
+
+
+def evaluate_heartbeat_health(
+    active_workers: dict[str, bool],
+    last_heartbeat_ts: dict[str, float],
+    now_ts: float | None = None,
+    timeout_seconds: float = 15.0,
+) -> list[str]:
+    """Return camera names that are active but heartbeat timed out."""
+    now = float(now_ts if now_ts is not None else time.monotonic())
+    stale: list[str] = []
+    for camera_name, is_active in active_workers.items():
+        if not is_active:
+            continue
+        last_ts = float(last_heartbeat_ts.get(camera_name, 0.0) or 0.0)
+        if last_ts <= 0:
+            stale.append(camera_name)
+            continue
+        if now - last_ts > timeout_seconds:
+            stale.append(camera_name)
+    return stale

@@ -29,6 +29,7 @@ from PyQt5.QtWidgets import (
 
 from ..recordings import alert_thumbnail_candidates_for_event
 from ..storage import AlertMemory
+from ..runtime_helpers import app_log
 
 
 def pick_alert_thumbnail_path(alert: dict) -> str:
@@ -37,11 +38,13 @@ def pick_alert_thumbnail_path(alert: dict) -> str:
     first_existing = ""
     for candidate in alert_thumbnail_candidates_for_event(alert):
         if not os.path.exists(candidate):
+            app_log("browser", f"alert thumbnail missing: {candidate}", source="alerts", level="INFO")
             continue
         if not first_existing:
             first_existing = candidate
         pixmap = QPixmap(candidate)
         if pixmap.isNull():
+            app_log("warning", f"alert thumbnail invalid image: {candidate}", source="alerts", level="WARNING")
             continue
         w = pixmap.width()
         h = pixmap.height()
@@ -157,6 +160,7 @@ class AlertItemWidget(QWidget):
     def set_thumbnail(self) -> None:
         thumb = pick_alert_thumbnail_path(self.alert)
         if not thumb or not os.path.exists(thumb):
+            app_log("warning", "alert thumbnail source invalid", source="alerts", level="WARNING", details=str(self.alert.get("filepath", "")))
             return
         pixmap = QPixmap(thumb)
         if pixmap.isNull():
