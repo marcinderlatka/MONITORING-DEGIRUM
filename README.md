@@ -500,3 +500,17 @@ Najważniejsze usprawnienia:
 - logowanie cyklu życia kamer (start/stop/restart po zmianie ustawień) poprawia diagnostykę freeze’ów i restartów.
 
 Korzyść praktyczna: gdy pojawia się problem runtime (błąd modelu, timeout stopu workera, błąd miniatury lub wyjątek), użytkownik widzi kontekst od razu w panelu **Logi**, razem z kluczowymi szczegółami diagnostycznymi.
+
+## Runtime stability diagnostics (Logi panel)
+
+Ostatnie zmiany wzmacniają diagnostykę runtime bez cichego zawieszania:
+
+- **Overload anti-thrashing**: overload nie aktywuje się poniżej minimalnej liczby kamer (`overload_min_camera_count`, domyślnie 2) oraz używa debounce/histerezy (`overload_enter_debounce_seconds`, `overload_exit_debounce_seconds`), więc tryb nie „klapie” dla 1 kamery.
+- **Lifecycle stop/start/restart**: logowane są teraz sekwencje `camera start requested`, `camera stop requested`, `stop_camera completed`, `worker stop begin/success/timeout`, `automatic camera restart due to settings change`, `camera restart success/failure`.
+- **Heartbeat watchdog**: timeout heartbeatu workerów (domyślnie 15s) generuje ostrzeżenie `worker heartbeat timeout` z wiekiem ostatniego heartbeat; po powrocie heartbeat logowana jest pojedyncza informacja o recovery.
+- **Browser/thumbnail diagnostics**: logi obejmują brakujące JPG, użycie fallbacku z pierwszej klatki MP4, błąd fallbacku, wyjątek w workerze miniatur oraz błąd aplikacji miniatury do widżetu.
+- **Metrics explainability**: okresowe logi metryk workerów zawierają `source_fps`, `stream_fps`, `detect_fps_target`, rolę podglądu, liczbę emitowanych/odrzucanych preview i `skipped_inference_cycles` wraz z powodem (`overload`, `config-throttle`, `camera/runtime`).
+- **Detection/recording transitions**: logowane są przejścia stanu (`detection became active`, `detection ended`, `recording session started/finalized`) oraz ostrzeżenia o pełnej kolejce i zrzucanych klatkach.
+- **Wyjątki z traceback**: ścieżki krytyczne (worker stream exception, browser refresh, thumbnail pipeline, restart kamery, launcher shutdown) logują traceback zamiast cichego tłumienia błędów.
+
+Wszystkie powyższe wpisy są publikowane przez istniejący mechanizm logów i są widoczne w panelu **Logi**.

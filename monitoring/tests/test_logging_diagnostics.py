@@ -77,7 +77,12 @@ if "PyQt5" not in sys.modules:
 
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
-from monitoring.runtime_helpers import classify_camera_setting_changes, evaluate_heartbeat_health
+from monitoring.runtime_helpers import (
+    classify_camera_setting_changes,
+    evaluate_heartbeat_health,
+    evaluate_overload_transition,
+    worker_stop_timeout_details,
+)
 from monitoring.widgets.logs import LogWindow
 
 
@@ -124,3 +129,54 @@ def test_camera_setting_change_logging_helpers_if_extracted():
 def test_worker_heartbeat_timeout_helper_if_extracted():
     stale = evaluate_heartbeat_health({"Cam1": True, "Cam2": False}, {"Cam1": 1.0}, now_ts=20.0, timeout_seconds=10.0)
     assert stale == ["Cam1"]
+
+
+def test_overload_does_not_activate_below_min_camera_threshold():
+    active, _ts, reason = evaluate_overload_transition(
+        now_ts=10.0,
+        active_camera_count=1,
+        gui_load_fps=100.0,
+        recording_count=0,
+        currently_active=False,
+        last_change_ts=0.0,
+        protection_enabled=True,
+        min_camera_count=2,
+        camera_threshold=1,
+        load_per_camera_threshold=10.0,
+        enter_debounce_seconds=1.0,
+        exit_debounce_seconds=1.0,
+    )
+    assert active is False
+    assert reason == "below-min-camera-threshold"
+
+
+def test_overload_enter_exit_debounce_helper():
+    active, ts, reason = evaluate_overload_transition(
+        now_ts=1.0, active_camera_count=4, gui_load_fps=90.0, recording_count=0,
+        currently_active=False, last_change_ts=0.0, protection_enabled=True,
+        min_camera_count=2, camera_threshold=3, load_per_camera_threshold=10.0,
+        enter_debounce_seconds=3.0, exit_debounce_seconds=4.0,
+    )
+    assert active is False and reason == "enter-debounce-pending"
+
+    active, ts, reason = evaluate_overload_transition(
+        now_ts=3.5, active_camera_count=4, gui_load_fps=90.0, recording_count=0,
+        currently_active=active, last_change_ts=ts, protection_enabled=True,
+        min_camera_count=2, camera_threshold=3, load_per_camera_threshold=10.0,
+        enter_debounce_seconds=3.0, exit_debounce_seconds=4.0,
+    )
+    assert active is True and reason == "condition-stable-enter"
+
+    active, _ts, reason = evaluate_overload_transition(
+        now_ts=5.0, active_camera_count=2, gui_load_fps=0.0, recording_count=0,
+        currently_active=active, last_change_ts=ts, protection_enabled=True,
+        min_camera_count=2, camera_threshold=3, load_per_camera_threshold=10.0,
+        enter_debounce_seconds=3.0, exit_debounce_seconds=4.0,
+    )
+    assert active is True and reason == "exit-debounce-pending"
+
+
+def test_worker_stop_timeout_log_helper():
+    details = worker_stop_timeout_details("Cam-A", 3500)
+    assert "Cam-A" in details
+    assert "3500" in details

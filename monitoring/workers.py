@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import time
+import traceback
 from collections import deque
 from contextlib import suppress
 from dataclasses import dataclass
@@ -44,7 +45,7 @@ from .config import (
     VISIBLE_CLASSES,
 )
 from .recordings import build_recording_sidecar_metadata
-from .runtime_helpers import app_log, compute_effective_writer_fps
+from .runtime_helpers import app_log, compute_effective_writer_fps, worker_stop_timeout_details
 from .storage import update_recordings_catalog
 
 LABEL_COLORS = {
@@ -299,11 +300,14 @@ class CameraWorker(QThread):
         self.inference_count = 0
         self.positive_detection_count = 0
         self.last_metrics_log_ts = 0.0
+        self._runtime_limit_logged = False
+        self._record_queue_full_warned = False
 
     def set_preview_role(self, role: str) -> None:
         self.preview_role = role if role in {"main", "thumb", "hidden"} else "thumb"
 
     def set_overload_state(self, overload_active: bool, detect_fps_factor: float | None = None, thumb_preview_fps: float | None = None, disable_overlays: bool | None = None) -> None:
+        previous = self.app_overload_mode
         self.app_overload_mode = bool(overload_active)
         self.is_overload_degraded = bool(overload_active and self.preview_role != "main")
         if detect_fps_factor is not None:
@@ -314,6 +318,8 @@ class CameraWorker(QThread):
             self.preview_fps_thumb = float(thumb_preview_fps)
         if disable_overlays is not None:
             self.overload_disable_nonessential_overlays = bool(disable_overlays)
+        if previous != self.app_overload_mode:
+            app_log("worker", "overload state updated", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO", details=f"active={self.app_overload_mode} detect_fps_factor={self.detect_fps_factor:.2f} preview_role={self.preview_role}")
 
     @staticmethod
     def _crop_with_margin(frame: np.ndarray, bbox: tuple[int, int, int, int] | None, margin_ratio: float = 0.15, min_size: int = 20) -> np.ndarray:
@@ -526,6 +532,8 @@ class CameraWorker(QThread):
             scene_thumb_frame = self._build_scene_thumbnail_frame(preview_frame)
             if cv2.imwrite(scene_thumb_path, scene_thumb_frame):
                 self.current_event_scene_thumbnail_path = scene_thumb_path
+            else:
+                app_log("warning", "alert thumbnail write failed", camera=str(self.camera.get("name", self.index)), source="worker", level="WARNING", details=scene_thumb_path)
         if self.thumbnail_mode == "first_detection" and self.current_detection_frame_saved:
             return
         if self.thumbnail_mode == "best_detection" and best_score <= self.current_event_best_confidence:
@@ -536,6 +544,9 @@ class CameraWorker(QThread):
         thumb_frame = self._build_thumbnail_frame(preview_frame, best_bbox, best_label, best_score)
         if cv2.imwrite(thumb_path, thumb_frame):
             self.current_event_thumbnail_path = thumb_path
+        else:
+            app_log("warning", "thumbnail write failed", camera=str(self.camera.get("name", self.index)), source="worker", level="WARNING", details=thumb_path)
+            return
             self.current_thumbnail_ts = time.time()
             self.current_detection_frame_saved = True
             if best_score >= self.current_event_best_confidence:
@@ -598,6 +609,7 @@ class CameraWorker(QThread):
         )
         self._save_recording_metadata(meta)
         self.record_signal.emit("start", self.output_file)
+        app_log("recording", "recording session started", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO", details=f"file={self.output_file} writer_fps={self.current_writer_fps:.2f}")
         return True
 
     def _finalize_recording_session(self) -> None:
@@ -631,6 +643,9 @@ class CameraWorker(QThread):
         )
         self._save_recording_metadata(meta)
         self.record_signal.emit("stop", self.output_file)
+        app_log("recording", "recording session finalized", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO", details=f"frames_written={frames_written} dropped_frames={dropped_frames} queue_peak={queue_peak}")
+        if dropped_frames > 0:
+            app_log("warning", "recorder dropped frames", camera=str(self.camera.get("name", self.index)), source="worker", level="WARNING", details=f"dropped_frames={dropped_frames}")
         self.recording = False
         self.is_recording_active = False
         self.output_file = None
@@ -735,12 +750,17 @@ class CameraWorker(QThread):
 
     def _maybe_enqueue_record_frame(self, raw_frame: np.ndarray, now_mono: float) -> None:
         if self.recording and self.record_thread:
+            prev_drop = int(self.record_thread.dropped_frames)
             self.record_thread.write(raw_frame)
+            if self.record_thread.dropped_frames > prev_drop and not self._record_queue_full_warned:
+                self._record_queue_full_warned = True
+                app_log("warning", "recorder queue full", camera=str(self.camera.get("name", self.index)), source="worker", level="WARNING", details=f"queue_peak={self.record_thread.queue_peak}")
             if self._should_end_detection_now(now_mono):
                 self._finalize_recording_session()
         elif self.detection_active and self._should_end_detection_now(now_mono):
             self.detection_active = False
             self.pending_positive_hits = 0
+            app_log("worker", "detection ended", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO")
 
     def _maybe_log_metrics(self, detection_interval: float) -> None:
         now = time.monotonic()
@@ -748,6 +768,8 @@ class CameraWorker(QThread):
             return
         detect_fps = 1.0 / max(1e-6, detection_interval)
         logger.info("metrics camera=%s stream_fps=%.2f infer_count=%s detect_fps_target=%.2f preview_emitted=%s preview_dropped=%s skipped_inference=%s role=%s", self.camera.get("name", self.index), self.stream_fps, self.inference_count, detect_fps, self.state.frames_emitted, self.state.preview_frames_dropped_total, self.state.skipped_inference_cycles, self.preview_role)
+        reason = "overload" if self.app_overload_mode else ("config-throttle" if self.rtsp_fps > 0 else "camera/runtime")
+        app_log("performance", "worker metrics summary", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO", details=f"source_fps={self.source_fps:.2f} stream_fps={self.stream_fps:.2f} detect_fps_target={detect_fps:.2f} preview_role={self.preview_role} preview_emitted={self.state.frames_emitted} preview_dropped={self.state.preview_frames_dropped_total} skipped_inference_cycles={self.state.skipped_inference_cycles} reason={reason}")
         self.state.last_metrics_log_ts = now
 
     def _maybe_emit_heartbeat(self) -> None:
@@ -771,6 +793,7 @@ class CameraWorker(QThread):
             "skipped_inference_cycles": int(self.state.skipped_inference_cycles),
             "stream_error_active": bool(self.error_counter > 0),
         }
+        status["heartbeat_ts"] = float(time.monotonic())
         self.worker_status_signal.emit(str(self.camera.get("name", self.index)), status)
         self.state.last_heartbeat_ts = now
 
@@ -789,7 +812,7 @@ class CameraWorker(QThread):
             msg = "No route to host"
         else:
             msg = str(exc)
-        app_log("error", f"stream failure: {msg}", camera=str(self.camera.get("name", self.index)), source="worker", level="ERROR", details=str(exc))
+        app_log("error", f"stream failure: {msg}", camera=str(self.camera.get("name", self.index)), source="worker", level="ERROR", details=str(exc), traceback=traceback.format_exc())
         self.error_signal.emit(msg, self.index)
 
     def run(self) -> None:
@@ -813,6 +836,9 @@ class CameraWorker(QThread):
                     self._sync_prerecord_buffer()
                     source_fps = self.rtsp_fps if self.rtsp_fps > 0 else None
                     self.state.next_inference_due_ts = 0.0
+                    if not self._runtime_limit_logged and (self.rtsp_fps > 0 or self.fps <= 2):
+                        self._runtime_limit_logged = True
+                        app_log("performance", "camera runtime limited by config", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO", details=f"rtsp_fps={self.rtsp_fps} detect_fps={self.fps}")
 
                     for frame in degirum_tools.video_source(stream, fps=source_fps):
                         now_mono = time.monotonic()
@@ -850,6 +876,8 @@ class CameraWorker(QThread):
                             self.state.last_detection_ts = now_mono
                             self.pending_miss_count = 0
                             self.pending_positive_hits += 1
+                            if not self.detection_active:
+                                app_log("worker", "detection became active", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO")
                             self.detection_active = True
                             if not self.recording and self._should_start_recording_now():
                                 started = self._start_recording_session(raw_frame, preview_frame, best_label or "object", best_score, best_bbox, stream_fps, float(self.fps))
@@ -882,6 +910,7 @@ class CameraWorker(QThread):
             except Exception as exc:  # pragma: no cover
                 self._current_stream = None
                 logger.exception("Worker stream failure")
+                app_log("error", "worker stream exception", camera=str(self.camera.get("name", self.index)), source="worker", level="ERROR", details=str(exc), traceback=traceback.format_exc())
                 self._handle_stream_failure(exc)
                 if self.error_counter > 10:
                     QThread.msleep(2000)
@@ -895,7 +924,7 @@ class CameraWorker(QThread):
             QThread.msleep(300)
 
     def stop(self, timeout_ms: int = 3500) -> bool:
-        app_log("worker", "worker stop begin", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO")
+        app_log("worker", "worker stop begin", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO", details=f"timeout_ms={timeout_ms}")
         self.stop_signal = True
         if self.recording:
             self._finalize_recording_session()
@@ -905,7 +934,8 @@ class CameraWorker(QThread):
                 stream.release()
         self.wait(timeout_ms)
         stopped = not self.isRunning()
-        app_log("worker" if stopped else "warning", "worker stop success" if stopped else "worker stop timeout", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO" if stopped else "WARNING")
+        details = worker_stop_timeout_details(str(self.camera.get("name", self.index)), timeout_ms)
+        app_log("worker" if stopped else "warning", "worker stop success" if stopped else "worker stop timeout", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO" if stopped else "WARNING", details=details)
         return stopped
 
 

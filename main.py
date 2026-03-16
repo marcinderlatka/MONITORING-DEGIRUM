@@ -2,8 +2,10 @@
 
 import argparse
 import logging
+import traceback
 
 from monitoring.app import main as run_app
+from monitoring.runtime_helpers import app_log
 
 
 def parse_args() -> argparse.Namespace:
@@ -21,8 +23,9 @@ def main() -> None:
     logging.getLogger(__name__).info("launcher startup")
     try:
         run_app(windowed=args.windowed)
-    except Exception:
+    except Exception as exc:
         logging.getLogger(__name__).exception("launcher unhandled shutdown exception")
+        app_log("error", "launcher unhandled shutdown exception", source="main", level="ERROR", details=str(exc), traceback=traceback.format_exc())
         raise
     finally:
         logging.getLogger(__name__).info("launcher shutdown")

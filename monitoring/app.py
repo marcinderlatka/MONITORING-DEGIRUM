@@ -94,10 +94,13 @@ from .config import (
     DEFAULT_PREVIEW_PAUSE_WHEN_HIDDEN,
     DEFAULT_SHOW_CAMERA_INFO_OVERLAY,
     DEFAULT_OVERLOAD_PROTECTION_ENABLED,
+    DEFAULT_OVERLOAD_MIN_CAMERA_COUNT,
     DEFAULT_OVERLOAD_CAMERA_COUNT_THRESHOLD,
     DEFAULT_OVERLOAD_REDUCE_THUMB_PREVIEW_FPS,
     DEFAULT_OVERLOAD_REDUCE_DETECT_FPS_FACTOR,
     DEFAULT_OVERLOAD_DISABLE_NONESSENTIAL_OVERLAYS,
+    DEFAULT_OVERLOAD_ENTER_DEBOUNCE_SECONDS,
+    DEFAULT_OVERLOAD_EXIT_DEBOUNCE_SECONDS,
     DEFAULT_PRE_SECONDS,
     DEFAULT_RECORD_PATH,
     DEFAULT_RECORD_START_MODE,
@@ -133,6 +136,7 @@ from .runtime_helpers import (
     classify_camera_setting_changes,
     compute_letterboxed_rect,
     evaluate_heartbeat_health,
+    evaluate_overload_transition,
     register_app_logger,
 )
 from .widgets.alerts import AlertDialog, AlertListWidget
@@ -1535,11 +1539,15 @@ QToolButton:focus { outline: none; }
         self.preview_fps_thumb = float(self.config.get("preview_fps_thumb", DEFAULT_PREVIEW_FPS_THUMB)) if hasattr(self, "config") else DEFAULT_PREVIEW_FPS_THUMB
         self.preview_pause_when_hidden = bool(self.config.get("preview_pause_when_hidden", DEFAULT_PREVIEW_PAUSE_WHEN_HIDDEN)) if hasattr(self, "config") else DEFAULT_PREVIEW_PAUSE_WHEN_HIDDEN
         self.overload_protection_enabled = bool(self.config.get("overload_protection_enabled", DEFAULT_OVERLOAD_PROTECTION_ENABLED)) if hasattr(self, "config") else DEFAULT_OVERLOAD_PROTECTION_ENABLED
+        self.overload_min_camera_count = int(self.config.get("overload_min_camera_count", DEFAULT_OVERLOAD_MIN_CAMERA_COUNT)) if hasattr(self, "config") else DEFAULT_OVERLOAD_MIN_CAMERA_COUNT
         self.overload_camera_count_threshold = int(self.config.get("overload_camera_count_threshold", DEFAULT_OVERLOAD_CAMERA_COUNT_THRESHOLD)) if hasattr(self, "config") else DEFAULT_OVERLOAD_CAMERA_COUNT_THRESHOLD
         self.overload_reduce_thumb_preview_fps = float(self.config.get("overload_reduce_thumb_preview_fps", DEFAULT_OVERLOAD_REDUCE_THUMB_PREVIEW_FPS)) if hasattr(self, "config") else DEFAULT_OVERLOAD_REDUCE_THUMB_PREVIEW_FPS
         self.overload_reduce_detect_fps_factor = float(self.config.get("overload_reduce_detect_fps_factor", DEFAULT_OVERLOAD_REDUCE_DETECT_FPS_FACTOR)) if hasattr(self, "config") else DEFAULT_OVERLOAD_REDUCE_DETECT_FPS_FACTOR
         self.overload_disable_nonessential_overlays = bool(self.config.get("overload_disable_nonessential_overlays", DEFAULT_OVERLOAD_DISABLE_NONESSENTIAL_OVERLAYS)) if hasattr(self, "config") else DEFAULT_OVERLOAD_DISABLE_NONESSENTIAL_OVERLAYS
+        self.overload_enter_debounce_seconds = float(self.config.get("overload_enter_debounce_seconds", DEFAULT_OVERLOAD_ENTER_DEBOUNCE_SECONDS)) if hasattr(self, "config") else DEFAULT_OVERLOAD_ENTER_DEBOUNCE_SECONDS
+        self.overload_exit_debounce_seconds = float(self.config.get("overload_exit_debounce_seconds", DEFAULT_OVERLOAD_EXIT_DEBOUNCE_SECONDS)) if hasattr(self, "config") else DEFAULT_OVERLOAD_EXIT_DEBOUNCE_SECONDS
         self.overload_mode_active = False
+        self._overload_last_change_ts = 0.0
 
         self.diag_panel = QLabel("Diagnostyka (debug): brak danych")
         self.diag_panel.setStyleSheet("color: #dddddd; background: #111; padding: 8px; border: 1px solid #333;")
@@ -1581,7 +1589,11 @@ QToolButton:focus { outline: none; }
         for name in stale:
             if name not in self._heartbeat_alerted:
                 self._heartbeat_alerted.add(name)
-                self._log_warning("performance", f"Brak heartbeat >15s dla {name}", source="heartbeat-watchdog", camera=name)
+                age = time.monotonic() - float(self._heartbeat_last_seen.get(name, 0.0) or 0.0)
+                self._log_warning("performance", f"worker heartbeat timeout", source="heartbeat-watchdog", camera=name, details=f"last_seen_age_s={age:.1f} timeout_s=15")
+        recovered = [name for name in list(self._heartbeat_alerted) if name not in stale_set]
+        for name in recovered:
+            self._log_info("performance", "worker heartbeat recovered", source="heartbeat-watchdog", camera=name)
         self._heartbeat_alerted.intersection_update(stale_set)
 
         now = time.monotonic()
@@ -1813,23 +1825,44 @@ QToolButton:focus { outline: none; }
 
     def _evaluate_overload_mode(self) -> None:
         active_workers = [w for w in self.workers if isinstance(w, CameraWorker) and w.isRunning()]
-        if not self.overload_protection_enabled:
-            overload_active = False
-        else:
-            active_count = len(active_workers)
-            recording_count = sum(1 for w in active_workers if w.recording)
-            gui_load = sum(max(0.0, float(st.get("stream_fps", 0.0))) for st in self.worker_status.values())
-            overload_active = active_count >= self.overload_camera_count_threshold or (active_count > 0 and gui_load > active_count * 10.0)
-            if recording_count > 0 and active_count <= self.overload_camera_count_threshold:
-                overload_active = False
+        active_count = len(active_workers)
+        recording_count = sum(1 for w in active_workers if w.recording)
+        gui_load = sum(max(0.0, float(st.get("stream_fps", 0.0))) for st in self.worker_status.values())
+        now_ts = time.monotonic()
+        overload_active, change_ts, reason = evaluate_overload_transition(
+            now_ts=now_ts,
+            active_camera_count=active_count,
+            gui_load_fps=gui_load,
+            recording_count=recording_count,
+            currently_active=self.overload_mode_active,
+            last_change_ts=self._overload_last_change_ts,
+            protection_enabled=self.overload_protection_enabled,
+            min_camera_count=self.overload_min_camera_count,
+            camera_threshold=self.overload_camera_count_threshold,
+            load_per_camera_threshold=10.0,
+            enter_debounce_seconds=self.overload_enter_debounce_seconds,
+            exit_debounce_seconds=self.overload_exit_debounce_seconds,
+        )
+        self._overload_last_change_ts = change_ts
 
         if overload_active != self.overload_mode_active:
             self.overload_mode_active = overload_active
             mode = "enter" if overload_active else "exit"
-            self.log_window.add_entry("application", f"overload {mode}: cameras={len(active_workers)}")
+            self._log_info(
+                "application",
+                f"overload {mode}",
+                source="app",
+                details=(
+                    f"reason={reason} active_cameras={active_count} min_cameras={self.overload_min_camera_count} "
+                    f"camera_threshold={self.overload_camera_count_threshold} gui_load={gui_load:.2f} "
+                    f"enter_debounce_s={self.overload_enter_debounce_seconds} exit_debounce_s={self.overload_exit_debounce_seconds}"
+                ),
+            )
 
         selected_idx = self.camera_list.currentRow()
-        for idx, worker in enumerate(active_workers):
+        for idx, worker in enumerate(self.workers):
+            if not isinstance(worker, CameraWorker) or not worker.isRunning():
+                continue
             is_main = idx == selected_idx
             detect_factor = 1.0 if is_main or worker.recording else (self.overload_reduce_detect_fps_factor if overload_active else 1.0)
             thumb_fps = self.overload_reduce_thumb_preview_fps if overload_active else self.preview_fps_thumb
@@ -1864,7 +1897,6 @@ QToolButton:focus { outline: none; }
     def start_camera(self, idx: int):
         if idx < 0 or idx >= len(self.cameras):
             return
-        self._log_info("worker", "camera start requested", source="app", camera=str(self.cameras[idx].get("name", idx)))
         if idx < len(self.workers) and isinstance(self.workers[idx], CameraWorker) and self.workers[idx].isRunning():
             return
         while len(self.workers) < len(self.cameras):
@@ -1887,6 +1919,7 @@ QToolButton:focus { outline: none; }
         w.status_signal.connect(self._worker_status)
         w.record_signal.connect(lambda event, fp, cam_name=cam.get("name", idx): self.on_record_event(event, fp, cam_name))
         w.worker_status_signal.connect(self._on_worker_heartbeat)
+        self._log_info("worker", "camera start requested", source="app", camera=str(cam.get("name", idx)))
         w.start()
         self.workers[idx] = w
         self._apply_worker_preview_roles()
@@ -1905,7 +1938,7 @@ QToolButton:focus { outline: none; }
         cam = self.cameras[idx]
         stopped = w.stop()
         if not stopped:
-            self._log_warning("worker", f"kamera {cam.get('name', idx)} nie zatrzymała się w czasie", source="app", camera=str(cam.get("name", idx)))
+            self._log_warning("worker", "stop_camera timeout", source="app", camera=str(cam.get("name", idx)), details="worker did not stop in timeout window")
 
         with suppress(Exception):
             w.frame_signal.disconnect(self.update_frame)
@@ -1935,7 +1968,7 @@ QToolButton:focus { outline: none; }
         if idx == self.camera_list.currentRow():
             self._render_current()
 
-        self._log_info("worker", f"zatrzymano kamerę {cam.get('name', idx)}", source="app", camera=str(cam.get("name", idx)))
+        self._log_info("worker", "stop_camera completed", source="app", camera=str(cam.get("name", idx)), details=f"stopped={stopped}")
         self._evaluate_overload_mode()
         self._refresh_camera_status_indicators()
 
@@ -1977,6 +2010,8 @@ QToolButton:focus { outline: none; }
         self._worker_diag[cam_name] = payload
         self.worker_status[cam_name] = payload
         self._heartbeat_last_seen[cam_name] = time.monotonic()
+        if cam_name in self._heartbeat_alerted:
+            self._log_info("performance", "worker heartbeat recovered", source="heartbeat-watchdog", camera=cam_name)
         self._heartbeat_alerted.discard(cam_name)
         self._evaluate_overload_mode()
         self._refresh_camera_status_indicators()
@@ -2049,10 +2084,15 @@ QToolButton:focus { outline: none; }
         if not was_running:
             return False
         camera_name = str(self.cameras[idx].get("name", idx)) if idx < len(self.cameras) else str(idx)
-        self._log_info("settings", "automatic restart due to settings change", source="app", camera=camera_name)
-        self.stop_camera(idx)
-        self.start_camera(idx)
-        return True
+        self._log_info("settings", "automatic camera restart due to settings change", source="app", camera=camera_name)
+        try:
+            self.stop_camera(idx)
+            self.start_camera(idx)
+            self._log_info("settings", "camera restart success", source="app", camera=camera_name)
+            return True
+        except Exception as exc:
+            self._log_exception("error", "camera restart failure", exc=exc, source="app", camera=camera_name, details=traceback.format_exc())
+            return False
 
     def _apply_camera_settings_change(self, idx: int, old_camera: dict, new_camera: dict) -> dict:
         changed_keys, _ = classify_camera_setting_changes(old_camera, new_camera, CAMERA_RESTART_REQUIRED_FIELDS)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 import os
+import traceback
 from typing import List
 
 import cv2
@@ -53,6 +54,8 @@ def pick_alert_thumbnail_path(alert: dict) -> str:
         ratio = w / max(1, h)
         if ratio >= 1.2:
             return candidate
+    if first_existing and alert.get("alert_thumb") and alert.get("thumb") and str(alert.get("alert_thumb")) == str(alert.get("thumb")):
+        app_log("warning", "alert thumbnail source mismatch", source="alerts", level="WARNING", details=str(first_existing))
     return first_existing
 
 
@@ -164,11 +167,15 @@ class AlertItemWidget(QWidget):
             return
         pixmap = QPixmap(thumb)
         if pixmap.isNull():
+            app_log("warning", "alert thumbnail invalid image", source="alerts", level="WARNING", details=thumb)
             return
-        scaled = pixmap.scaled(
-            self.thumb.size(), Qt.KeepAspectRatio, Qt.FastTransformation
-        )
-        self.thumb.setPixmap(scaled)
+        try:
+            scaled = pixmap.scaled(
+                self.thumb.size(), Qt.KeepAspectRatio, Qt.FastTransformation
+            )
+            self.thumb.setPixmap(scaled)
+        except Exception as exc:
+            app_log("error", "alert widget thumbnail render failure", source="alerts", level="ERROR", details=str(exc), traceback=traceback.format_exc())
 
     def set_selected(self, selected: bool) -> None:
         self.setStyleSheet(self.SELECTED_STYLE if selected else self.BASE_STYLE)

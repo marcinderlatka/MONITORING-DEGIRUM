@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import os
+import traceback
 from typing import Dict, List, Mapping, Sequence
 
 import cv2
@@ -56,7 +57,7 @@ class ThumbnailWorker(QObject, QRunnable):
     def _load_image(self) -> QImage:
         for candidate in thumbnail_candidates_for_entry(self._entry):
             if not os.path.exists(candidate):
-                app_log("browser", f"thumbnail candidate missing: {candidate}", source="recordings-browser", level="INFO")
+                app_log("browser", "explicit thumbnail jpg missing", source="recordings-browser", level="INFO", details=str(candidate))
                 continue
             image = QImage(candidate)
             if not image.isNull():
@@ -68,15 +69,18 @@ class ThumbnailWorker(QObject, QRunnable):
             return self._qimage_from_bgr(cv_img)
 
         if os.path.exists(self._entry.filepath):
-            app_log("browser", "thumbnail fallback to first video frame", source="recordings-browser", level="INFO", details=self._entry.filepath)
+            app_log("browser", "fallback frame extraction used", source="recordings-browser", level="INFO", details=self._entry.filepath)
             cap = cv2.VideoCapture(self._entry.filepath)
             try:
                 ok, frame = cap.read()
+            except Exception as exc:
+                app_log("error", "thumbnail worker exception", source="recordings-browser", level="ERROR", details=str(exc), traceback=traceback.format_exc())
+                ok, frame = False, None
             finally:
                 cap.release()
             if ok and frame is not None:
                 return self._qimage_from_bgr(frame)
-        app_log("warning", "thumbnail load failed", source="recordings-browser", level="WARNING", details=self._entry.filepath)
+        app_log("warning", "fallback extraction failed", source="recordings-browser", level="WARNING", details=self._entry.filepath)
         return QImage()
 
     @staticmethod
@@ -305,6 +309,9 @@ class RecordingsBrowserDialog(QDialog):
             self._ensure_class_filter_entries(entries)
             self._set_default_date_bounds(entries)
             self._apply_filters()
+        except Exception as exc:
+            app_log("error", "browser refresh failure", source="recordings-browser", level="ERROR", details=str(exc), traceback=traceback.format_exc())
+            QMessageBox.warning(self, "Nagrania", f"Nie udało się odczytać nagrań: {exc}")
         finally:
             self.refresh_btn.setEnabled(True)
 
@@ -473,9 +480,12 @@ class RecordingsBrowserDialog(QDialog):
 
         row = self._table_rows.get(key)
         if row is not None:
-            widget = self.table.cellWidget(row, 1)
-            if isinstance(widget, QLabel):
-                widget.setPixmap(pixmap)
+            try:
+                widget = self.table.cellWidget(row, 1)
+                if isinstance(widget, QLabel):
+                    widget.setPixmap(pixmap)
+            except Exception as exc:
+                app_log("error", "thumbnail apply-to-widget failure", source="recordings-browser", level="ERROR", details=str(exc), traceback=traceback.format_exc())
 
     def _placeholder_pixmap(self) -> QPixmap:
         pix = QPixmap(self._thumb_size)
