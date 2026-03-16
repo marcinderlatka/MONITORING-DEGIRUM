@@ -520,3 +520,26 @@ Ostatnie zmiany wzmacniają diagnostykę runtime bez cichego zawieszania:
 - **Wyjątki z traceback**: ścieżki krytyczne (worker stream exception, browser refresh, thumbnail pipeline, restart kamery, launcher shutdown) logują traceback zamiast cichego tłumienia błędów.
 
 Wszystkie powyższe wpisy są publikowane przez istniejący mechanizm logów i są widoczne w panelu **Logi**.
+
+## Poprawki: miniatury nagrań i HUD kamery (2026)
+
+### Miniatury w widoku kafelków nagrań
+- **Stare zachowanie:** kafelki potrafiły pozostać w stanie „Ładowanie miniatury...”, mimo że metadane i lista nagrań były poprawnie wczytane.
+- **Nowe zachowanie:** pipeline miniatur zawsze kończy się jednym z trzech stanów: sukces (JPG), fallback (klatka z MP4), albo porażka („Brak miniatury”).
+- **Priorytet źródeł miniatur:**
+  1. jawna miniatura z metadanych (`thumb` / `recording_thumb`),
+  2. `*.jpg` obok nagrania,
+  3. dodatkowe znane warianty nazw JPG,
+  4. fallback: pierwsza klatka z pliku MP4.
+- **Efekt praktyczny:** kafelki nie pozostają „zawieszone” na ładowaniu, a przy braku JPG użytkownik dostaje czytelną miniaturę zapasową lub komunikat o braku miniatury.
+
+### HUD informacji kamery na obrazie
+- **Stare zachowanie:** główne informacje o kamerze bywały rozproszone i nie odświeżały się od razu po zmianie ustawień.
+- **Nowe zachowanie:** główny HUD jest rysowany bezpośrednio na obrazie kamery, w **prawym dolnym rogu rzeczywistego widocznego obszaru obrazu** (z uwzględnieniem letterbox), jako pionowa kolumna linii.
+- **Język HUD:** etykiety i treści są po polsku (m.in. Kamera, Status, FPS, Kolejka, Pominięte klatki, Tryb, Połączenie, Błąd).
+- **Ustawienia runtime:** po zapisaniu zmian HUD odświeża się natychmiast; ustawienia „live-safe” są stosowane bez restartu, a ustawienia wymagające restartu uruchamiają automatyczny restart tylko tej kamery.
+- **Widoczność HUD:** flaga `show_camera_info_overlay` (domyślnie `true`) działa od razu po zmianie.
+
+### Diagnostyka (panel Logi)
+- Dodano bardziej jednoznaczne logi dla ładowania miniaturek (`source=recordings-browser`) oraz odświeżania HUD i zastosowania ustawień (`source=camera-hud` / `source=settings`).
+- Logowane są przejścia i błędy, bez spamowania każdej klatki.

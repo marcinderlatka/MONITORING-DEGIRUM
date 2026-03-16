@@ -357,5 +357,5 @@ def test_camera_overlay_anchor_uses_visible_image_rect_not_whole_widget():
     # visible rect should be centered vertically (letterbox bars on top/bottom)
     assert image_rect == (0, 219, 1000, 562)
     anchor = camera_overlay_anchor(image_rect, (260, 120), padding=10)
-    assert anchor[0] == 10
+    assert anchor[0] == 730
     assert anchor[1] == 651
