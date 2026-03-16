@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import os
+import traceback
 from typing import Dict, List, Mapping, Sequence
 
 import cv2
@@ -74,14 +75,7 @@ class ThumbnailTask(QRunnable):
         explicit_candidate = candidates[0] if candidates else ""
         for idx, candidate in enumerate(candidates):
             if not os.path.exists(candidate):
-                if idx == 0 and explicit_candidate:
-                    app_log(
-                        "warning",
-                        "explicit thumbnail missing",
-                        source="recordings-browser",
-                        level="WARNING",
-                        details=f"filepath={self._entry.filepath}; candidate={candidate}",
-                    )
+                app_log("browser", "explicit thumbnail jpg missing", source="recordings-browser", level="INFO", details=str(candidate))
                 continue
             image = QImage(candidate)
             if not image.isNull():
@@ -100,21 +94,19 @@ class ThumbnailTask(QRunnable):
             return self._qimage_from_bgr(cv_img), "jpg"
 
         if os.path.exists(self._entry.filepath):
+            app_log("browser", "fallback frame extraction used", source="recordings-browser", level="INFO", details=self._entry.filepath)
             cap = cv2.VideoCapture(self._entry.filepath)
             try:
                 ok, frame = cap.read()
+            except Exception as exc:
+                app_log("error", "thumbnail worker exception", source="recordings-browser", level="ERROR", details=str(exc), traceback=traceback.format_exc())
+                ok, frame = False, None
             finally:
                 cap.release()
             if ok and frame is not None:
-                app_log(
-                    "browser",
-                    "thumbnail fallback extracted from mp4",
-                    source="recordings-browser",
-                    level="INFO",
-                    details=f"filepath={self._entry.filepath}",
-                )
-                return self._qimage_from_bgr(frame), "mp4-fallback"
-        return None, "failure"
+                return self._qimage_from_bgr(frame)
+        app_log("warning", "fallback extraction failed", source="recordings-browser", level="WARNING", details=self._entry.filepath)
+        return QImage()
 
     @staticmethod
     def _qimage_from_bgr(frame: np.ndarray) -> QImage:
@@ -346,6 +338,9 @@ class RecordingsBrowserDialog(QDialog):
             self._ensure_class_filter_entries(entries)
             self._set_default_date_bounds(entries)
             self._apply_filters()
+        except Exception as exc:
+            app_log("error", "browser refresh failure", source="recordings-browser", level="ERROR", details=str(exc), traceback=traceback.format_exc())
+            QMessageBox.warning(self, "Nagrania", f"Nie udało się odczytać nagrań: {exc}")
         finally:
             self.refresh_btn.setEnabled(True)
 
@@ -561,11 +556,13 @@ class RecordingsBrowserDialog(QDialog):
     def _apply_thumbnail_to_table(self, filepath: str, pixmap: QPixmap) -> None:
         key = self._thumb_cache_key(filepath)
         row = self._table_rows.get(key)
-        if row is None:
-            return
-        widget = self.table.cellWidget(row, 1)
-        if isinstance(widget, QLabel):
-            widget.setPixmap(pixmap)
+        if row is not None:
+            try:
+                widget = self.table.cellWidget(row, 1)
+                if isinstance(widget, QLabel):
+                    widget.setPixmap(pixmap)
+            except Exception as exc:
+                app_log("error", "thumbnail apply-to-widget failure", source="recordings-browser", level="ERROR", details=str(exc), traceback=traceback.format_exc())
 
     def _loading_pixmap(self) -> QPixmap:
         pix = QPixmap(self._thumb_size)

@@ -101,3 +101,56 @@ def evaluate_heartbeat_health(
         if now - last_ts > timeout_seconds:
             stale.append(camera_name)
     return stale
+
+
+def evaluate_overload_transition(
+    *,
+    now_ts: float,
+    active_camera_count: int,
+    gui_load_fps: float,
+    recording_count: int,
+    currently_active: bool,
+    last_change_ts: float,
+    protection_enabled: bool,
+    min_camera_count: int,
+    camera_threshold: int,
+    load_per_camera_threshold: float,
+    enter_debounce_seconds: float,
+    exit_debounce_seconds: float,
+) -> tuple[bool, float, str]:
+    """Decide overload mode transition with camera floor + debounce hysteresis."""
+
+    if not protection_enabled:
+        return False, (now_ts if currently_active else last_change_ts), "disabled"
+
+    if active_camera_count < max(1, int(min_camera_count)):
+        if currently_active:
+            if now_ts - last_change_ts >= max(0.0, exit_debounce_seconds):
+                return False, now_ts, "below-min-camera-threshold"
+            return True, last_change_ts, "exit-debounce-pending"
+        return False, last_change_ts, "below-min-camera-threshold"
+
+    overload_condition = (
+        active_camera_count >= max(1, int(camera_threshold))
+        or (active_camera_count > 0 and gui_load_fps > active_camera_count * float(load_per_camera_threshold))
+    )
+    if recording_count > 0 and active_camera_count <= camera_threshold:
+        overload_condition = False
+
+    if overload_condition:
+        if currently_active:
+            return True, last_change_ts, "already-active"
+        if now_ts - last_change_ts >= max(0.0, enter_debounce_seconds):
+            return True, now_ts, "condition-stable-enter"
+        return False, last_change_ts, "enter-debounce-pending"
+
+    if not currently_active:
+        return False, last_change_ts, "already-inactive"
+    if now_ts - last_change_ts >= max(0.0, exit_debounce_seconds):
+        return False, now_ts, "condition-stable-exit"
+    return True, last_change_ts, "exit-debounce-pending"
+
+
+def worker_stop_timeout_details(camera_name: str, timeout_ms: int) -> str:
+    """Consistent worker stop timeout detail string for logs/tests."""
+    return f"camera={camera_name} timeout_ms={int(timeout_ms)}"
