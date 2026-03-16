@@ -106,10 +106,11 @@ Widżet **LogWindow** zapisuje zdarzenia aplikacji, alerty i błędy do pliku `l
 Dialog „Nagrania” skanuje katalogi nagrań w tle, buduje listę plików MP4 z miniaturami, umożliwia filtrowanie po kamerze, klasie, zakresie dat oraz wyszukiwaniu po nazwie. Z tego miejsca można otwierać nagrania, kasować wiele pozycji jednocześnie (razem z metadanymi `.json` i miniaturami `.jpg`) lub masowo zaznaczać/odznaczać elementy.
 
 **Niezawodne ładowanie miniaturek (widok kafelków):**
-* Asynchroniczny pipeline miniaturek działa na `QThreadPool` z dedykowanym obiektem sygnałów, co eliminuje zawieszanie kafelków w stanie „Ładowanie miniatury...”.
-* Priorytet źródeł miniatur: jawny JPG z metadanych (`thumb`/`recording_thumb`) → pliki `*.jpg` obok nagrania → fallback: pierwsza klatka z MP4.
-* Każde żądanie miniatury kończy się stanem końcowym: sukces (miniatura), fallback (klatka MP4) albo porażka („brak miniatury”).
-* Błędy oraz fallbacki ładowania miniaturek są raportowane do panelu **Logi** z `source=recordings-browser` i ścieżką pliku, co ułatwia diagnostykę.
+* Przeglądarka przebudowuje tylko aktywny widok (kafelki albo lista), a drugi widok odświeża dopiero po przełączeniu — ogranicza to zacięcia podczas otwierania okna.
+* Asynchroniczny pipeline miniaturek działa na ograniczonym `QThreadPool` (`maxThreadCount=2`) i blokuje duplikaty zadań dla tego samego pliku.
+* Pierwsza fala ładowania próbuje wyłącznie miniatur JPG (metadane `thumb`/`recording_thumb` oraz `*.jpg` obok nagrania); ciężki fallback MP4 uruchamia się warunkowo tylko dla widocznych kafelków.
+* Każde żądanie miniatury kończy się stanem końcowym: sukces (miniatura), fallback (klatka MP4) albo porażka z czytelnym placeholderem „Brak miniatury” — bez pozostawiania kart w nieskończonym „Ładowanie miniatury...”.
+* Błędy i ostrzeżenia pipeline’u miniaturek są raportowane do panelu **Logi** (`source=recordings-browser`) jako `INFO`/`WARNING`/`ERROR`, co ułatwia diagnostykę brakujących JPG i awarii fallbacku.
 
 ### Odtwarzacz nagrań
 Podwójne kliknięcie nagrania otwiera odtwarzacz z kontrolkami transportu, przełączaniem między plikami, zrzutem klatki i trybem pełnoekranowym.

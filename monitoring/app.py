@@ -2398,20 +2398,25 @@ QToolButton:focus { outline: none; }
             font = QFont("DejaVu Sans", font_size)
             painter.setFont(font)
             fm = painter.fontMetrics()
-            pad = 8
-            line_h = fm.height() + 2
+            pad_x = 12
+            pad_y = 10
+            line_gap = 2
+            line_h = fm.height() + line_gap
             text_w = max(fm.horizontalAdvance(line) for line in lines)
-            box_w = text_w + 2 * pad
-            box_h = line_h * len(lines) + 2 * pad
+            box_w = text_w + 2 * pad_x
+            box_h = (line_h * len(lines)) + (2 * pad_y)
             x, y = self._camera_info_overlay_anchor(image_rect, (box_w, box_h), padding=10)
 
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(0, 0, 0, 128))
+            overlay_color = QColor(0, 0, 0, 127)
+            border_color = QColor(255, 255, 255, 40)
+            painter.setPen(border_color)
+            painter.setBrush(overlay_color)
             painter.drawRoundedRect(x, y, box_w, box_h, 8, 8)
 
             painter.setPen(QColor(255, 255, 255))
+            baseline = y + pad_y + fm.ascent()
             for i, line in enumerate(lines):
-                painter.drawText(x + pad, y + pad + (i + 1) * line_h - 4, line)
+                painter.drawText(x + pad_x, baseline + (i * line_h), line)
         finally:
             painter.end()
 
