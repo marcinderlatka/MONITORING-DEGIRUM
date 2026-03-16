@@ -38,46 +38,83 @@ from ..recordings import (
     thumbnail_candidates_for_entry,
 )
 from ..storage import remove_from_recordings_catalog
-from ..runtime_helpers import app_log, thumbnail_load_outcome
+from ..runtime_helpers import app_log
 
 
-class ThumbnailWorker(QObject, QRunnable):
-    thumbnail_ready = pyqtSignal(str, object)
+class ThumbnailTaskSignals(QObject):
+    ready = pyqtSignal(str, object, str)
+    failed = pyqtSignal(str, str)
+
+
+class ThumbnailTask(QRunnable):
+    """Background thumbnail loader for QThreadPool.
+
+    Signals live on a dedicated QObject to avoid fragile QObject+QRunnable
+    multiple-inheritance lifetime issues.
+    """
 
     def __init__(self, entry: RecordingMetadata):
         super().__init__()
-        QRunnable.__init__(self)
         self._entry = entry
+        self.signals = ThumbnailTaskSignals()
+        self.setAutoDelete(True)
 
     def run(self) -> None:  # pragma: no cover - async GUI path
-        image = self._load_image()
-        self.thumbnail_ready.emit(self._entry.filepath, image)
+        try:
+            image, source = self._load_image()
+            if image is None or image.isNull():
+                self.signals.failed.emit(self._entry.filepath, "brak poprawnej miniatury")
+                return
+            self.signals.ready.emit(self._entry.filepath, image, source)
+        except Exception as exc:  # pragma: no cover - defensive async path
+            self.signals.failed.emit(self._entry.filepath, f"thumbnail task crash: {exc}")
 
-    def _load_image(self) -> QImage:
-        for candidate in thumbnail_candidates_for_entry(self._entry):
+    def _load_image(self) -> tuple[QImage | None, str]:
+        candidates = thumbnail_candidates_for_entry(self._entry)
+        explicit_candidate = candidates[0] if candidates else ""
+        for idx, candidate in enumerate(candidates):
             if not os.path.exists(candidate):
-                app_log("browser", f"thumbnail candidate missing: {candidate}", source="recordings-browser", level="INFO")
+                if idx == 0 and explicit_candidate:
+                    app_log(
+                        "warning",
+                        "explicit thumbnail missing",
+                        source="recordings-browser",
+                        level="WARNING",
+                        details=f"filepath={self._entry.filepath}; candidate={candidate}",
+                    )
                 continue
             image = QImage(candidate)
             if not image.isNull():
-                return image
+                if idx == 0:
+                    app_log(
+                        "browser",
+                        "thumbnail loaded from explicit jpg",
+                        source="recordings-browser",
+                        level="INFO",
+                        details=f"filepath={self._entry.filepath}; thumb={candidate}",
+                    )
+                return image, "jpg"
             cv_img = cv2.imread(candidate, cv2.IMREAD_COLOR)
             if cv_img is None:
-                app_log("warning", f"thumbnail decode failed: {candidate}", source="recordings-browser", level="WARNING")
                 continue
-            return self._qimage_from_bgr(cv_img)
+            return self._qimage_from_bgr(cv_img), "jpg"
 
         if os.path.exists(self._entry.filepath):
-            app_log("browser", "thumbnail fallback to first video frame", source="recordings-browser", level="INFO", details=self._entry.filepath)
             cap = cv2.VideoCapture(self._entry.filepath)
             try:
                 ok, frame = cap.read()
             finally:
                 cap.release()
             if ok and frame is not None:
-                return self._qimage_from_bgr(frame)
-        app_log("warning", "thumbnail load failed", source="recordings-browser", level="WARNING", details=self._entry.filepath)
-        return QImage()
+                app_log(
+                    "browser",
+                    "thumbnail fallback extracted from mp4",
+                    source="recordings-browser",
+                    level="INFO",
+                    details=f"filepath={self._entry.filepath}",
+                )
+                return self._qimage_from_bgr(frame), "mp4-fallback"
+        return None, "failure"
 
     @staticmethod
     def _qimage_from_bgr(frame: np.ndarray) -> QImage:
@@ -121,17 +158,17 @@ class RecordingCardWidget(QWidget):
 
         self._set_selected(False)
 
-    def set_loading_placeholder(self, pixmap: QPixmap) -> None:
+    def set_loading_state(self, pixmap: QPixmap) -> None:
         self.thumb.setPixmap(pixmap)
         self.thumb_status.setText("trwa wczytywanie")
 
-    def set_thumbnail(self, pixmap: QPixmap) -> None:
+    def set_thumbnail_success(self, pixmap: QPixmap) -> None:
         self.thumb.setPixmap(pixmap)
         self.thumb_status.setText("")
 
-    def set_thumbnail_failed(self, pixmap: QPixmap) -> None:
+    def set_thumbnail_failure(self, pixmap: QPixmap, message: str = "brak miniatury") -> None:
         self.thumb.setPixmap(pixmap)
-        self.thumb_status.setText("brak miniatury")
+        self.thumb_status.setText(message)
 
     def _set_selected(self, selected: bool) -> None:
         border = "#1d5fd1" if selected else "#d0d0d0"
@@ -164,7 +201,7 @@ class RecordingsBrowserDialog(QDialog):
         self.thumbnail_cache: Dict[str, QPixmap] = {}
         self._pending_thumbnails: set[str] = set()
         self._failed_thumbnails: set[str] = set()
-        self._thumbnail_workers: Dict[str, ThumbnailWorker] = {}
+        self._thumbnail_tasks: Dict[str, ThumbnailTask] = {}
         self._tile_items: Dict[str, QListWidgetItem] = {}
         self._tile_cards: Dict[str, RecordingCardWidget] = {}
         self._table_rows: Dict[str, int] = {}
@@ -179,7 +216,7 @@ class RecordingsBrowserDialog(QDialog):
         root.addLayout(self._build_mode_row())
         root.addLayout(self._build_views())
 
-        self.refresh()
+        self.refresh(retry_failed=False)
 
     def _apply_light_theme(self) -> None:
         palette = QPalette()
@@ -236,7 +273,7 @@ class RecordingsBrowserDialog(QDialog):
         self.date_to.dateChanged.connect(self._apply_filters)
         self.search_edit.textChanged.connect(self._apply_filters)
         self.quick_range.currentTextChanged.connect(self._apply_quick_range)
-        self.refresh_btn.clicked.connect(self.refresh)
+        self.refresh_btn.clicked.connect(lambda: self.refresh(retry_failed=True))
         self.delete_btn.clicked.connect(self.delete_selected)
         self.select_all_checkbox.stateChanged.connect(self._select_all_changed)
         return layout
@@ -293,10 +330,14 @@ class RecordingsBrowserDialog(QDialog):
         self.empty_label.hide()
         return layout
 
-    def refresh(self) -> None:
+    def refresh(self, retry_failed: bool = True) -> None:
         self.refresh_btn.setEnabled(False)
         try:
             history_source = self._history_items if self._history_items is not None else self._history_path
+            if retry_failed:
+                for failed_key in list(self._failed_thumbnails):
+                    self.thumbnail_cache.pop(failed_key, None)
+                self._failed_thumbnails.clear()
             app_log("browser", "refresh recordings browser", source="recordings-browser", level="INFO")
             entries, diag = load_recording_entries(self._camera_dirs, history_source, prefer_catalog=True, allow_disk_fallback=True, heal_catalog=True)
             self._entries = entries
@@ -377,7 +418,7 @@ class RecordingsBrowserDialog(QDialog):
             item.setSizeHint(QSize(350, 320))
             self.tile_list.addItem(item)
             card = RecordingCardWidget(entry, self._thumb_size)
-            card.set_loading_placeholder(self._placeholder_pixmap())
+            card.set_loading_state(self._loading_pixmap())
             self.tile_list.setItemWidget(item, card)
             key = self._thumb_cache_key(entry.filepath)
             self._tile_items[key] = item
@@ -385,9 +426,9 @@ class RecordingsBrowserDialog(QDialog):
             cached = self.thumbnail_cache.get(key)
             if cached is not None:
                 if key in self._failed_thumbnails:
-                    card.set_thumbnail_failed(cached)
+                    card.set_thumbnail_failure(cached)
                 else:
-                    card.set_thumbnail(cached)
+                    card.set_thumbnail_success(cached)
             else:
                 self._request_thumbnail(entry)
 
@@ -406,7 +447,10 @@ class RecordingsBrowserDialog(QDialog):
 
             thumb_lbl = QLabel()
             thumb_lbl.setAlignment(Qt.AlignCenter)
-            thumb_lbl.setPixmap(self.thumbnail_cache.get(key, self._placeholder_pixmap()))
+            if key in self.thumbnail_cache:
+                thumb_lbl.setPixmap(self.thumbnail_cache[key])
+            else:
+                thumb_lbl.setPixmap(self._loading_pixmap())
             self.table.setCellWidget(row, 1, thumb_lbl)
 
             self.table.setItem(row, 2, QTableWidgetItem(entry.display_time))
@@ -441,49 +485,106 @@ class RecordingsBrowserDialog(QDialog):
 
     def _request_thumbnail(self, entry: RecordingMetadata) -> None:
         key = self._thumb_cache_key(entry.filepath)
-        if key in self.thumbnail_cache or key in self._pending_thumbnails:
+        if key in self._pending_thumbnails:
             return
-        worker = ThumbnailWorker(entry)
-        worker.thumbnail_ready.connect(self._apply_thumbnail, Qt.QueuedConnection)
-        self._thumbnail_workers[key] = worker
+        if key in self.thumbnail_cache:
+            if key in self._failed_thumbnails:
+                self._apply_thumbnail_failure(entry.filepath, "cached failure")
+            else:
+                self._apply_thumbnail_success(entry.filepath, self.thumbnail_cache[key])
+            return
+        task = ThumbnailTask(entry)
+        task.signals.ready.connect(self._on_thumbnail_ready, Qt.QueuedConnection)
+        task.signals.failed.connect(self._on_thumbnail_failed, Qt.QueuedConnection)
+        self._thumbnail_tasks[key] = task
         self._pending_thumbnails.add(key)
-        self.thumbnail_pool.start(worker)
+        self.thumbnail_pool.start(task)
 
-    @pyqtSlot(str, object)
-    def _apply_thumbnail(self, filepath: str, image: object) -> None:
+    @pyqtSlot(str, object, str)
+    def _on_thumbnail_ready(self, filepath: str, image: object, source: str) -> None:
         key = self._thumb_cache_key(filepath)
         self._pending_thumbnails.discard(key)
-        self._thumbnail_workers.pop(key, None)
-        outcome = thumbnail_load_outcome(image)
-        success = outcome == "success"
-        pixmap = self._placeholder_pixmap()
-        if success:
+        self._thumbnail_tasks.pop(key, None)
+        pixmap = self._failure_pixmap()
+        if isinstance(image, QImage) and not image.isNull():
             pixmap = QPixmap.fromImage(image).scaled(self._thumb_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            self._failed_thumbnails.discard(key)
-        else:
-            self._failed_thumbnails.add(key)
+            self._apply_thumbnail_success(filepath, pixmap)
+            return
+        self._apply_thumbnail_failure(filepath, f"invalid thumbnail image source={source}")
+
+    @pyqtSlot(str, str)
+    def _on_thumbnail_failed(self, filepath: str, reason: str) -> None:
+        key = self._thumb_cache_key(filepath)
+        self._pending_thumbnails.discard(key)
+        self._thumbnail_tasks.pop(key, None)
+        self._apply_thumbnail_failure(filepath, reason)
+
+    def _apply_thumbnail_success(self, filepath: str, pixmap: QPixmap) -> None:
+        key = self._thumb_cache_key(filepath)
         self.thumbnail_cache[key] = pixmap
+        self._failed_thumbnails.discard(key)
+        self._apply_thumbnail_to_card(filepath, pixmap, success=True)
+        self._apply_thumbnail_to_table(filepath, pixmap)
 
+    def _apply_thumbnail_failure(self, filepath: str, reason: str) -> None:
+        key = self._thumb_cache_key(filepath)
+        pixmap = self._failure_pixmap()
+        self.thumbnail_cache[key] = pixmap
+        self._failed_thumbnails.add(key)
+        self._apply_thumbnail_to_card(filepath, pixmap, success=False)
+        self._apply_thumbnail_to_table(filepath, pixmap)
+        app_log(
+            "error",
+            "thumbnail load failed",
+            source="recordings-browser",
+            level="ERROR",
+            details=f"filepath={filepath}; reason={reason}",
+        )
+
+    def _apply_thumbnail_to_card(self, filepath: str, pixmap: QPixmap, success: bool) -> None:
+        key = self._thumb_cache_key(filepath)
         card = self._tile_cards.get(key)
-        if card is not None:
-            if success:
-                card.set_thumbnail(pixmap)
-            else:
-                card.set_thumbnail_failed(pixmap)
+        if card is None:
+            app_log(
+                "warning",
+                "thumbnail result cannot be mapped to visible tile",
+                source="recordings-browser",
+                level="WARNING",
+                details=f"filepath={filepath}",
+            )
+            return
+        if success:
+            card.set_thumbnail_success(pixmap)
+        else:
+            card.set_thumbnail_failure(pixmap)
 
+    def _apply_thumbnail_to_table(self, filepath: str, pixmap: QPixmap) -> None:
+        key = self._thumb_cache_key(filepath)
         row = self._table_rows.get(key)
-        if row is not None:
-            widget = self.table.cellWidget(row, 1)
-            if isinstance(widget, QLabel):
-                widget.setPixmap(pixmap)
+        if row is None:
+            return
+        widget = self.table.cellWidget(row, 1)
+        if isinstance(widget, QLabel):
+            widget.setPixmap(pixmap)
 
-    def _placeholder_pixmap(self) -> QPixmap:
+    def _loading_pixmap(self) -> QPixmap:
         pix = QPixmap(self._thumb_size)
         pix.fill(QColor("#e9edf3"))
         painter = QPainter(pix)
         try:
             painter.setPen(QColor("#6b7280"))
             painter.drawText(pix.rect(), Qt.AlignCenter, "Ładowanie miniatury...")
+        finally:
+            painter.end()
+        return pix
+
+    def _failure_pixmap(self) -> QPixmap:
+        pix = QPixmap(self._thumb_size)
+        pix.fill(QColor("#f3f4f6"))
+        painter = QPainter(pix)
+        try:
+            painter.setPen(QColor("#6b7280"))
+            painter.drawText(pix.rect(), Qt.AlignCenter, "Brak miniatury")
         finally:
             painter.end()
         return pix

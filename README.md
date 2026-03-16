@@ -105,6 +105,12 @@ Widżet **LogWindow** zapisuje zdarzenia aplikacji, alerty i błędy do pliku `l
 ### Przeglądarka nagrań
 Dialog „Nagrania” skanuje katalogi nagrań w tle, buduje listę plików MP4 z miniaturami, umożliwia filtrowanie po kamerze, klasie, zakresie dat oraz wyszukiwaniu po nazwie. Z tego miejsca można otwierać nagrania, kasować wiele pozycji jednocześnie (razem z metadanymi `.json` i miniaturami `.jpg`) lub masowo zaznaczać/odznaczać elementy.
 
+**Niezawodne ładowanie miniaturek (widok kafelków):**
+* Asynchroniczny pipeline miniaturek działa na `QThreadPool` z dedykowanym obiektem sygnałów, co eliminuje zawieszanie kafelków w stanie „Ładowanie miniatury...”.
+* Priorytet źródeł miniatur: jawny JPG z metadanych (`thumb`/`recording_thumb`) → pliki `*.jpg` obok nagrania → fallback: pierwsza klatka z MP4.
+* Każde żądanie miniatury kończy się stanem końcowym: sukces (miniatura), fallback (klatka MP4) albo porażka („brak miniatury”).
+* Błędy oraz fallbacki ładowania miniaturek są raportowane do panelu **Logi** z `source=recordings-browser` i ścieżką pliku, co ułatwia diagnostykę.
+
 ### Odtwarzacz nagrań
 Podwójne kliknięcie nagrania otwiera odtwarzacz z kontrolkami transportu, przełączaniem między plikami, zrzutem klatki i trybem pełnoekranowym.
 
