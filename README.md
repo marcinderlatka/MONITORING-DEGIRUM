@@ -485,3 +485,18 @@ Additional notes:
 - `alert_thumb` reprezentuje podgląd sceny dla listy alertów.
 - `thumb` pozostaje posterem nagrania używanym przez przeglądarkę nagrań.
 - Zachowana kompatybilność ze starszymi metadanymi i historią.
+
+## Stability Logging and Error Diagnostics
+
+Aplikacja używa teraz centralnego mostu logowania (`AppLogBridge`), który bezpiecznie przekazuje wpisy z wątków workerów i kodu UI do panelu **Logi**.
+
+Najważniejsze usprawnienia:
+- panel Logi obsługuje rozszerzone grupy (m.in. `warning`, `worker`, `ui`, `browser`, `performance`) oraz bogatsze pola wpisów (`source`, `level`, `details`, `traceback`),
+- ostrzeżenia i błędy z aplikacji, workerów i przeglądarki nagrań trafiają do panelu zamiast znikać w konsoli,
+- globalne hooki wyjątków (`sys.excepthook`, `threading.excepthook`) logują traceback przed zakończeniem procesu,
+- handler komunikatów Qt (`qInstallMessageHandler`) zapisuje ostrzeżenia/błędy frameworka do panelu,
+- heartbeat watchdog wykrywa potencjalne zawieszenia workerów (brak heartbeat),
+- GUI watchdog wykrywa podejrzane stany (np. brak odświeżania klatek dla aktywnej kamery),
+- logowanie cyklu życia kamer (start/stop/restart po zmianie ustawień) poprawia diagnostykę freeze’ów i restartów.
+
+Korzyść praktyczna: gdy pojawia się problem runtime (błąd modelu, timeout stopu workera, błąd miniatury lub wyjątek), użytkownik widzi kontekst od razu w panelu **Logi**, razem z kluczowymi szczegółami diagnostycznymi.

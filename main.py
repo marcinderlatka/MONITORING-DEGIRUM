@@ -1,6 +1,7 @@
 """Application entry point for the Monitoring RTSP GUI."""
 
 import argparse
+import logging
 
 from monitoring.app import main as run_app
 
@@ -17,7 +18,14 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    run_app(windowed=args.windowed)
+    logging.getLogger(__name__).info("launcher startup")
+    try:
+        run_app(windowed=args.windowed)
+    except Exception:
+        logging.getLogger(__name__).exception("launcher unhandled shutdown exception")
+        raise
+    finally:
+        logging.getLogger(__name__).info("launcher shutdown")
 
 
 if __name__ == "__main__":

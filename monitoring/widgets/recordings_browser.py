@@ -38,7 +38,7 @@ from ..recordings import (
     thumbnail_candidates_for_entry,
 )
 from ..storage import remove_from_recordings_catalog
-from ..runtime_helpers import thumbnail_load_outcome
+from ..runtime_helpers import app_log, thumbnail_load_outcome
 
 
 class ThumbnailWorker(QObject, QRunnable):
@@ -56,16 +56,19 @@ class ThumbnailWorker(QObject, QRunnable):
     def _load_image(self) -> QImage:
         for candidate in thumbnail_candidates_for_entry(self._entry):
             if not os.path.exists(candidate):
+                app_log("browser", f"thumbnail candidate missing: {candidate}", source="recordings-browser", level="INFO")
                 continue
             image = QImage(candidate)
             if not image.isNull():
                 return image
             cv_img = cv2.imread(candidate, cv2.IMREAD_COLOR)
             if cv_img is None:
+                app_log("warning", f"thumbnail decode failed: {candidate}", source="recordings-browser", level="WARNING")
                 continue
             return self._qimage_from_bgr(cv_img)
 
         if os.path.exists(self._entry.filepath):
+            app_log("browser", "thumbnail fallback to first video frame", source="recordings-browser", level="INFO", details=self._entry.filepath)
             cap = cv2.VideoCapture(self._entry.filepath)
             try:
                 ok, frame = cap.read()
@@ -73,6 +76,7 @@ class ThumbnailWorker(QObject, QRunnable):
                 cap.release()
             if ok and frame is not None:
                 return self._qimage_from_bgr(frame)
+        app_log("warning", "thumbnail load failed", source="recordings-browser", level="WARNING", details=self._entry.filepath)
         return QImage()
 
     @staticmethod
@@ -293,6 +297,7 @@ class RecordingsBrowserDialog(QDialog):
         self.refresh_btn.setEnabled(False)
         try:
             history_source = self._history_items if self._history_items is not None else self._history_path
+            app_log("browser", "refresh recordings browser", source="recordings-browser", level="INFO")
             entries, diag = load_recording_entries(self._camera_dirs, history_source, prefer_catalog=True, allow_disk_fallback=True, heal_catalog=True)
             self._entries = entries
             self._load_diagnostics = diag
