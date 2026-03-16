@@ -72,10 +72,9 @@ class ThumbnailTask(QRunnable):
 
     def _load_image(self) -> tuple[QImage | None, str]:
         candidates = thumbnail_candidates_for_entry(self._entry)
-        explicit_candidate = candidates[0] if candidates else ""
         for idx, candidate in enumerate(candidates):
             if not os.path.exists(candidate):
-                app_log("browser", "explicit thumbnail jpg missing", source="recordings-browser", level="INFO", details=str(candidate))
+                app_log("warning", "brak pliku miniatury JPG", source="recordings-browser", level="WARNING", details=str(candidate))
                 continue
             image = QImage(candidate)
             if not image.isNull():
@@ -94,7 +93,7 @@ class ThumbnailTask(QRunnable):
             return self._qimage_from_bgr(cv_img), "jpg"
 
         if os.path.exists(self._entry.filepath):
-            app_log("browser", "fallback frame extraction used", source="recordings-browser", level="INFO", details=self._entry.filepath)
+            app_log("browser", "użyto miniatury zapasowej z klatki MP4", source="recordings-browser", level="INFO", details=self._entry.filepath)
             cap = cv2.VideoCapture(self._entry.filepath)
             try:
                 ok, frame = cap.read()
@@ -104,9 +103,9 @@ class ThumbnailTask(QRunnable):
             finally:
                 cap.release()
             if ok and frame is not None:
-                return self._qimage_from_bgr(frame)
-        app_log("warning", "fallback extraction failed", source="recordings-browser", level="WARNING", details=self._entry.filepath)
-        return QImage()
+                return self._qimage_from_bgr(frame), "mp4-fallback"
+        app_log("error", "nie udało się wczytać miniatury JPG ani klatki MP4", source="recordings-browser", level="ERROR", details=self._entry.filepath)
+        return QImage(), "failure"
 
     @staticmethod
     def _qimage_from_bgr(frame: np.ndarray) -> QImage:
@@ -125,7 +124,7 @@ class RecordingCardWidget(QWidget):
         self.thumb.setAlignment(Qt.AlignCenter)
         self.thumb.setFixedSize(self._thumb_size)
 
-        self.thumb_status = QLabel("trwa wczytywanie")
+        self.thumb_status = QLabel("Ładowanie miniatury...")
         self.thumb_status.setAlignment(Qt.AlignCenter)
         self.thumb_status.setStyleSheet("font-size:12px; color:#6b7280;")
 
@@ -152,13 +151,13 @@ class RecordingCardWidget(QWidget):
 
     def set_loading_state(self, pixmap: QPixmap) -> None:
         self.thumb.setPixmap(pixmap)
-        self.thumb_status.setText("trwa wczytywanie")
+        self.thumb_status.setText("Ładowanie miniatury...")
 
     def set_thumbnail_success(self, pixmap: QPixmap) -> None:
         self.thumb.setPixmap(pixmap)
         self.thumb_status.setText("")
 
-    def set_thumbnail_failure(self, pixmap: QPixmap, message: str = "brak miniatury") -> None:
+    def set_thumbnail_failure(self, pixmap: QPixmap, message: str = "Brak miniatury") -> None:
         self.thumb.setPixmap(pixmap)
         self.thumb_status.setText(message)
 
@@ -425,7 +424,7 @@ class RecordingsBrowserDialog(QDialog):
                 else:
                     card.set_thumbnail_success(cached)
             else:
-                self._request_thumbnail(entry)
+                self._start_thumbnail_request(entry)
 
     def _rebuild_table_view(self, entries: Sequence[RecordingMetadata]) -> None:
         self.table.setSortingEnabled(False)
@@ -459,7 +458,7 @@ class RecordingsBrowserDialog(QDialog):
             self.table.setItem(row, 7, file_item)
             self._table_rows[key] = row
             if key not in self.thumbnail_cache:
-                self._request_thumbnail(entry)
+                self._start_thumbnail_request(entry)
         self.table.setSortingEnabled(True)
 
     def _update_empty_state(self) -> None:
@@ -478,15 +477,16 @@ class RecordingsBrowserDialog(QDialog):
         else:
             self.empty_label.hide()
 
-    def _request_thumbnail(self, entry: RecordingMetadata) -> None:
+    def _start_thumbnail_request(self, entry: RecordingMetadata) -> None:
         key = self._thumb_cache_key(entry.filepath)
         if key in self._pending_thumbnails:
             return
         if key in self.thumbnail_cache:
             if key in self._failed_thumbnails:
-                self._apply_thumbnail_failure(entry.filepath, "cached failure")
+                self._apply_thumbnail_failed(entry.filepath, "zapisany błąd miniatury")
             else:
-                self._apply_thumbnail_success(entry.filepath, self.thumbnail_cache[key])
+                self._apply_thumbnail_to_card(entry.filepath, self.thumbnail_cache[key])
+                self._apply_thumbnail_to_table(entry.filepath, self.thumbnail_cache[key])
             return
         task = ThumbnailTask(entry)
         task.signals.ready.connect(self._on_thumbnail_ready, Qt.QueuedConnection)
@@ -500,58 +500,61 @@ class RecordingsBrowserDialog(QDialog):
         key = self._thumb_cache_key(filepath)
         self._pending_thumbnails.discard(key)
         self._thumbnail_tasks.pop(key, None)
-        pixmap = self._failure_pixmap()
         if isinstance(image, QImage) and not image.isNull():
             pixmap = QPixmap.fromImage(image).scaled(self._thumb_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            self._apply_thumbnail_success(filepath, pixmap)
+            self._apply_thumbnail_to_card(filepath, pixmap)
+            self._apply_thumbnail_to_table(filepath, pixmap)
+            if source == "jpg":
+                app_log("browser", "wczytano miniaturę JPG", source="recordings-browser", level="INFO", details=filepath)
+            elif source == "mp4-fallback":
+                app_log("browser", "użyto klatki MP4 jako miniatury", source="recordings-browser", level="INFO", details=filepath)
             return
-        self._apply_thumbnail_failure(filepath, f"invalid thumbnail image source={source}")
+        self._on_thumbnail_failed(filepath, f"niepoprawny obraz miniatury, źródło={source}")
 
     @pyqtSlot(str, str)
     def _on_thumbnail_failed(self, filepath: str, reason: str) -> None:
         key = self._thumb_cache_key(filepath)
         self._pending_thumbnails.discard(key)
         self._thumbnail_tasks.pop(key, None)
-        self._apply_thumbnail_failure(filepath, reason)
+        self._apply_thumbnail_failed(filepath, reason)
 
-    def _apply_thumbnail_success(self, filepath: str, pixmap: QPixmap) -> None:
+    def _apply_thumbnail_failed(self, filepath: str, reason: str) -> None:
         key = self._thumb_cache_key(filepath)
-        self.thumbnail_cache[key] = pixmap
-        self._failed_thumbnails.discard(key)
-        self._apply_thumbnail_to_card(filepath, pixmap, success=True)
-        self._apply_thumbnail_to_table(filepath, pixmap)
-
-    def _apply_thumbnail_failure(self, filepath: str, reason: str) -> None:
-        key = self._thumb_cache_key(filepath)
+        self._failed_thumbnails.add(key)
         pixmap = self._failure_pixmap()
         self.thumbnail_cache[key] = pixmap
-        self._failed_thumbnails.add(key)
-        self._apply_thumbnail_to_card(filepath, pixmap, success=False)
+        self._apply_thumbnail_failure_to_card(filepath, "Brak miniatury")
         self._apply_thumbnail_to_table(filepath, pixmap)
         app_log(
             "error",
-            "thumbnail load failed",
+            "błąd ładowania miniatury",
             source="recordings-browser",
             level="ERROR",
             details=f"filepath={filepath}; reason={reason}",
         )
 
-    def _apply_thumbnail_to_card(self, filepath: str, pixmap: QPixmap, success: bool) -> None:
+    def _apply_thumbnail_to_card(self, filepath: str, pixmap: QPixmap) -> None:
         key = self._thumb_cache_key(filepath)
+        self.thumbnail_cache[key] = pixmap
+        self._failed_thumbnails.discard(key)
         card = self._tile_cards.get(key)
         if card is None:
             app_log(
                 "warning",
-                "thumbnail result cannot be mapped to visible tile",
+                "nie można przypisać miniatury do widocznej karty",
                 source="recordings-browser",
                 level="WARNING",
                 details=f"filepath={filepath}",
             )
             return
-        if success:
-            card.set_thumbnail_success(pixmap)
-        else:
-            card.set_thumbnail_failure(pixmap)
+        card.set_thumbnail_success(pixmap)
+
+    def _apply_thumbnail_failure_to_card(self, filepath: str, message: str) -> None:
+        key = self._thumb_cache_key(filepath)
+        card = self._tile_cards.get(key)
+        if card is None:
+            return
+        card.set_thumbnail_failure(self._failure_pixmap(), message)
 
     def _apply_thumbnail_to_table(self, filepath: str, pixmap: QPixmap) -> None:
         key = self._thumb_cache_key(filepath)

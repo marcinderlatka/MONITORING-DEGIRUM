@@ -233,7 +233,7 @@ CAMERA_SETTING_TOOLTIPS = {
         "Uwaga: miniatura nagrania może nadal zawierać zaznaczony obiekt, aby łatwiej było rozpoznać zdarzenie."
     ),
     "show_camera_info_overlay": (
-        "Pokazuje na obrazie kamery scalone informacje o statusie połączenia, FPS, stanie nagrywania i diagnostyce.\n\n"
+        "Pokazuje na obrazie kamery informacje o statusie połączenia, FPS, nagrywaniu i diagnostyce.\n\n"
         "Wyłączenie ukrywa okno informacyjne, ale nie wyłącza detekcji ani nagrywania."
     ),
     "enable_detection": (
@@ -877,7 +877,7 @@ class SingleCameraDialog(QDialog):
         self._add_field_row(left_layout, "model", "Model detekcji", self.model_combo)
         self._add_field_row(left_layout, "fps", "FPS/S DETECT", self.fps_spin)
         self._add_field_row(left_layout, "rtsp_fps", "FPS/S RTSP", self.rtsp_fps_spin)
-        self._add_field_row(left_layout, "show_camera_info_overlay", "Pokaż okno info na obrazie", self.info_overlay_chk)
+        self._add_field_row(left_layout, "show_camera_info_overlay", "Pokaż informacje na obrazie", self.info_overlay_chk)
 
         self._add_field_row(middle_layout, "confidence_threshold", "Próg pewności (legacy)", self.conf_spin)
         self._add_field_row(middle_layout, "confidence_threshold_draw", "Próg rysowania", self.conf_draw_spin)
@@ -1971,6 +1971,10 @@ QToolButton:focus { outline: none; }
         self._log_info("worker", "stop_camera completed", source="app", camera=str(cam.get("name", idx)), details=f"stopped={stopped}")
         self._evaluate_overload_mode()
         self._refresh_camera_status_indicators()
+        idx = self.camera_list.currentRow()
+        if 0 <= idx < len(self.cameras) and str(self.cameras[idx].get("name", idx)) == cam_name:
+            self.last_render_time = 0.0
+            self._render_current()
 
 
     def _worker_status(self, text: str, idx: int):
@@ -2015,6 +2019,10 @@ QToolButton:focus { outline: none; }
         self._heartbeat_alerted.discard(cam_name)
         self._evaluate_overload_mode()
         self._refresh_camera_status_indicators()
+        idx = self.camera_list.currentRow()
+        if 0 <= idx < len(self.cameras) and str(self.cameras[idx].get("name", idx)) == cam_name:
+            self.last_render_time = 0.0
+            self._render_current()
 
     def _update_diagnostics_panel(self):
         if not self.diag_panel.isVisible():
@@ -2110,16 +2118,47 @@ QToolButton:focus { outline: none; }
         }
 
         if not changed_keys:
+            self._refresh_camera_hud(idx)
             return result
 
         if requires_restart:
-            result["restarted"] = self._restart_camera_with_new_settings(idx, was_running)
+            result["restarted"] = self._maybe_restart_camera_after_settings(idx, was_running, requires_restart)
+            self._refresh_camera_hud(idx)
             return result
 
-        if was_running:
+        if was_running and isinstance(worker, CameraWorker):
             worker.apply_runtime_settings(new_camera)
             result["applied_live"] = True
+            self._log_info("settings", "ustawienia zastosowane bez restartu", source="settings", camera=str(new_camera.get("name", idx)))
+
+        if "show_camera_info_overlay" in changed_keys:
+            widocznosc = "włączono" if bool(new_camera.get("show_camera_info_overlay", True)) else "wyłączono"
+            self._log_info("settings", f"widoczność HUD: {widocznosc}", source="camera-hud", camera=str(new_camera.get("name", idx)))
+
+        self._refresh_camera_hud(idx)
         return result
+
+
+    def _refresh_camera_hud(self, idx: int) -> None:
+        try:
+            if not (0 <= idx < len(self.cameras)):
+                return
+            camera_name = str(self.cameras[idx].get("name", idx))
+            self._last_status[idx] = self._last_status.get(idx, "Połączono") or "Połączono"
+            if idx == self.camera_list.currentRow():
+                self.last_render_time = 0.0
+                self._render_current()
+            self._log_info("settings", "odświeżono HUD kamery po zmianie ustawień", source="camera-hud", camera=camera_name)
+        except Exception as exc:
+            self._log_warning("settings", f"nie udało się odświeżyć HUD: {exc}", source="camera-hud")
+
+    def _maybe_restart_camera_after_settings(self, idx: int, was_running: bool, requires_restart: bool) -> bool:
+        if not requires_restart:
+            return False
+        restarted = self._restart_camera_with_new_settings(idx, was_running)
+        if restarted:
+            self._log_info("settings", "kamera została automatycznie zrestartowana po zmianie ustawień", source="settings", camera=str(self.cameras[idx].get("name", idx)))
+        return restarted
 
     def _show_camera_settings_result_message(self, camera_name: str, result: dict) -> None:
         if result.get("restarted"):
@@ -2310,36 +2349,26 @@ QToolButton:focus { outline: none; }
         name = str(cam.get("name", idx))
         status = self._last_status.get(idx, "")
         err = self._last_error.get(idx, "")
-        fps_txt = self._last_fps_text.get(idx, "")
         stat = self.worker_status.get(name, {})
+        preview_fps = self._last_fps_text.get(idx, "")
 
-        flags = []
-        if bool(stat.get("recording_active", False)):
-            flags.append("REC")
-        if 0 <= float(stat.get("last_detection_seconds", -1.0)) <= 10.0:
-            flags.append("DET")
-        if bool(stat.get("stream_error_active", False)):
-            flags.append("ERR")
-        if bool(stat.get("overload_degraded", False)):
-            flags.append("DEG")
+        status_text = err if err else (status or "brak danych")
+        tryb = "nagrywanie" if bool(stat.get("recording_active", False)) else "podgląd"
+        polaczenie = "zatrzymane" if "zatrzym" in status_text.lower() else "aktywne"
 
-        lines = [name]
-        state_line = f"Status: {err if err else (status or 'Brak danych')}"
-        if flags:
-            state_line += f" [{' '.join(flags)}]"
-        lines.append(state_line)
-        metric_parts = []
-        if fps_txt:
-            metric_parts.append(f"preview {fps_txt}")
-        metric_parts.extend([
-            f"stream {float(stat.get('stream_fps', 0.0)):.1f}",
-            f"detect {float(stat.get('detect_fps', 0.0)):.1f}",
-            f"writer {float(stat.get('writer_fps', 0.0)):.1f}",
-            f"q {int(stat.get('queue_size', 0))}",
-            f"drop {int(stat.get('dropped_frames', 0))}",
-        ])
-        lines.append(" | ".join(metric_parts))
-        return lines
+        return [
+            f"Kamera: {name}",
+            f"Status: {status_text}",
+            f"Podgląd FPS: {preview_fps or '0.0 fps'}",
+            f"Strumień FPS: {float(stat.get('stream_fps', 0.0)):.1f}",
+            f"Detekcja FPS: {float(stat.get('detect_fps', 0.0)):.1f}",
+            f"Zapis FPS: {float(stat.get('writer_fps', 0.0)):.1f}",
+            f"Kolejka: {int(stat.get('queue_size', 0))}",
+            f"Pominięte klatki: {int(stat.get('dropped_frames', 0))}",
+            f"Tryb: {tryb}",
+            f"Połączenie: {polaczenie}",
+            f"Błąd: {err or 'brak'}",
+        ]
 
 
     @staticmethod
