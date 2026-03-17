@@ -14,7 +14,7 @@ import datetime as _dt
 import json
 import os
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, List, Mapping, MutableMapping, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, Iterator, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
 from .storage import load_recordings_catalog, update_recordings_catalog
 
@@ -501,50 +501,31 @@ def load_recording_entries(
     prefer_catalog: bool = True,
     allow_disk_fallback: bool = True,
     heal_catalog: bool = True,
+    chunk_size: int = 100,
+    on_chunk: Optional[Callable[[List[RecordingMetadata], Dict[str, object]], None]] = None,
 ) -> tuple[List[RecordingMetadata], Dict[str, object]]:
     """Load recordings reliably using catalog first with disk fallback.
 
     Returns ``(entries, diagnostics)``.
     """
 
-    history = load_history_metadata(history_source)
-    catalog_entries = list(iter_catalog_entries(camera_dirs, history_meta=history)) if prefer_catalog else []
-    valid_catalog_entries = [entry for entry in catalog_entries if os.path.exists(entry.filepath)]
-    should_scan_disk = allow_disk_fallback and (
-        not valid_catalog_entries
-        or len(valid_catalog_entries) < len(catalog_entries)
-    )
-
-    disk_entries: List[RecordingMetadata] = []
-    if should_scan_disk:
-        disk_entries = list(discover_recordings(camera_dirs, history))
-
-    merged, disk_only = merge_recording_entries(valid_catalog_entries, disk_entries, hide_missing_files=True)
-
-    if heal_catalog and disk_only:
-        for entry in disk_only:
-            payload: Dict[str, object] = {
-                "filepath": entry.filepath,
-                "file": entry.filepath,
-                "camera": entry.camera,
-                "label": entry.label,
-                "confidence": entry.confidence,
-                "time": entry.display_time,
-                "timestamp": entry.timestamp,
-                "thumb": entry.thumb_path,
-            }
-            payload.update(entry.extra)
-            update_recordings_catalog(payload)
-
-    diagnostics: Dict[str, object] = {
-        "catalog_entries": len(catalog_entries),
-        "valid_catalog_entries": len(valid_catalog_entries),
-        "disk_entries": len(disk_entries),
-        "disk_only_entries": len(disk_only),
-        "used_disk_fallback": bool(should_scan_disk and disk_entries),
-        "catalog_incomplete": len(valid_catalog_entries) < len(catalog_entries),
-    }
-    return merged, diagnostics
+    final_entries: List[RecordingMetadata] = []
+    diagnostics: Dict[str, object] = {}
+    for chunk, progress in iter_recording_entries_progressive(
+        camera_dirs,
+        history_source,
+        prefer_catalog=prefer_catalog,
+        allow_disk_fallback=allow_disk_fallback,
+        heal_catalog=heal_catalog,
+        chunk_size=chunk_size,
+    ):
+        if on_chunk is not None:
+            on_chunk(list(chunk), dict(progress))
+        if str(progress.get("phase", "")) != "final":
+            continue
+        final_entries.extend(chunk)
+        diagnostics = dict(progress.get("diagnostics") or diagnostics)
+    return final_entries, diagnostics
 
 
 def iter_recording_entries_progressive(

@@ -17,6 +17,7 @@ from monitoring.recordings import (
     build_recording_sidecar_metadata,
     camera_name_for_path,
     default_filter_bounds,
+    iter_recording_entries_progressive,
     load_history_metadata,
     load_recording_entries,
     merge_recording_entries,
@@ -311,6 +312,31 @@ def test_missing_catalog_entries_can_be_recovered_from_disk(tmp_path, monkeypatc
     assert len(entries) == 1
     assert len(healed) == 1
     assert healed[0]["filepath"] == str(mp4.resolve())
+
+
+def test_load_recording_entries_emits_progress_chunks(tmp_path, monkeypatch):
+    cam = tmp_path / "Cam1"
+    cam.mkdir()
+    mp4 = cam / "d_20240101_010101.mp4"
+    mp4.write_bytes(b"x")
+
+    seen: list[tuple[list, dict]] = []
+
+    monkeypatch.setattr("monitoring.recordings.iter_catalog_entries", lambda *_a, **_k: [])
+    monkeypatch.setattr("monitoring.recordings.discover_recordings", lambda *_a, **_k: [build_recording_metadata(str(mp4), [("Cam1", str(cam))])])
+
+    entries, diagnostics = load_recording_entries(
+        [("Cam1", str(cam))],
+        [],
+        chunk_size=1,
+        on_chunk=lambda chunk, progress: seen.append((chunk, progress)),
+    )
+
+    assert len(entries) == 1
+    assert entries[0].filepath == str(mp4.resolve())
+    assert diagnostics
+    assert seen
+    assert any(progress.get("phase") == "final" for _chunk, progress in seen)
 
 
 def test_alert_thumbnail_prefers_scene_preview_not_object_crop(tmp_path):
