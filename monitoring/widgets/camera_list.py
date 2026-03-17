@@ -47,6 +47,7 @@ class CameraListWidgetItem(QWidget):
         root.addWidget(self.icon_label, alignment=Qt.AlignCenter)
 
     def set_thumbnail(self, frame: np.ndarray | None) -> None:
+        # Legacy fallback API; preferred path uses set_thumbnail_pixmap().
         if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
             self.icon_label.setPixmap(self._placeholder)
             return
@@ -63,6 +64,12 @@ class CameraListWidgetItem(QWidget):
             self.icon_label.setPixmap(QPixmap.fromImage(qimg))
         except (cv2.error, ValueError, TypeError):
             self.icon_label.setPixmap(self._placeholder)
+
+    def set_thumbnail_pixmap(self, pixmap: QPixmap | None) -> None:
+        if pixmap is None or pixmap.isNull():
+            self.icon_label.setPixmap(self._placeholder)
+            return
+        self.icon_label.setPixmap(pixmap)
 
 
 class CameraListWidget(QListWidget):
@@ -90,6 +97,10 @@ class CameraListWidget(QListWidget):
     def update_thumbnail(self, index: int, frame: np.ndarray | None) -> None:
         if 0 <= index < len(self.widgets):
             self.widgets[index].set_thumbnail(frame)
+
+    def update_thumbnail_pixmap(self, index: int, pixmap: QPixmap | None) -> None:
+        if 0 <= index < len(self.widgets):
+            self.widgets[index].set_thumbnail_pixmap(pixmap)
 
     def rebuild(self, cameras: list[dict]) -> None:
         self.clear()
