@@ -387,9 +387,16 @@ Phase 3 rozszerza pipeline o mechanizmy odporności i diagnostyki bez usuwania i
 - **Files changed:** `monitoring/workers.py`, `monitoring/recordings.py`, `monitoring/storage.py`, `monitoring/widgets/recordings_browser.py`.
 
 ### New configuration keys (defaults)
+
+- `preview_main_max_*` controls max resolution of the high-quality stream used by the active camera in the main preview.
+- `preview_thumb_max_*` controls max resolution of the lightweight stream used for list/grid thumbnails and for cameras in `thumb/hidden` role (worker downscales before emit to reduce payload).
 - `preview_fps_main: 15`
 - `preview_fps_thumb: 3`
 - `preview_pause_when_hidden: true`
+- `preview_main_max_width: 1280`
+- `preview_main_max_height: 720`
+- `preview_thumb_max_width: 320`
+- `preview_thumb_max_height: 180`
 - `overload_protection_enabled: true`
 - `overload_camera_count_threshold: 6`
 - `overload_reduce_thumb_preview_fps: 1`

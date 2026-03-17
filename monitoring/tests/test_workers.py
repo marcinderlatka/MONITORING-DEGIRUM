@@ -210,7 +210,8 @@ def test_preview_path_without_detection_or_overlays_avoids_copy():
         def emit(self, frame, _index):
             emitted.append(frame)
 
-    worker.frame_signal = _SignalRecorder()
+    worker.main_preview_signal = _SignalRecorder()
+    worker.thumb_preview_signal = _SignalRecorder()
     frame = _FrameProxy(np.zeros((8, 8, 3), dtype=np.uint8))
 
     raw_frame, preview_frame = worker._capture_next_frame(frame, now_mono=1.0)
@@ -219,7 +220,7 @@ def test_preview_path_without_detection_or_overlays_avoids_copy():
 
     assert overlays == []
     assert frame.copy_calls == 0
-    assert emitted == [frame]
+    assert emitted == [frame, frame]
     assert worker.prerecord_buffer[-1] is frame
 
 def test_runtime_settings_apply_without_restart_for_live_fields():
@@ -250,6 +251,10 @@ def test_runtime_settings_apply_without_restart_for_live_fields():
         "preview_fps_main": 10,
         "preview_fps_thumb": 2,
         "preview_pause_when_hidden": True,
+        "preview_main_max_width": 1024,
+        "preview_main_max_height": 576,
+        "preview_thumb_max_width": 256,
+        "preview_thumb_max_height": 144,
     }
     worker.apply_runtime_settings(cfg)
 
@@ -306,3 +311,37 @@ def test_metrics_payload_uses_consistent_keys():
     assert payload["capture_fps"] == 4.0
     assert payload["queue_size"] == 3
     assert payload["infer_fps"] == 0.0
+
+
+def test_thumb_hidden_role_downscales_payload_before_emit():
+    worker = _worker()
+    worker.set_preview_role("thumb")
+    worker.preview_main_max_width = 1920
+    worker.preview_main_max_height = 1080
+    worker.preview_thumb_max_width = 320
+    worker.preview_thumb_max_height = 180
+
+    emitted_main: list[np.ndarray] = []
+    emitted_thumb: list[np.ndarray] = []
+
+    class _SignalRecorderMain:
+        def emit(self, frame, _index):
+            emitted_main.append(frame)
+
+    class _SignalRecorderThumb:
+        def emit(self, frame, _index):
+            emitted_thumb.append(frame)
+
+    worker.main_preview_signal = _SignalRecorderMain()
+    worker.thumb_preview_signal = _SignalRecorderThumb()
+
+    frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    worker._maybe_emit_preview(frame, overlays=[], now_mono=10.0)
+    worker._maybe_emit_preview(frame, overlays=[], now_mono=11.0)
+
+    assert emitted_main
+    assert emitted_thumb
+    assert emitted_main[-1].shape[1] <= 320
+    assert emitted_main[-1].shape[0] <= 180
+    assert emitted_thumb[-1].shape[1] <= 320
+    assert emitted_thumb[-1].shape[0] <= 180
