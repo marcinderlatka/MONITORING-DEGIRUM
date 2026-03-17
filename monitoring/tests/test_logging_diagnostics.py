@@ -86,12 +86,37 @@ from monitoring.runtime_helpers import (
 from monitoring.widgets.logs import LogWindow
 
 
+class _FakeHistoryWriter:
+    def __init__(self) -> None:
+        self.scheduled = 0
+        self.flushed = 0
+        self.last_payload = None
+
+    def schedule(self, payload):
+        self.scheduled += 1
+        self.last_payload = list(payload)
+
+    def flush(self):
+        self.flushed += 1
+        if self.last_payload is None:
+            return
+        Path(self.path).write_text(json.dumps(self.last_payload, indent=2), encoding="utf-8")
+
+
 def _build_headless_log_window(tmp_path):
     window = LogWindow.__new__(LogWindow)
     window.log_path = str(tmp_path / "logs.json")
     window.retention_hours = 24 * 365
     window.history = []
-    window._refresh_widget = lambda: None
+    window._selected_rows = set()
+    window.VISIBLE_HISTORY_LIMIT = 200
+    window._io_writer = _FakeHistoryWriter()
+    window._io_writer.path = window.log_path
+    window._history_writer = window._io_writer
+    window._refresh_count = 0
+    window._append_count = 0
+    window._refresh_widget = lambda: setattr(window, "_refresh_count", window._refresh_count + 1)
+    window._append_incremental = lambda _entry: setattr(window, "_append_count", window._append_count + 1)
     return window
 
 
@@ -115,6 +140,7 @@ def test_log_window_preserves_backward_compat_entries(tmp_path):
 def test_structured_log_entry_serialization(tmp_path):
     window = _build_headless_log_window(tmp_path)
     window.add_structured_entry({"group": "error", "action": "boom", "details": "x", "traceback": "tb", "source": "test", "level": "CRITICAL"})
+    window.flush_history_persist()
     data = json.loads(Path(window.log_path).read_text(encoding="utf-8"))
     assert data[0]["source"] == "test"
     assert data[0]["traceback"] == "tb"
@@ -180,3 +206,23 @@ def test_worker_stop_timeout_log_helper():
     details = worker_stop_timeout_details("Cam-A", 3500)
     assert "Cam-A" in details
     assert "3500" in details
+
+
+def test_log_window_batched_io_not_per_entry(tmp_path):
+    window = _build_headless_log_window(tmp_path)
+    for idx in range(50):
+        window.add_structured_entry({"group": "application", "action": f"entry-{idx}"})
+    assert window._io_writer.scheduled == 50
+    assert not Path(window.log_path).exists()
+    window.flush_history_persist()
+    assert window._io_writer.flushed == 1
+    data = json.loads(Path(window.log_path).read_text(encoding="utf-8"))
+    assert len(data) == 50
+
+
+def test_log_window_avoids_full_refresh_for_each_entry(tmp_path):
+    window = _build_headless_log_window(tmp_path)
+    for idx in range(120):
+        window.add_structured_entry({"group": "application", "action": f"entry-{idx}"})
+    assert window._append_count == 120
+    assert window._refresh_count == 0
