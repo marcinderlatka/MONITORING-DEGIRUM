@@ -68,7 +68,14 @@ if "PyQt5" not in sys.modules:
 
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
-from monitoring.workers import CameraWorker, _advance_next_due, _preview_interval_for_role
+from monitoring.workers import (
+    CameraWorker,
+    _advance_next_due,
+    _aggregate_fps,
+    _build_metrics_payload,
+    _dropped_frames_delta,
+    _preview_interval_for_role,
+)
 
 
 class _DummyModel:
@@ -233,3 +240,33 @@ def test_worker_stop_returns_bool_and_sets_signal():
     result = worker.stop(timeout_ms=1)
     assert worker.stop_signal is True
     assert result is True
+
+
+def test_aggregate_fps_handles_zero_window():
+    assert _aggregate_fps(10, 0.0) == 0.0
+
+
+def test_aggregate_fps_computes_expected_rate():
+    assert _aggregate_fps(25, 5.0) == 5.0
+
+
+def test_dropped_frames_delta_never_negative():
+    assert _dropped_frames_delta(3, 5) == 0
+    assert _dropped_frames_delta(12, 5) == 7
+
+
+def test_metrics_payload_uses_consistent_keys():
+    payload = _build_metrics_payload(capture_fps=4.0, queue_size=3)
+    assert sorted(payload.keys()) == sorted([
+        "capture_fps",
+        "infer_fps",
+        "preview_emit_fps",
+        "ui_render_ms",
+        "queue_size",
+        "dropped_frames",
+        "cpu_percent",
+        "rss_mb",
+    ])
+    assert payload["capture_fps"] == 4.0
+    assert payload["queue_size"] == 3
+    assert payload["infer_fps"] == 0.0

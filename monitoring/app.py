@@ -1548,6 +1548,9 @@ QToolButton:focus { outline: none; }
         self.overload_exit_debounce_seconds = float(self.config.get("overload_exit_debounce_seconds", DEFAULT_OVERLOAD_EXIT_DEBOUNCE_SECONDS)) if hasattr(self, "config") else DEFAULT_OVERLOAD_EXIT_DEBOUNCE_SECONDS
         self.overload_mode_active = False
         self._overload_last_change_ts = 0.0
+        self._ui_render_ms_by_camera: dict[str, float] = {}
+        self._performance_log_last_ts_by_camera: dict[str, float] = {}
+        self._performance_log_interval_s = 10.0
 
         self.diag_panel = QLabel("Diagnostyka (debug): brak danych")
         self.diag_panel.setStyleSheet("color: #dddddd; background: #111; padding: 8px; border: 1px solid #333;")
@@ -2011,12 +2014,34 @@ QToolButton:focus { outline: none; }
     def _on_worker_heartbeat(self, camera_name: str, status: dict):
         payload = dict(status or {})
         cam_name = str(camera_name)
+        payload["ui_render_ms"] = float(self._ui_render_ms_by_camera.get(cam_name, 0.0))
         self._worker_diag[cam_name] = payload
         self.worker_status[cam_name] = payload
         self._heartbeat_last_seen[cam_name] = time.monotonic()
         if cam_name in self._heartbeat_alerted:
             self._log_info("performance", "worker heartbeat recovered", source="heartbeat-watchdog", camera=cam_name)
         self._heartbeat_alerted.discard(cam_name)
+
+        now = time.monotonic()
+        last_perf = float(self._performance_log_last_ts_by_camera.get(cam_name, 0.0))
+        if now - last_perf >= self._performance_log_interval_s:
+            mode = str(payload.get("preview_role", "thumb"))
+            overload = "on" if bool(payload.get("overload_degraded", False) or self.overload_mode_active) else "off"
+            self._log_info(
+                "performance",
+                "ui+worker metrics summary",
+                source="ui",
+                camera=cam_name,
+                details=(
+                    f"mode={mode} overload={overload} "
+                    f"capture_fps={float(payload.get('capture_fps', 0.0)):.2f} infer_fps={float(payload.get('infer_fps', 0.0)):.2f} "
+                    f"preview_emit_fps={float(payload.get('preview_emit_fps', 0.0)):.2f} ui_render_ms={float(payload.get('ui_render_ms', 0.0)):.2f} "
+                    f"queue_size={int(payload.get('queue_size', 0))} dropped_frames={int(payload.get('dropped_frames', 0))} "
+                    f"cpu_percent={float(payload.get('cpu_percent', 0.0)):.1f} rss_mb={float(payload.get('rss_mb', 0.0)):.1f}"
+                ),
+            )
+            self._performance_log_last_ts_by_camera[cam_name] = now
+
         self._evaluate_overload_mode()
         self._refresh_camera_status_indicators()
         idx = self.camera_list.currentRow()
@@ -2042,9 +2067,15 @@ QToolButton:focus { outline: none; }
                     f"[{name}]",
                     f"stream fps: {float(stat.get('stream_fps', 0.0)):.2f}",
                     f"detect fps: {float(stat.get('detect_fps', 0.0)):.2f}",
+                    f"capture fps: {float(stat.get('capture_fps', 0.0)):.2f}",
+                    f"infer fps: {float(stat.get('infer_fps', 0.0)):.2f}",
+                    f"preview emit fps: {float(stat.get('preview_emit_fps', 0.0)):.2f}",
+                    f"ui render ms: {float(stat.get('ui_render_ms', 0.0)):.2f}",
                     f"writer fps: {float(stat.get('writer_fps', 0.0)):.2f}",
                     f"recording queue size: {int(stat.get('queue_size', 0))}",
                     f"dropped frames: {int(stat.get('dropped_frames', 0))}",
+                    f"cpu %: {float(stat.get('cpu_percent', 0.0)):.1f}",
+                    f"rss mb: {float(stat.get('rss_mb', 0.0)):.1f}",
                     f"preview role: {stat.get('preview_role', '-')}",
                     f"overload degraded: {bool(stat.get('overload_degraded', False))}",
                     f"last detection seconds: {float(stat.get('last_detection_seconds', -1.0)):.1f}",
@@ -2361,10 +2392,16 @@ QToolButton:focus { outline: none; }
             f"Status: {status_text}",
             f"Podgląd FPS: {preview_fps or '0.0 fps'}",
             f"Strumień FPS: {float(stat.get('stream_fps', 0.0)):.1f}",
+            f"Capture FPS: {float(stat.get('capture_fps', 0.0)):.1f}",
+            f"Infer FPS: {float(stat.get('infer_fps', 0.0)):.1f}",
+            f"Preview emit FPS: {float(stat.get('preview_emit_fps', 0.0)):.1f}",
+            f"UI render: {float(stat.get('ui_render_ms', 0.0)):.1f} ms",
             f"Detekcja FPS: {float(stat.get('detect_fps', 0.0)):.1f}",
             f"Zapis FPS: {float(stat.get('writer_fps', 0.0)):.1f}",
             f"Kolejka: {int(stat.get('queue_size', 0))}",
             f"Pominięte klatki: {int(stat.get('dropped_frames', 0))}",
+            f"CPU: {float(stat.get('cpu_percent', 0.0)):.1f}%",
+            f"RSS: {float(stat.get('rss_mb', 0.0)):.1f} MB",
             f"Tryb: {tryb}",
             f"Połączenie: {polaczenie}",
             f"Błąd: {err or 'brak'}",
@@ -2453,12 +2490,19 @@ QToolButton:focus { outline: none; }
         idx = self.camera_list.currentRow()
         if idx < 0:
             return
+        cam_name = str(self.cameras[idx].get("name", idx)) if 0 <= idx < len(self.cameras) else str(idx)
+        render_started = time.perf_counter()
         frame = self._last_frame.get(idx)
         composed_qimg = self._compose_letterboxed(
             frame if frame is not None else np.zeros((720, 1280, 3), dtype=np.uint8),
             idx,
         )
         self.camera_view.setPixmap(QPixmap.fromImage(composed_qimg))
+        render_ms = (time.perf_counter() - render_started) * 1000.0
+        self._ui_render_ms_by_camera[cam_name] = float(render_ms)
+        stat = self.worker_status.get(cam_name)
+        if isinstance(stat, dict):
+            stat["ui_render_ms"] = float(render_ms)
 
 
     def open_video_file(self, filepath: str):
