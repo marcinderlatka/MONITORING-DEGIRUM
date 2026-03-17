@@ -186,6 +186,42 @@ def test_record_start_mode_semantics_for_include_prerecord_first(monkeypatch):
     assert np.array_equal(writes[2], detection)
 
 
+
+
+def test_preview_path_without_detection_or_overlays_avoids_copy():
+    worker = _worker()
+    worker.set_enable_detection(False)
+    worker.set_draw_overlays(False)
+    worker.set_preview_role("main")
+
+    class _FrameProxy:
+        def __init__(self, frame):
+            self._frame = frame
+            self.copy_calls = 0
+        def copy(self):
+            self.copy_calls += 1
+            return self._frame.copy()
+        def __getattr__(self, name):
+            return getattr(self._frame, name)
+
+    emitted: list[object] = []
+
+    class _SignalRecorder:
+        def emit(self, frame, _index):
+            emitted.append(frame)
+
+    worker.frame_signal = _SignalRecorder()
+    frame = _FrameProxy(np.zeros((8, 8, 3), dtype=np.uint8))
+
+    raw_frame, preview_frame = worker._capture_next_frame(frame, now_mono=1.0)
+    _result, _detected, _best_label, _best_score, _best_bbox, overlays = worker._maybe_run_inference(raw_frame, now_mono=1.0)
+    worker._maybe_emit_preview(preview_frame, overlays, now_mono=1.0)
+
+    assert overlays == []
+    assert frame.copy_calls == 0
+    assert emitted == [frame]
+    assert worker.prerecord_buffer[-1] is frame
+
 def test_runtime_settings_apply_without_restart_for_live_fields():
     worker = _worker()
     worker.visible_classes = ["person"]

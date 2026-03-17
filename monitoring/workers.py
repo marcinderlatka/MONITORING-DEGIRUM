@@ -732,7 +732,7 @@ class CameraWorker(QThread):
         self._stream_fps_window.append(now_mono)
         self._get_effective_stream_fps()
         raw_frame = frame
-        preview_frame = frame.copy()
+        preview_frame = frame
         self.prerecord_buffer.append(raw_frame)
         return raw_frame, preview_frame
 
