@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from threading import Lock
 from typing import Callable
 
@@ -109,7 +110,7 @@ def evaluate_overload_transition(
     active_camera_count: int,
     gui_load_fps: float,
     recording_count: int,
-    currently_active: bool,
+    currently_level: int,
     last_change_ts: float,
     protection_enabled: bool,
     min_camera_count: int,
@@ -117,38 +118,81 @@ def evaluate_overload_transition(
     load_per_camera_threshold: float,
     enter_debounce_seconds: float,
     exit_debounce_seconds: float,
-) -> tuple[bool, float, str]:
-    """Decide overload mode transition with camera floor + debounce hysteresis."""
+    ui_render_ms: float,
+    max_ui_render_ms: float,
+    queue_size: int,
+    max_queue_size: int,
+    preview_bandwidth_mbps: float,
+    max_preview_bandwidth_mbps: float,
+) -> tuple[int, float, str]:
+    """Decide overload level transition (L0-L3) with hysteresis and debounce."""
+
+    level_now = max(0, min(3, int(currently_level)))
 
     if not protection_enabled:
-        return False, (now_ts if currently_active else last_change_ts), "disabled"
+        return 0, (now_ts if level_now > 0 else last_change_ts), "disabled"
 
     if active_camera_count < max(1, int(min_camera_count)):
-        if currently_active:
+        if level_now > 0:
             if now_ts - last_change_ts >= max(0.0, exit_debounce_seconds):
-                return False, now_ts, "below-min-camera-threshold"
-            return True, last_change_ts, "exit-debounce-pending"
-        return False, last_change_ts, "below-min-camera-threshold"
+                return 0, now_ts, "below-min-camera-threshold"
+            return level_now, last_change_ts, "exit-debounce-pending"
+        return 0, last_change_ts, "below-min-camera-threshold"
 
-    overload_condition = (
-        active_camera_count >= max(1, int(camera_threshold))
-        or (active_camera_count > 0 and gui_load_fps > active_camera_count * float(load_per_camera_threshold))
-    )
-    if recording_count > 0 and active_camera_count <= camera_threshold:
-        overload_condition = False
+    load_ratio = (gui_load_fps / max(1e-6, active_camera_count * float(load_per_camera_threshold))) if active_camera_count > 0 else 0.0
+    ui_ratio = float(ui_render_ms) / max(1e-6, float(max_ui_render_ms))
+    queue_ratio = float(max(0, queue_size)) / max(1e-6, float(max_queue_size))
+    bandwidth_ratio = float(max(0.0, preview_bandwidth_mbps)) / max(1e-6, float(max_preview_bandwidth_mbps))
+    peak_ratio = max(load_ratio, ui_ratio, queue_ratio, bandwidth_ratio)
 
-    if overload_condition:
-        if currently_active:
-            return True, last_change_ts, "already-active"
+    desired_level = 0
+    if peak_ratio >= 1.65:
+        desired_level = 3
+    elif peak_ratio >= 1.25:
+        desired_level = 2
+    elif peak_ratio >= 1.0:
+        desired_level = 1
+
+    if active_camera_count >= max(1, int(camera_threshold)) + 4:
+        desired_level = max(desired_level, 3)
+    elif active_camera_count >= max(1, int(camera_threshold)) + 2:
+        desired_level = max(desired_level, 2)
+    elif active_camera_count >= max(1, int(camera_threshold)):
+        desired_level = max(desired_level, 1)
+
+    if recording_count > 0 and active_camera_count <= camera_threshold and peak_ratio < 1.1:
+        desired_level = 0
+
+    if desired_level == level_now:
+        return level_now, last_change_ts, f"stable-L{level_now}"
+    if desired_level > level_now:
         if now_ts - last_change_ts >= max(0.0, enter_debounce_seconds):
-            return True, now_ts, "condition-stable-enter"
-        return False, last_change_ts, "enter-debounce-pending"
-
-    if not currently_active:
-        return False, last_change_ts, "already-inactive"
+            return desired_level, now_ts, f"condition-stable-enter-L{desired_level}"
+        return level_now, last_change_ts, "enter-debounce-pending"
     if now_ts - last_change_ts >= max(0.0, exit_debounce_seconds):
-        return False, now_ts, "condition-stable-exit"
-    return True, last_change_ts, "exit-debounce-pending"
+        return desired_level, now_ts, f"condition-stable-exit-L{desired_level}"
+    return level_now, last_change_ts, "exit-debounce-pending"
+
+
+@dataclass(frozen=True)
+class OverloadLevelProfile:
+    detect_fps_factor: float
+    thumb_preview_fps_factor: float
+    overlay_stride: int
+    performance_log_interval_s: float
+    preview_resolution_factor: float
+    disable_nonessential_overlays: bool
+
+
+def overload_level_profile(level: int) -> OverloadLevelProfile:
+    level_n = max(0, min(3, int(level)))
+    profiles = {
+        0: OverloadLevelProfile(1.0, 1.0, 1, 10.0, 1.0, False),
+        1: OverloadLevelProfile(0.85, 0.7, 2, 14.0, 0.85, False),
+        2: OverloadLevelProfile(0.70, 0.5, 3, 18.0, 0.7, True),
+        3: OverloadLevelProfile(0.55, 0.34, 4, 24.0, 0.5, True),
+    }
+    return profiles[level_n]
 
 
 def worker_stop_timeout_details(camera_name: str, timeout_ms: int) -> str:

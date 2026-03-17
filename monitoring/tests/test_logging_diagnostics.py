@@ -158,12 +158,12 @@ def test_worker_heartbeat_timeout_helper_if_extracted():
 
 
 def test_overload_does_not_activate_below_min_camera_threshold():
-    active, _ts, reason = evaluate_overload_transition(
+    level, _ts, reason = evaluate_overload_transition(
         now_ts=10.0,
         active_camera_count=1,
         gui_load_fps=100.0,
         recording_count=0,
-        currently_active=False,
+        currently_level=0,
         last_change_ts=0.0,
         protection_enabled=True,
         min_camera_count=2,
@@ -171,35 +171,50 @@ def test_overload_does_not_activate_below_min_camera_threshold():
         load_per_camera_threshold=10.0,
         enter_debounce_seconds=1.0,
         exit_debounce_seconds=1.0,
+        ui_render_ms=1.0,
+        max_ui_render_ms=10.0,
+        queue_size=0,
+        max_queue_size=20,
+        preview_bandwidth_mbps=1.0,
+        max_preview_bandwidth_mbps=10.0,
     )
-    assert active is False
+    assert level == 0
     assert reason == "below-min-camera-threshold"
 
 
 def test_overload_enter_exit_debounce_helper():
-    active, ts, reason = evaluate_overload_transition(
-        now_ts=1.0, active_camera_count=4, gui_load_fps=90.0, recording_count=0,
-        currently_active=False, last_change_ts=0.0, protection_enabled=True,
+    level, ts, reason = evaluate_overload_transition(
+        now_ts=1.0, active_camera_count=4, gui_load_fps=60.0, recording_count=0,
+        currently_level=0, last_change_ts=0.0, protection_enabled=True,
         min_camera_count=2, camera_threshold=3, load_per_camera_threshold=10.0,
         enter_debounce_seconds=3.0, exit_debounce_seconds=4.0,
+        ui_render_ms=18.0, max_ui_render_ms=14.0,
+        queue_size=10, max_queue_size=24,
+        preview_bandwidth_mbps=8.0, max_preview_bandwidth_mbps=12.0,
     )
-    assert active is False and reason == "enter-debounce-pending"
+    assert level == 0 and reason == "enter-debounce-pending"
 
-    active, ts, reason = evaluate_overload_transition(
-        now_ts=3.5, active_camera_count=4, gui_load_fps=90.0, recording_count=0,
-        currently_active=active, last_change_ts=ts, protection_enabled=True,
+    level, ts, reason = evaluate_overload_transition(
+        now_ts=3.5, active_camera_count=4, gui_load_fps=60.0, recording_count=0,
+        currently_level=level, last_change_ts=ts, protection_enabled=True,
         min_camera_count=2, camera_threshold=3, load_per_camera_threshold=10.0,
         enter_debounce_seconds=3.0, exit_debounce_seconds=4.0,
+        ui_render_ms=18.0, max_ui_render_ms=14.0,
+        queue_size=10, max_queue_size=24,
+        preview_bandwidth_mbps=8.0, max_preview_bandwidth_mbps=12.0,
     )
-    assert active is True and reason == "condition-stable-enter"
+    assert level == 2 and reason == "condition-stable-enter-L2"
 
-    active, _ts, reason = evaluate_overload_transition(
+    level, _ts, reason = evaluate_overload_transition(
         now_ts=5.0, active_camera_count=2, gui_load_fps=0.0, recording_count=0,
-        currently_active=active, last_change_ts=ts, protection_enabled=True,
+        currently_level=level, last_change_ts=ts, protection_enabled=True,
         min_camera_count=2, camera_threshold=3, load_per_camera_threshold=10.0,
         enter_debounce_seconds=3.0, exit_debounce_seconds=4.0,
+        ui_render_ms=4.0, max_ui_render_ms=14.0,
+        queue_size=0, max_queue_size=24,
+        preview_bandwidth_mbps=1.0, max_preview_bandwidth_mbps=12.0,
     )
-    assert active is True and reason == "exit-debounce-pending"
+    assert level == 2 and reason == "exit-debounce-pending"
 
 
 def test_worker_stop_timeout_log_helper():
@@ -226,3 +241,49 @@ def test_log_window_avoids_full_refresh_for_each_entry(tmp_path):
         window.add_structured_entry({"group": "application", "action": f"entry-{idx}"})
     assert window._append_count == 120
     assert window._refresh_count == 0
+
+
+def test_overload_levels_hysteresis_and_stabilization():
+    level, ts, _ = evaluate_overload_transition(
+        now_ts=0.0, active_camera_count=6, gui_load_fps=120.0, recording_count=0,
+        currently_level=0, last_change_ts=0.0, protection_enabled=True,
+        min_camera_count=2, camera_threshold=3, load_per_camera_threshold=10.0,
+        enter_debounce_seconds=2.0, exit_debounce_seconds=3.0,
+        ui_render_ms=32.0, max_ui_render_ms=14.0,
+        queue_size=40, max_queue_size=24,
+        preview_bandwidth_mbps=22.0, max_preview_bandwidth_mbps=12.0,
+    )
+    assert level == 0
+
+    level, ts, reason = evaluate_overload_transition(
+        now_ts=2.2, active_camera_count=6, gui_load_fps=120.0, recording_count=0,
+        currently_level=level, last_change_ts=ts, protection_enabled=True,
+        min_camera_count=2, camera_threshold=3, load_per_camera_threshold=10.0,
+        enter_debounce_seconds=2.0, exit_debounce_seconds=3.0,
+        ui_render_ms=32.0, max_ui_render_ms=14.0,
+        queue_size=40, max_queue_size=24,
+        preview_bandwidth_mbps=22.0, max_preview_bandwidth_mbps=12.0,
+    )
+    assert level == 3 and reason == "condition-stable-enter-L3"
+
+    level2, ts2, reason2 = evaluate_overload_transition(
+        now_ts=3.0, active_camera_count=6, gui_load_fps=30.0, recording_count=0,
+        currently_level=level, last_change_ts=ts, protection_enabled=True,
+        min_camera_count=2, camera_threshold=3, load_per_camera_threshold=10.0,
+        enter_debounce_seconds=2.0, exit_debounce_seconds=3.0,
+        ui_render_ms=8.0, max_ui_render_ms=14.0,
+        queue_size=4, max_queue_size=24,
+        preview_bandwidth_mbps=2.0, max_preview_bandwidth_mbps=12.0,
+    )
+    assert level2 == 3 and reason2 == "exit-debounce-pending"
+
+    level3, _ts3, reason3 = evaluate_overload_transition(
+        now_ts=6.5, active_camera_count=6, gui_load_fps=30.0, recording_count=0,
+        currently_level=level2, last_change_ts=ts2, protection_enabled=True,
+        min_camera_count=2, camera_threshold=3, load_per_camera_threshold=10.0,
+        enter_debounce_seconds=2.0, exit_debounce_seconds=3.0,
+        ui_render_ms=8.0, max_ui_render_ms=14.0,
+        queue_size=4, max_queue_size=24,
+        preview_bandwidth_mbps=2.0, max_preview_bandwidth_mbps=12.0,
+    )
+    assert level3 == 2 and reason3 == "condition-stable-exit-L2"

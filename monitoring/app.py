@@ -105,6 +105,9 @@ from .config import (
     DEFAULT_OVERLOAD_DISABLE_NONESSENTIAL_OVERLAYS,
     DEFAULT_OVERLOAD_ENTER_DEBOUNCE_SECONDS,
     DEFAULT_OVERLOAD_EXIT_DEBOUNCE_SECONDS,
+    DEFAULT_OVERLOAD_MAX_UI_RENDER_MS,
+    DEFAULT_OVERLOAD_MAX_QUEUE_SIZE,
+    DEFAULT_OVERLOAD_MAX_PREVIEW_BANDWIDTH_MBPS,
     DEFAULT_PRE_SECONDS,
     DEFAULT_RECORD_PATH,
     DEFAULT_RECORD_START_MODE,
@@ -141,6 +144,7 @@ from .runtime_helpers import (
     compute_letterboxed_rect,
     evaluate_heartbeat_health,
     evaluate_overload_transition,
+    overload_level_profile,
     register_app_logger,
 )
 from .widgets.alerts import AlertDialog, AlertListWidget
@@ -1570,6 +1574,10 @@ QToolButton:focus { outline: none; }
         self.overload_disable_nonessential_overlays = bool(self.config.get("overload_disable_nonessential_overlays", DEFAULT_OVERLOAD_DISABLE_NONESSENTIAL_OVERLAYS)) if hasattr(self, "config") else DEFAULT_OVERLOAD_DISABLE_NONESSENTIAL_OVERLAYS
         self.overload_enter_debounce_seconds = float(self.config.get("overload_enter_debounce_seconds", DEFAULT_OVERLOAD_ENTER_DEBOUNCE_SECONDS)) if hasattr(self, "config") else DEFAULT_OVERLOAD_ENTER_DEBOUNCE_SECONDS
         self.overload_exit_debounce_seconds = float(self.config.get("overload_exit_debounce_seconds", DEFAULT_OVERLOAD_EXIT_DEBOUNCE_SECONDS)) if hasattr(self, "config") else DEFAULT_OVERLOAD_EXIT_DEBOUNCE_SECONDS
+        self.overload_max_ui_render_ms = float(self.config.get("overload_max_ui_render_ms", DEFAULT_OVERLOAD_MAX_UI_RENDER_MS)) if hasattr(self, "config") else DEFAULT_OVERLOAD_MAX_UI_RENDER_MS
+        self.overload_max_queue_size = int(self.config.get("overload_max_queue_size", DEFAULT_OVERLOAD_MAX_QUEUE_SIZE)) if hasattr(self, "config") else DEFAULT_OVERLOAD_MAX_QUEUE_SIZE
+        self.overload_max_preview_bandwidth_mbps = float(self.config.get("overload_max_preview_bandwidth_mbps", DEFAULT_OVERLOAD_MAX_PREVIEW_BANDWIDTH_MBPS)) if hasattr(self, "config") else DEFAULT_OVERLOAD_MAX_PREVIEW_BANDWIDTH_MBPS
+        self.overload_level = 0
         self.overload_mode_active = False
         self._overload_last_change_ts = 0.0
         self._ui_render_ms_by_camera: dict[str, float] = {}
@@ -1863,13 +1871,29 @@ QToolButton:focus { outline: none; }
         active_count = len(active_workers)
         recording_count = sum(1 for w in active_workers if w.recording)
         gui_load = sum(max(0.0, float(st.get("stream_fps", 0.0))) for st in self.worker_status.values())
+        avg_ui_render_ms = 0.0
+        if self.worker_status:
+            avg_ui_render_ms = sum(max(0.0, float(st.get("ui_render_ms", 0.0))) for st in self.worker_status.values()) / max(1, len(self.worker_status))
+        max_queue_size = max((int(st.get("queue_size", 0)) for st in self.worker_status.values()), default=0)
+        preview_bandwidth_mbps = 0.0
+        for stat in self.worker_status.values():
+            emit_fps = max(0.0, float(stat.get("preview_emit_fps", 0.0)))
+            stream_fps = max(1.0, float(stat.get("stream_fps", 1.0)))
+            width = int(self.preview_thumb_max_width)
+            height = int(self.preview_thumb_max_height)
+            if str(stat.get("preview_role", "thumb")) == "main":
+                width = int(self.preview_main_max_width)
+                height = int(self.preview_main_max_height)
+            compression_ratio = 0.15
+            preview_bandwidth_mbps += (emit_fps / stream_fps) * width * height * 3.0 * compression_ratio * 8.0 / 1_000_000.0
+
         now_ts = time.monotonic()
-        overload_active, change_ts, reason = evaluate_overload_transition(
+        overload_level, change_ts, reason = evaluate_overload_transition(
             now_ts=now_ts,
             active_camera_count=active_count,
             gui_load_fps=gui_load,
             recording_count=recording_count,
-            currently_active=self.overload_mode_active,
+            currently_level=self.overload_level,
             last_change_ts=self._overload_last_change_ts,
             protection_enabled=self.overload_protection_enabled,
             min_camera_count=self.overload_min_camera_count,
@@ -1877,35 +1901,48 @@ QToolButton:focus { outline: none; }
             load_per_camera_threshold=10.0,
             enter_debounce_seconds=self.overload_enter_debounce_seconds,
             exit_debounce_seconds=self.overload_exit_debounce_seconds,
+            ui_render_ms=avg_ui_render_ms,
+            max_ui_render_ms=self.overload_max_ui_render_ms,
+            queue_size=max_queue_size,
+            max_queue_size=self.overload_max_queue_size,
+            preview_bandwidth_mbps=preview_bandwidth_mbps,
+            max_preview_bandwidth_mbps=self.overload_max_preview_bandwidth_mbps,
         )
         self._overload_last_change_ts = change_ts
 
-        if overload_active != self.overload_mode_active:
-            self.overload_mode_active = overload_active
-            mode = "enter" if overload_active else "exit"
+        if overload_level != self.overload_level:
+            self.overload_level = overload_level
+            self.overload_mode_active = overload_level > 0
+            direction = "enter" if overload_level > 0 else "exit"
             self._log_info(
                 "application",
-                f"overload {mode}",
+                f"overload {direction}",
                 source="app",
                 details=(
-                    f"reason={reason} active_cameras={active_count} min_cameras={self.overload_min_camera_count} "
-                    f"camera_threshold={self.overload_camera_count_threshold} gui_load={gui_load:.2f} "
+                    f"reason={reason} level=L{overload_level} active_cameras={active_count} min_cameras={self.overload_min_camera_count} "
+                    f"camera_threshold={self.overload_camera_count_threshold} gui_load={gui_load:.2f} ui_render_ms={avg_ui_render_ms:.2f} "
+                    f"queue_size={max_queue_size} preview_bandwidth_mbps={preview_bandwidth_mbps:.2f} "
                     f"enter_debounce_s={self.overload_enter_debounce_seconds} exit_debounce_s={self.overload_exit_debounce_seconds}"
                 ),
             )
+
+        profile = overload_level_profile(self.overload_level)
+        self._performance_log_interval_s = float(profile.performance_log_interval_s)
 
         selected_idx = self.camera_list.currentRow()
         for idx, worker in enumerate(self.workers):
             if not isinstance(worker, CameraWorker) or not worker.isRunning():
                 continue
             is_main = idx == selected_idx
-            detect_factor = 1.0 if is_main or worker.recording else (self.overload_reduce_detect_fps_factor if overload_active else 1.0)
-            thumb_fps = self.overload_reduce_thumb_preview_fps if overload_active else self.preview_fps_thumb
+            detect_factor = 1.0 if is_main or worker.recording else profile.detect_fps_factor
+            thumb_fps = max(0.5, self.preview_fps_thumb * profile.thumb_preview_fps_factor)
             worker.set_overload_state(
-                overload_active=overload_active and not is_main,
+                overload_level=(self.overload_level if not is_main else 0),
                 detect_fps_factor=detect_factor,
                 thumb_preview_fps=thumb_fps,
-                disable_overlays=self.overload_disable_nonessential_overlays,
+                disable_overlays=(self.overload_disable_nonessential_overlays or profile.disable_nonessential_overlays),
+                overlay_stride=profile.overlay_stride,
+                preview_resolution_factor=profile.preview_resolution_factor,
             )
 
     def _refresh_camera_status_indicators(self) -> None:
@@ -2361,6 +2398,7 @@ QToolButton:focus { outline: none; }
         self.workers = []
         self.worker_status.clear()
         self.overload_mode_active = False
+        self.overload_level = 0
         self._invalidate_preview_cache()
 
     def switch_camera(self, idx):
