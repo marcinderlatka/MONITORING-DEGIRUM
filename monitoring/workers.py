@@ -198,9 +198,12 @@ class RecordingThread(QThread):
             except Full:
                 self.dropped_frames += 1
 
-    def stop(self) -> None:
+    def stop(self, timeout_ms: int = 2000) -> bool:
         self.running = False
-        self.wait()
+        stopped = self.wait(timeout_ms)
+        if not stopped:
+            app_log("warning", "recording thread stop timeout", source="worker", level="WARNING", details=f"file={self.filepath} timeout_ms={timeout_ms}")
+        return bool(stopped)
 
 
 class CameraWorker(QThread):
@@ -321,24 +324,23 @@ class CameraWorker(QThread):
         if previous != self.app_overload_mode:
             app_log("worker", "overload state updated", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO", details=f"active={self.app_overload_mode} detect_fps_factor={self.detect_fps_factor:.2f} preview_role={self.preview_role}")
 
-    @staticmethod
-    def _crop_with_margin(frame: np.ndarray, bbox: tuple[int, int, int, int] | None, margin_ratio: float = 0.15, min_size: int = 20) -> np.ndarray:
-        if bbox is None:
-            return frame
-        x1, y1, x2, y2 = bbox
-        h, w = frame.shape[:2]
-        x1 = max(0, min(x1, w - 1)); x2 = max(0, min(x2, w - 1)); y1 = max(0, min(y1, h - 1)); y2 = max(0, min(y2, h - 1))
-        bw, bh = max(0, x2 - x1), max(0, y2 - y1)
-        if bw < min_size or bh < min_size:
-            return frame
-        mx, my = int(bw * margin_ratio), int(bh * margin_ratio)
-        crop = frame[max(0, y1 - my):min(h, y2 + my), max(0, x1 - mx):min(w, x2 + mx)]
-        return frame if crop.size == 0 else crop
-
     def _build_thumbnail_frame(self, preview_frame: np.ndarray, best_bbox: tuple[int, int, int, int] | None, best_label: str, best_score: float) -> np.ndarray:
-        cropped = self._crop_with_margin(preview_frame, best_bbox)
-        resized = cv2.resize(cropped, (320, 240), interpolation=cv2.INTER_AREA)
-        return self._make_detection_overlay_frame(resized, None, best_label, best_score)
+        scene = self._build_scene_thumbnail_frame(preview_frame)
+        overlay_bbox: tuple[int, int, int, int] | None = None
+        if best_bbox is not None and preview_frame is not None and preview_frame.size > 0:
+            src_h, src_w = preview_frame.shape[:2]
+            if src_h > 0 and src_w > 0:
+                dst_h, dst_w = scene.shape[:2]
+                sx = dst_w / float(src_w)
+                sy = dst_h / float(src_h)
+                x1, y1, x2, y2 = best_bbox
+                overlay_bbox = (
+                    int(max(0, min(dst_w - 1, x1 * sx))),
+                    int(max(0, min(dst_h - 1, y1 * sy))),
+                    int(max(0, min(dst_w - 1, x2 * sx))),
+                    int(max(0, min(dst_h - 1, y2 * sy))),
+                )
+        return self._make_detection_overlay_frame(scene, overlay_bbox, best_label, best_score)
 
     @staticmethod
     def _build_scene_thumbnail_frame(preview_frame: np.ndarray) -> np.ndarray:
@@ -544,14 +546,14 @@ class CameraWorker(QThread):
         thumb_frame = self._build_thumbnail_frame(preview_frame, best_bbox, best_label, best_score)
         if cv2.imwrite(thumb_path, thumb_frame):
             self.current_event_thumbnail_path = thumb_path
-        else:
-            app_log("warning", "thumbnail write failed", camera=str(self.camera.get("name", self.index)), source="worker", level="WARNING", details=thumb_path)
-            return
             self.current_thumbnail_ts = time.time()
             self.current_detection_frame_saved = True
             if best_score >= self.current_event_best_confidence:
                 self.current_event_best_confidence = float(best_score)
                 self.current_event_best_frame = thumb_frame
+        else:
+            app_log("warning", "thumbnail write failed", camera=str(self.camera.get("name", self.index)), source="worker", level="WARNING", details=thumb_path)
+            return
 
     def _should_start_recording_now(self) -> bool:
         return self.pending_positive_hits >= max(1, self.required_hits_to_start_recording)
@@ -617,7 +619,9 @@ class CameraWorker(QThread):
             return
         frames_written = dropped_frames = queue_peak = 0
         if self.record_thread:
-            self.record_thread.stop()
+            thread_stopped = self.record_thread.stop()
+            if not thread_stopped:
+                app_log("warning", "recording thread did not stop cleanly", camera=str(self.camera.get("name", self.index)), source="worker", level="WARNING", details=f"file={self.output_file}")
             frames_written = self.record_thread.frames_written
             dropped_frames = self.record_thread.dropped_frames
             queue_peak = self.record_thread.queue_peak
@@ -702,7 +706,12 @@ class CameraWorker(QThread):
         next_due, skipped = _advance_next_due(now_mono, self.state.next_inference_due_ts, interval)
         self.state.skipped_inference_cycles += skipped
 
-        result = self.model.predict(raw_frame)
+        try:
+            result = self.model.predict(raw_frame)
+        except Exception as exc:
+            app_log("error", "model prediction failure", camera=str(self.camera.get("name", self.index)), source="worker", level="ERROR", details=str(exc), traceback=traceback.format_exc())
+            self.error_signal.emit("Błąd predykcji modelu", self.index)
+            return None, detected, best_label, best_score, best_bbox, overlays
         self.state.last_inference_ts = now_mono
         self.state.inferences_run += 1
         self.inference_count += 1
@@ -852,6 +861,7 @@ class CameraWorker(QThread):
                         if frame is None:
                             self.error_signal.emit("Brak sygnału: pusta klatka", self.index)
                             self.error_counter += 1
+                            app_log("warning", "empty frame received", camera=str(self.camera.get("name", self.index)), source="worker", level="WARNING", details=f"consecutive_errors={self.error_counter}")
                             if self.error_counter > 10:
                                 self.last_stream_reset_ts = time.monotonic()
                                 break

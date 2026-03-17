@@ -69,6 +69,7 @@ class ThumbnailTask(QRunnable):
                 return
             self.signals.ready.emit(self._entry.filepath, image, source)
         except Exception as exc:  # pragma: no cover - defensive async path
+            app_log("error", "thumbnail task crash", source="recordings-browser", level="ERROR", details=f"filepath={self._entry.filepath}; error={exc}", traceback=traceback.format_exc())
             self.signals.failed.emit(self._entry.filepath, f"thumbnail task crash: {exc}")
 
     def _load_image(self) -> tuple[QImage | None, str]:
@@ -92,6 +93,9 @@ class ThumbnailTask(QRunnable):
         if os.path.exists(self._entry.filepath):
             cap = cv2.VideoCapture(self._entry.filepath)
             try:
+                if hasattr(cap, "isOpened") and not cap.isOpened():
+                    app_log("warning", "thumbnail mp4 open failed", source="recordings-browser", level="WARNING", details=self._entry.filepath)
+                    return QImage(), "mp4-open-failed"
                 ok, frame = cap.read()
             except Exception as exc:
                 app_log("error", "thumbnail worker exception", source="recordings-browser", level="ERROR", details=str(exc), traceback=traceback.format_exc())
@@ -100,6 +104,8 @@ class ThumbnailTask(QRunnable):
                 cap.release()
             if ok and frame is not None:
                 return self._qimage_from_bgr(frame), "mp4-fallback"
+            app_log("warning", "thumbnail mp4 read failed", source="recordings-browser", level="WARNING", details=self._entry.filepath)
+            return QImage(), "mp4-read-failed"
         return QImage(), "mp4-fallback-failed"
 
     @staticmethod
@@ -501,6 +507,7 @@ class RecordingsBrowserDialog(QDialog):
                 self._apply_thumbnail_to_card(entry.filepath, self.thumbnail_cache[key])
                 self._apply_thumbnail_to_table(entry.filepath, self.thumbnail_cache[key])
             return
+        app_log("browser", "thumbnail task started", source="recordings-browser", level="INFO", details=f"filepath={entry.filepath}; mp4_fallback={allow_mp4_fallback}")
         task = ThumbnailTask(entry, allow_mp4_fallback=allow_mp4_fallback)
         task.signals.ready.connect(self._on_thumbnail_ready, Qt.QueuedConnection)
         task.signals.failed.connect(self._on_thumbnail_failed, Qt.QueuedConnection)

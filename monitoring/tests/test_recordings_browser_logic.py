@@ -86,3 +86,21 @@ def test_thumbnail_pipeline_logs_failure_reason_if_extracted_helpers_exist(monke
 
     assert logs
     assert "decode-error" in logs[-1][2].get("details", "")
+
+
+def test_thumbnail_failure_path_always_marks_final_state(monkeypatch):
+    fake = types.SimpleNamespace(
+        _pending_thumbnails={"/tmp/x.mp4"},
+        _thumbnail_tasks={"/tmp/x.mp4": object()},
+        _thumb_cache_key=lambda fp: fp,
+        _apply_thumbnail_failed=lambda *_a, **_k: None,
+        _is_tile_visible=lambda *_a, **_k: False,
+        _mp4_fallback_requested=set(),
+        _thumbnail_entries={},
+        _start_thumbnail_request=lambda *_a, **_k: None,
+    )
+
+    rb.RecordingsBrowserDialog._on_thumbnail_failed(fake, "/tmp/x.mp4", "mp4-read-failed")
+
+    assert "/tmp/x.mp4" not in fake._pending_thumbnails
+    assert "/tmp/x.mp4" not in fake._thumbnail_tasks

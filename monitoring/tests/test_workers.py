@@ -85,7 +85,7 @@ def test_thumbnail_generation():
     frame = np.zeros((480, 640, 3), dtype=np.uint8)
     frame[120:320, 200:420] = (255, 255, 255)
     thumb = worker._build_thumbnail_frame(frame, (200, 120, 420, 320), "person", 0.8)
-    assert thumb.shape[:2] == (240, 320)
+    assert thumb.shape[:2] == (180, 320)
 
 
 def test_writer_fps_computation():

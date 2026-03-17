@@ -10,6 +10,7 @@ from threading import Lock, Timer
 from typing import Iterable, List
 
 from .config import ALERTS_HISTORY_PATH, BASE_DIR, RECORDINGS_CATALOG_PATH
+from .runtime_helpers import app_log
 
 
 class _DebouncedJsonWriter:
@@ -42,6 +43,7 @@ class _DebouncedJsonWriter:
         try:
             self.path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         except Exception as exc:  # pragma: no cover - I/O errors
+            app_log("error", "json write failed", source="storage", level="ERROR", details=f"path={self.path}; error={exc}")
             print("Nie udało się zapisać JSON:", exc)
 
 
@@ -66,8 +68,9 @@ class AlertMemory:
                     self.items = []
             else:
                 self.items = []
-        except Exception:
+        except Exception as exc:
             self.items = []
+            app_log("error", "alert history load failed", source="storage", level="ERROR", details=f"path={self.path}; error={exc}")
 
     def save(self) -> None:
         now = time.monotonic()

@@ -61,10 +61,10 @@ def compute_letterboxed_rect(frame_width: int, frame_height: int, canvas_width: 
 
 
 def camera_overlay_anchor(image_rect: tuple[int, int, int, int], box_size: tuple[int, int], padding: int = 10) -> tuple[int, int]:
-    """Anchor bottom-right HUD box inside the visible image rectangle."""
+    """Anchor bottom-left HUD box inside the visible image rectangle."""
     x0, y0, iw, ih = image_rect
     bw, bh = box_size
-    x = x0 + iw - bw - padding
+    x = x0 + padding
     y = y0 + ih - bh - padding
     return max(x0, x), max(y0, y)
 
