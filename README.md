@@ -235,10 +235,33 @@ Before:
 No periodic lightweight timing summary for runtime hot path.
 
 After:
-Performance metrics are aggregated and logged roughly every 5 seconds for capture, inference, overlay draw, emit/enqueue, and recorder queue size.
+Performance metrics are aggregated and logged in a fixed format (about every 10 seconds) for `capture_fps`, `infer_fps`, `preview_emit_fps`, `ui_render_ms`, `queue_size`, `dropped_frames`, `cpu_percent`, `rss_mb`, with camera identifier and mode (`main/thumb/hidden`, overload `on/off`).
 
 Impact:
 Provides low-overhead visibility for profiling and diagnosing bottlenecks in production-like runs.
+
+## Performance baseline
+
+Aby porównać wydajność **przed/po zmianie**, wykonuj testy zawsze w identycznych warunkach:
+
+1. Ta sama liczba kamer.
+2. Ta sama rozdzielczość strumienia dla każdej kamery.
+3. Ten sam model AI i konfiguracja progów detekcji.
+4. Ten sam czas trwania testu (np. 10 minut).
+
+### Procedura
+
+1. Uruchom wersję „przed” i pozwól systemowi pracować przez ustalony czas testu.
+2. Zapisz/wyeksportuj logi grupy `performance`.
+3. Uruchom wersję „po” w tych samych warunkach.
+4. Zbierz analogiczne logi `performance`.
+5. Porównaj medianę/średnią oraz p95 dla: `capture_fps`, `infer_fps`, `preview_emit_fps`, `ui_render_ms`, `queue_size`, `dropped_frames`, `cpu_percent`, `rss_mb`.
+
+### Wskazówki interpretacyjne
+
+- Spadek `capture_fps` lub `infer_fps` przy stałym `cpu_percent` może oznaczać wąskie gardło I/O.
+- Wzrost `queue_size` i `dropped_frames` wskazuje na problem z nadążaniem zapisu.
+- Wzrost `ui_render_ms` przy stabilnym `infer_fps` sugeruje przeciążenie GUI, a nie inferencji.
 
 ## Recording and Detection Reliability Fixes
 

@@ -6,6 +6,7 @@ import datetime
 import json
 import logging
 import os
+import resource
 import time
 import traceback
 from collections import deque
@@ -79,6 +80,25 @@ class PipelineState:
     next_inference_due_ts: float = 0.0
     preview_frame_skip_counter: int = 0
     preview_frames_dropped_total: int = 0
+    metrics_window_started_ts: float = 0.0
+    metrics_frames_captured: int = 0
+    metrics_inferences_run: int = 0
+    metrics_frames_emitted: int = 0
+    metrics_dropped_frames: int = 0
+    metrics_last_cpu_process_ts: float = 0.0
+    metrics_last_cpu_wall_ts: float = 0.0
+
+
+METRIC_KEYS = (
+    "capture_fps",
+    "infer_fps",
+    "preview_emit_fps",
+    "ui_render_ms",
+    "queue_size",
+    "dropped_frames",
+    "cpu_percent",
+    "rss_mb",
+)
 
 
 def _label_color(label: str) -> tuple[int, int, int]:
@@ -156,6 +176,28 @@ def _advance_next_due(now_ts: float, next_due_ts: float, interval: float) -> tup
     if now_ts - next_due_ts > interval * 4:
         next_due_ts = now_ts + interval
     return next_due_ts, skipped
+
+
+def _aggregate_fps(count_delta: int, elapsed_s: float) -> float:
+    if elapsed_s <= 0:
+        return 0.0
+    return float(max(0, count_delta) / elapsed_s)
+
+
+def _dropped_frames_delta(total_dropped: int, baseline_dropped: int) -> int:
+    return int(max(0, int(total_dropped) - int(baseline_dropped)))
+
+
+def _rss_mb() -> float:
+    rss_raw = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    return rss_raw / 1024.0
+
+
+def _build_metrics_payload(**kwargs: float | int) -> dict[str, float | int]:
+    payload: dict[str, float | int] = {}
+    for key in METRIC_KEYS:
+        payload[key] = kwargs.get(key, 0.0 if key.endswith(("fps", "ms", "percent", "mb")) else 0)
+    return payload
 
 
 class RecordingThread(QThread):
@@ -305,6 +347,10 @@ class CameraWorker(QThread):
         self.last_metrics_log_ts = 0.0
         self._runtime_limit_logged = False
         self._record_queue_full_warned = False
+        now_mono = time.monotonic()
+        self.state.metrics_window_started_ts = now_mono
+        self.state.metrics_last_cpu_wall_ts = now_mono
+        self.state.metrics_last_cpu_process_ts = time.process_time()
 
     def set_preview_role(self, role: str) -> None:
         self.preview_role = role if role in {"main", "thumb", "hidden"} else "thumb"
@@ -780,10 +826,66 @@ class CameraWorker(QThread):
         now = time.monotonic()
         if self.state.last_metrics_log_ts and now - self.state.last_metrics_log_ts < 10.0:
             return
-        detect_fps = 1.0 / max(1e-6, detection_interval)
-        logger.info("metrics camera=%s stream_fps=%.2f infer_count=%s detect_fps_target=%.2f preview_emitted=%s preview_dropped=%s skipped_inference=%s role=%s", self.camera.get("name", self.index), self.stream_fps, self.inference_count, detect_fps, self.state.frames_emitted, self.state.preview_frames_dropped_total, self.state.skipped_inference_cycles, self.preview_role)
-        reason = "overload" if self.app_overload_mode else ("config-throttle" if self.rtsp_fps > 0 else "camera/runtime")
-        app_log("performance", "worker metrics summary", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO", details=f"source_fps={self.source_fps:.2f} stream_fps={self.stream_fps:.2f} detect_fps_target={detect_fps:.2f} preview_role={self.preview_role} preview_emitted={self.state.frames_emitted} preview_dropped={self.state.preview_frames_dropped_total} skipped_inference_cycles={self.state.skipped_inference_cycles} reason={reason}")
+
+        elapsed = max(1e-6, now - (self.state.metrics_window_started_ts or now))
+        queue_size = self.record_thread.queue.qsize() if self.record_thread else 0
+        dropped_total = self.record_thread.dropped_frames if self.record_thread else 0
+        dropped_delta = _dropped_frames_delta(dropped_total, self.state.metrics_dropped_frames)
+
+        cpu_wall = max(1e-6, now - (self.state.metrics_last_cpu_wall_ts or now))
+        cpu_proc_now = time.process_time()
+        cpu_proc_delta = max(0.0, cpu_proc_now - self.state.metrics_last_cpu_process_ts)
+        cpu_percent = float(max(0.0, min(100.0, (cpu_proc_delta / cpu_wall) * 100.0)))
+
+        metrics = _build_metrics_payload(
+            capture_fps=_aggregate_fps(self.state.frames_captured - self.state.metrics_frames_captured, elapsed),
+            infer_fps=_aggregate_fps(self.state.inferences_run - self.state.metrics_inferences_run, elapsed),
+            preview_emit_fps=_aggregate_fps(self.state.frames_emitted - self.state.metrics_frames_emitted, elapsed),
+            ui_render_ms=0.0,
+            queue_size=int(queue_size),
+            dropped_frames=int(dropped_total),
+            cpu_percent=cpu_percent,
+            rss_mb=_rss_mb(),
+        )
+
+        logger.info(
+            "performance camera=%s mode=%s overload=%s capture_fps=%.2f infer_fps=%.2f preview_emit_fps=%.2f ui_render_ms=%.2f queue_size=%s dropped_frames=%s cpu_percent=%.1f rss_mb=%.1f detection_interval=%.3f dropped_delta=%s",
+            self.camera.get("name", self.index),
+            self.preview_role,
+            "on" if self.app_overload_mode else "off",
+            metrics["capture_fps"],
+            metrics["infer_fps"],
+            metrics["preview_emit_fps"],
+            metrics["ui_render_ms"],
+            metrics["queue_size"],
+            metrics["dropped_frames"],
+            metrics["cpu_percent"],
+            metrics["rss_mb"],
+            detection_interval,
+            dropped_delta,
+        )
+        app_log(
+            "performance",
+            "worker metrics summary",
+            camera=str(self.camera.get("name", self.index)),
+            source="worker",
+            level="INFO",
+            details=(
+                f"mode={self.preview_role} overload={'on' if self.app_overload_mode else 'off'} "
+                f"capture_fps={float(metrics['capture_fps']):.2f} infer_fps={float(metrics['infer_fps']):.2f} "
+                f"preview_emit_fps={float(metrics['preview_emit_fps']):.2f} ui_render_ms={float(metrics['ui_render_ms']):.2f} "
+                f"queue_size={int(metrics['queue_size'])} dropped_frames={int(metrics['dropped_frames'])} "
+                f"cpu_percent={float(metrics['cpu_percent']):.1f} rss_mb={float(metrics['rss_mb']):.1f}"
+            ),
+        )
+
+        self.state.metrics_window_started_ts = now
+        self.state.metrics_frames_captured = self.state.frames_captured
+        self.state.metrics_inferences_run = self.state.inferences_run
+        self.state.metrics_frames_emitted = self.state.frames_emitted
+        self.state.metrics_dropped_frames = int(dropped_total)
+        self.state.metrics_last_cpu_wall_ts = now
+        self.state.metrics_last_cpu_process_ts = cpu_proc_now
         self.state.last_metrics_log_ts = now
 
     def _maybe_emit_heartbeat(self) -> None:
@@ -793,12 +895,19 @@ class CameraWorker(QThread):
         queue_size = self.record_thread.queue.qsize() if self.record_thread else 0
         dropped = self.record_thread.dropped_frames if self.record_thread else 0
         since_detect = (now - self.detection_last_seen_ts) if self.detection_last_seen_ts > 0 else -1.0
+        elapsed = max(1e-6, now - (self.state.metrics_window_started_ts or now))
         status = {
             "stream_fps": float(self.stream_fps),
             "detect_fps": float(max(0.0, self.fps * (1.0 if self.recording else self.detect_fps_factor))),
             "writer_fps": float(self.current_writer_fps or self.writer_fps),
+            "capture_fps": _aggregate_fps(self.state.frames_captured - self.state.metrics_frames_captured, elapsed),
+            "infer_fps": _aggregate_fps(self.state.inferences_run - self.state.metrics_inferences_run, elapsed),
+            "preview_emit_fps": _aggregate_fps(self.state.frames_emitted - self.state.metrics_frames_emitted, elapsed),
+            "ui_render_ms": 0.0,
             "queue_size": int(queue_size),
             "dropped_frames": int(dropped),
+            "cpu_percent": 0.0,
+            "rss_mb": _rss_mb(),
             "recording_active": bool(self.recording),
             "preview_role": self.preview_role,
             "overload_degraded": bool(self.is_overload_degraded),
