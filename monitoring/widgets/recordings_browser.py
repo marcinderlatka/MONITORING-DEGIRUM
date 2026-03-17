@@ -139,6 +139,8 @@ class RefreshTask(QRunnable):
     def run(self) -> None:  # pragma: no cover - async GUI path
         try:
             self.signals.started.emit(self._request_id)
+            preview_entries: List[RecordingMetadata] = []
+            preview_index: Dict[str, RecordingMetadata] = {}
             entries: List[RecordingMetadata] = []
             diagnostics: Dict[str, object] = {}
             for chunk, progress in iter_recording_entries_progressive(
@@ -150,12 +152,21 @@ class RefreshTask(QRunnable):
                 chunk_size=120,
             ):
                 phase = str(progress.get("phase", ""))
-                if phase != "final":
+                if phase == "final":
+                    entries.extend(chunk)
+                    diagnostics = dict(progress.get("diagnostics") or diagnostics)
+                    self.signals.chunk.emit(self._request_id, list(chunk), dict(progress))
                     continue
-                entries.extend(chunk)
-                diagnostics = dict(progress.get("diagnostics") or diagnostics)
+                for item in chunk:
+                    preview_index[item.filepath] = item
+                preview_entries = sorted(preview_index.values(), key=lambda item: item.timestamp, reverse=True)
+                self.signals.ready.emit(
+                    self._request_id,
+                    list(preview_entries),
+                    {"partial": True, "phase": phase, "progress": dict(progress)},
+                )
                 self.signals.chunk.emit(self._request_id, list(chunk), dict(progress))
-            self.signals.ready.emit(self._request_id, entries, diagnostics)
+            self.signals.ready.emit(self._request_id, entries, {"partial": False, "diagnostics": diagnostics})
         except Exception as exc:
             self.signals.failed.emit(self._request_id, str(exc))
 
@@ -256,6 +267,8 @@ class RecordingsBrowserDialog(QDialog):
         self._active_refresh_request_id = 0
         self._refresh_tasks: Dict[int, RefreshTask] = {}
         self._refresh_active = False
+        self._refresh_seen_count = 0
+        self._refresh_loading_hint = ""
         self._spinner_timer = QTimer(self)
         self._spinner_timer.setInterval(140)
         self._spinner_phase = 0
@@ -397,7 +410,6 @@ class RecordingsBrowserDialog(QDialog):
         self._refresh_request_seq += 1
         request_id = self._refresh_request_seq
         self._active_refresh_request_id = request_id
-        self.refresh_started.emit(request_id)
         app_log("browser", "refresh recordings browser", source="recordings-browser", level="INFO", details=f"request_id={request_id}")
 
         task = RefreshTask(request_id, self._camera_dirs, history_source)
@@ -413,9 +425,10 @@ class RecordingsBrowserDialog(QDialog):
         if request_id != self._active_refresh_request_id:
             return
         self._refresh_active = True
-        self.refresh_btn.setEnabled(False)
-        self.status_label.setText("Wczytywanie nagrań...")
+        self._refresh_seen_count = 0
+        self._refresh_loading_hint = ""
         self._spinner_phase = 0
+        self._render_loading_status()
         if not self._spinner_timer.isActive():
             self._spinner_timer.start()
 
@@ -424,12 +437,18 @@ class RecordingsBrowserDialog(QDialog):
         self._refresh_tasks.pop(request_id, None)
         if request_id != self._active_refresh_request_id:
             return
+        payload = dict(diagnostics or {}) if isinstance(diagnostics, dict) else {}
+        if bool(payload.get("partial")):
+            self._entries = list(entries) if isinstance(entries, list) else []
+            self._ensure_class_filter_entries(self._entries)
+            self._set_default_date_bounds(self._entries)
+            self._apply_filters()
+            return
         self._refresh_active = False
         if self._spinner_timer.isActive():
             self._spinner_timer.stop()
-        self.refresh_btn.setEnabled(True)
         self._entries = list(entries) if isinstance(entries, list) else []
-        self._load_diagnostics = dict(diagnostics or {}) if isinstance(diagnostics, dict) else {}
+        self._load_diagnostics = dict(payload.get("diagnostics") or {}) if isinstance(payload.get("diagnostics"), dict) else {}
         self._ensure_class_filter_entries(self._entries)
         self._set_default_date_bounds(self._entries)
         self._apply_filters()
@@ -442,7 +461,6 @@ class RecordingsBrowserDialog(QDialog):
         self._refresh_active = False
         if self._spinner_timer.isActive():
             self._spinner_timer.stop()
-        self.refresh_btn.setEnabled(True)
         app_log("error", "browser refresh failure", source="recordings-browser", level="ERROR", details=reason)
         QMessageBox.warning(self, "Nagrania", f"Nie udało się odczytać nagrań: {reason}")
 
@@ -451,17 +469,38 @@ class RecordingsBrowserDialog(QDialog):
         if request_id != self._active_refresh_request_id:
             return
         chunk_len = len(chunk) if isinstance(chunk, list) else 0
-        total = chunk_len
+        total = max(self._refresh_seen_count, chunk_len)
+        hint = ""
         if isinstance(progress, dict):
-            total = int(progress.get("offset", 0) or 0) + chunk_len
-        self.status_label.setText(f"Wczytywanie... {total} nagrań")
+            phase = str(progress.get("phase", ""))
+            if phase == "final":
+                total = int(progress.get("offset", 0) or 0) + chunk_len
+            elif phase == "catalog":
+                total = max(total, int(progress.get("valid_catalog_entries", 0) or 0))
+                hint = "(katalog)"
+            elif phase == "disk_scan":
+                total = max(total, self._refresh_seen_count + chunk_len)
+                hint = "(skan dysku)"
+        self._refresh_seen_count = max(self._refresh_seen_count, total)
+        self._refresh_loading_hint = hint
+        self._render_loading_status()
+
+    def _render_loading_status(self) -> None:
+        if not self._refresh_active:
+            return
+        frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        marker = frames[self._spinner_phase % len(frames)]
+        suffix = f" {self._refresh_loading_hint}" if self._refresh_loading_hint else ""
+        if self._refresh_seen_count > 0:
+            self.status_label.setText(f"{marker} Wczytywanie nagrań... {self._refresh_seen_count} {suffix}".rstrip())
+        else:
+            self.status_label.setText(f"{marker} Wczytywanie nagrań...{suffix}".rstrip())
 
     def _update_loading_status(self) -> None:
         if not self._refresh_active:
             return
-        frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-        self._spinner_phase = (self._spinner_phase + 1) % len(frames)
-        self.status_label.setText(f"{frames[self._spinner_phase]} Wczytywanie nagrań...")
+        self._spinner_phase += 1
+        self._render_loading_status()
 
     def _set_default_date_bounds(self, entries: Sequence[RecordingMetadata]) -> None:
         dfrom, dto = default_filter_bounds(entries)
