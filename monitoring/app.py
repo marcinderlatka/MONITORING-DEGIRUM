@@ -1223,12 +1223,27 @@ class AppLogBridge(QObject):
     def __init__(self, target_window=None) -> None:
         super().__init__()
         self._target_window = target_window
+        self._dedupe_window_seconds = 5.0
+        self._last_message_ts: dict[tuple[str, str, str], float] = {}
         self.entry_signal.connect(self._deliver, Qt.QueuedConnection)
 
     def set_target(self, target_window) -> None:
         self._target_window = target_window
 
+    def _should_suppress_duplicate(self, group: str, source: str, message: str) -> bool:
+        if group != "performance" or source != "worker":
+            return False
+        now = time.monotonic()
+        key = (group, source, message)
+        last_ts = self._last_message_ts.get(key)
+        self._last_message_ts[key] = now
+        if last_ts is None:
+            return False
+        return (now - last_ts) < self._dedupe_window_seconds
+
     def log(self, group: str, message: str, camera: str = "", source: str = "", level: str = "INFO", details: str = "", traceback_text: str = "", action: str = "") -> None:
+        if self._should_suppress_duplicate(group=group, source=source, message=message):
+            return
         payload = {
             "group": group,
             "camera": camera,

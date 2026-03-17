@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import uuid
+from threading import Lock, Timer
 from typing import Any, List
 
 from PyQt5.QtCore import QEvent, QPoint, Qt, QTimer
@@ -196,8 +197,45 @@ class LogEntryWidget(QFrame):
         self.rec_dot.show(); self.rec_text.show(); self._blink_timer.stop(); self.rec_dot.setVisible(True)
 
 
+class _DebouncedHistoryWriter:
+    def __init__(self, path: str, debounce_seconds: float = 1.0) -> None:
+        self.path = path
+        self.debounce_seconds = debounce_seconds
+        self._timer: Timer | None = None
+        self._lock = Lock()
+        self._pending: list[dict[str, Any]] | None = None
+
+    def schedule(self, payload: list[dict[str, Any]]) -> None:
+        with self._lock:
+            self._pending = list(payload)
+            if self._timer is not None:
+                self._timer.cancel()
+            self._timer = Timer(self.debounce_seconds, self.flush)
+            self._timer.daemon = True
+            self._timer.start()
+
+    def flush(self) -> None:
+        with self._lock:
+            payload = self._pending
+            self._pending = None
+            timer = self._timer
+            self._timer = None
+        if timer is not None:
+            timer.cancel()
+        if payload is None:
+            return
+        try:
+            with open(self.path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2)
+        except Exception as exc:
+            print(f"Log history save failed: {exc}", file=sys.stderr)
+
+
 class LogWindow(QListWidget):
     """Widget prezentujący logi oraz zapisujący je do pliku."""
+
+    VISIBLE_HISTORY_LIMIT = 200
+    RETENTION_CHECK_INTERVAL_MS = 60_000
 
     def __init__(self, log_path: str = str(LOG_HISTORY_PATH), retention_hours: int = LOG_RETENTION_HOURS) -> None:
         super().__init__()
@@ -217,6 +255,11 @@ class LogWindow(QListWidget):
         self.log_path = log_path
         self.retention_hours = retention_hours
         self.history: List[dict[str, Any]] = []
+        self._history_writer = _DebouncedHistoryWriter(self.log_path, debounce_seconds=1.0)
+        self._retention_timer = QTimer(self)
+        self._retention_timer.setInterval(self.RETENTION_CHECK_INTERVAL_MS)
+        self._retention_timer.timeout.connect(self._run_retention_cycle)
+        self._retention_timer.start()
 
     @staticmethod
     def normalize_entry(entry: dict[str, Any]) -> dict[str, Any]:
@@ -239,12 +282,11 @@ class LogWindow(QListWidget):
             normalized["group"] = "application"
         return normalized
 
-    def _persist_history(self) -> None:
-        try:
-            with open(self.log_path, "w", encoding="utf-8") as handle:
-                json.dump(self.history, handle, indent=2)
-        except Exception as exc:
-            print(f"Log history save failed: {exc}", file=sys.stderr)
+    def _schedule_history_persist(self) -> None:
+        self._history_writer.schedule(self.history)
+
+    def flush_history_persist(self) -> None:
+        self._history_writer.flush()
 
     def _add_widget_entry(self, entry: dict[str, Any]) -> None:
         widget = LogEntryWidget(entry)
@@ -256,11 +298,29 @@ class LogWindow(QListWidget):
 
     def _refresh_widget(self) -> None:
         self.clear()
-        for entry in self.history[-200:]:
+        for entry in self.history[-self.VISIBLE_HISTORY_LIMIT :]:
             self._add_widget_entry(entry)
         if self.count():
             self.scrollToItem(self.item(self.count() - 1))
         self._update_selection_highlight()
+
+    def _append_incremental(self, entry: dict[str, Any]) -> None:
+        self._add_widget_entry(entry)
+        while self.count() > self.VISIBLE_HISTORY_LIMIT:
+            self.takeItem(0)
+        if self.count():
+            self.scrollToItem(self.item(self.count() - 1))
+
+    def _run_retention_cycle(self) -> None:
+        before = len(self.history)
+        if before == 0:
+            return
+        filtered = self._retention_filtered(self.history)
+        if len(filtered) == before:
+            return
+        self.history = filtered
+        self._refresh_widget()
+        self._schedule_history_persist()
 
     def _retention_filtered(self, entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
         cutoff = datetime.datetime.now() - datetime.timedelta(hours=self.retention_hours)
@@ -290,9 +350,8 @@ class LogWindow(QListWidget):
     def add_structured_entry(self, entry: dict[str, Any]) -> str:
         normalized = self.normalize_entry(entry)
         self.history.append(normalized)
-        self.history = self._retention_filtered(self.history)
-        self._refresh_widget()
-        self._persist_history()
+        self._append_incremental(normalized)
+        self._schedule_history_persist()
         return normalized["id"]
 
     def add_entry(self, group: str, camera: str = "", action: str = "", detected: str = "") -> str:
@@ -303,19 +362,19 @@ class LogWindow(QListWidget):
             if entry.get("id") == entry_id:
                 entry["recording"] = status
                 break
-        self._persist_history()
+        self._schedule_history_persist()
 
     def set_retention_hours(self, hours: int) -> None:
         hours = max(1, int(hours))
         if self.retention_hours == hours:
             return
         self.retention_hours = hours
-        self.load_history()
+        self._run_retention_cycle()
 
     def clear_history(self) -> None:
         self.history = []
         self._refresh_widget()
-        self._persist_history()
+        self._schedule_history_persist()
 
     def delete_history_file(self) -> None:
         self.history = []
