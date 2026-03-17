@@ -2451,7 +2451,9 @@ QToolButton:focus { outline: none; }
             self._last_thumb_frame[idx] = frame
 
         stage_started = time.perf_counter()
-        thumb_source = self._last_thumb_frame.get(idx) or self._last_main_frame.get(idx)
+        thumb_source = self._last_thumb_frame.get(idx)
+        if thumb_source is None:
+            thumb_source = self._last_main_frame.get(idx)
         if thumb_source is not None and now_mono - float(self._last_thumb_update_ts.get(idx, 0.0)) >= self._thumb_update_interval_s:
             thumb_pm = self._get_scaled_preview_pixmap(idx, "thumb", thumb_source, 192, 108)
             if hasattr(self.camera_list, "update_thumbnail_pixmap"):
