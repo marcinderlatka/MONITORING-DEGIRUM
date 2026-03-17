@@ -1549,8 +1549,12 @@ QToolButton:focus { outline: none; }
         self.overload_mode_active = False
         self._overload_last_change_ts = 0.0
         self._ui_render_ms_by_camera: dict[str, float] = {}
+        self._ui_render_stage_ms_by_camera: dict[str, dict[str, float]] = {}
         self._performance_log_last_ts_by_camera: dict[str, float] = {}
         self._performance_log_interval_s = 10.0
+        self._preview_cache: dict[tuple[int, str, int, int], QPixmap] = {}
+        self._last_thumb_update_ts: dict[int, float] = {}
+        self._thumb_update_interval_s = 1.0 / max(0.5, float(self.preview_fps_thumb))
 
         self.diag_panel = QLabel("Diagnostyka (debug): brak danych")
         self.diag_panel.setStyleSheet("color: #dddddd; background: #111; padding: 8px; border: 1px solid #333;")
@@ -1960,14 +1964,14 @@ QToolButton:focus { outline: none; }
         cam_name = str(cam.get("name", idx))
         self.worker_status.pop(cam_name, None)
         self._worker_diag.pop(cam_name, None)
-        if hasattr(self.camera_grid, "update_frame"):
-            blank = np.zeros((180, 320, 3), dtype=np.uint8)
+        self._invalidate_preview_cache(idx)
+        self._last_thumb_update_ts.pop(idx, None)
+        if hasattr(self.camera_grid, "update_pixmap"):
             with suppress(Exception):
-                self.camera_grid.update_frame(idx, blank)
-        if hasattr(self.camera_list, "update_thumbnail"):
-            blank = np.zeros((180, 320, 3), dtype=np.uint8)
+                self.camera_grid.update_pixmap(idx, None)
+        if hasattr(self.camera_list, "update_thumbnail_pixmap"):
             with suppress(Exception):
-                self.camera_list.update_thumbnail(idx, blank)
+                self.camera_list.update_thumbnail_pixmap(idx, None)
         if idx == self.camera_list.currentRow():
             self._render_current()
 
@@ -2015,6 +2019,10 @@ QToolButton:focus { outline: none; }
         payload = dict(status or {})
         cam_name = str(camera_name)
         payload["ui_render_ms"] = float(self._ui_render_ms_by_camera.get(cam_name, 0.0))
+        stage_stats = self._ui_render_stage_ms_by_camera.get(cam_name, {})
+        payload["ui_thumb_ms"] = float(stage_stats.get("thumb", 0.0))
+        payload["ui_grid_ms"] = float(stage_stats.get("grid", 0.0))
+        payload["ui_main_ms"] = float(stage_stats.get("main", 0.0))
         self._worker_diag[cam_name] = payload
         self.worker_status[cam_name] = payload
         self._heartbeat_last_seen[cam_name] = time.monotonic()
@@ -2036,6 +2044,7 @@ QToolButton:focus { outline: none; }
                     f"mode={mode} overload={overload} "
                     f"capture_fps={float(payload.get('capture_fps', 0.0)):.2f} infer_fps={float(payload.get('infer_fps', 0.0)):.2f} "
                     f"preview_emit_fps={float(payload.get('preview_emit_fps', 0.0)):.2f} ui_render_ms={float(payload.get('ui_render_ms', 0.0)):.2f} "
+                    f"thumb_ms={float(payload.get('ui_thumb_ms', 0.0)):.2f} grid_ms={float(payload.get('ui_grid_ms', 0.0)):.2f} main_ms={float(payload.get('ui_main_ms', 0.0)):.2f} "
                     f"queue_size={int(payload.get('queue_size', 0))} dropped_frames={int(payload.get('dropped_frames', 0))} "
                     f"cpu_percent={float(payload.get('cpu_percent', 0.0)):.1f} rss_mb={float(payload.get('rss_mb', 0.0)):.1f}"
                 ),
@@ -2316,6 +2325,7 @@ QToolButton:focus { outline: none; }
         self.workers = []
         self.worker_status.clear()
         self.overload_mode_active = False
+        self._invalidate_preview_cache()
 
     def switch_camera(self, idx):
         # odśwież HUD dla nowej kamery
@@ -2342,13 +2352,32 @@ QToolButton:focus { outline: none; }
             self._last_error[idx] = "Brak sygnału (pusta klatka)"
             self._last_frame.pop(idx, None)
             self._last_fps_text[idx] = ""
+            self._invalidate_preview_cache(idx)
+            if hasattr(self.camera_list, "update_thumbnail_pixmap"):
+                self.camera_list.update_thumbnail_pixmap(idx, None)
+            if hasattr(self.camera_grid, "update_pixmap"):
+                self.camera_grid.update_pixmap(idx, None)
             if idx == self.camera_list.currentRow():
                 self._render_current()
             return
 
-        self.camera_list.update_thumbnail(idx, frame)
-        self.camera_grid.update_frame(idx, frame)
         self._last_frame_update_ts[idx] = time.monotonic()
+        self._invalidate_preview_cache(idx)
+        stage_started = time.perf_counter()
+        now_mono = time.monotonic()
+        if now_mono - float(self._last_thumb_update_ts.get(idx, 0.0)) >= self._thumb_update_interval_s:
+            thumb_pm = self._get_scaled_preview_pixmap(idx, "thumb", frame, 192, 108)
+            if hasattr(self.camera_list, "update_thumbnail_pixmap"):
+                self.camera_list.update_thumbnail_pixmap(idx, thumb_pm)
+            self._last_thumb_update_ts[idx] = now_mono
+            self._record_render_stage(idx, "thumb", (time.perf_counter() - stage_started) * 1000.0)
+
+        grid_started = time.perf_counter()
+        if self.camera_grid.isVisible():
+            grid_pm = self._get_scaled_preview_pixmap(idx, "grid", frame, 320, 180)
+            if hasattr(self.camera_grid, "update_pixmap"):
+                self.camera_grid.update_pixmap(idx, grid_pm)
+            self._record_render_stage(idx, "grid", (time.perf_counter() - grid_started) * 1000.0)
 
         # FPS liczenie dla tej kamery
         from time import perf_counter
@@ -2372,6 +2401,34 @@ QToolButton:focus { outline: none; }
 
         if idx == self.camera_list.currentRow():
             self._render_current()
+
+    def _invalidate_preview_cache(self, idx: int | None = None) -> None:
+        if idx is None:
+            self._preview_cache.clear()
+            return
+        keys = [key for key in self._preview_cache if key[0] == int(idx)]
+        for key in keys:
+            self._preview_cache.pop(key, None)
+
+    def _get_scaled_preview_pixmap(self, idx: int, channel: str, frame: np.ndarray, width: int, height: int) -> QPixmap:
+        key = (int(idx), str(channel), int(width), int(height))
+        cached = self._preview_cache.get(key)
+        if cached is not None and not cached.isNull():
+            return cached
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        resized = cv2.resize(rgb, (int(width), int(height)), interpolation=cv2.INTER_AREA)
+        qimg = QImage(resized.data, int(width), int(height), resized.strides[0], QImage.Format_RGB888).copy()
+        pixmap = QPixmap.fromImage(qimg)
+        self._preview_cache[key] = pixmap
+        return pixmap
+
+    def _record_render_stage(self, idx: int, stage: str, render_ms: float) -> None:
+        cam_name = str(self.cameras[idx].get("name", idx)) if 0 <= idx < len(self.cameras) else str(idx)
+        stage_stats = self._ui_render_stage_ms_by_camera.setdefault(cam_name, {})
+        stage_stats[str(stage)] = float(render_ms)
+        stat = self.worker_status.get(cam_name)
+        if isinstance(stat, dict):
+            stat[f"ui_{stage}_ms"] = float(render_ms)
 
     def _build_camera_hud_lines(self, idx: int) -> list[str]:
         if idx < 0 or idx >= len(self.cameras):
@@ -2499,6 +2556,7 @@ QToolButton:focus { outline: none; }
         )
         self.camera_view.setPixmap(QPixmap.fromImage(composed_qimg))
         render_ms = (time.perf_counter() - render_started) * 1000.0
+        self._record_render_stage(idx, "main", render_ms)
         self._ui_render_ms_by_camera[cam_name] = float(render_ms)
         stat = self.worker_status.get(cam_name)
         if isinstance(stat, dict):

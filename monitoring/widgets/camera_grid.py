@@ -44,6 +44,7 @@ class CameraGridItem(QWidget):
         self.frame_label.setPixmap(self._placeholder)
 
     def set_frame(self, frame: np.ndarray | None) -> None:
+        # Legacy fallback API; preferred path uses set_pixmap().
         if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
             self._pixmap = self._placeholder
             self._update_pixmap()
@@ -55,6 +56,13 @@ class CameraGridItem(QWidget):
             self._pixmap = QPixmap.fromImage(qimg)
         except (cv2.error, ValueError, TypeError):
             self._pixmap = self._placeholder
+        self._update_pixmap()
+
+    def set_pixmap(self, pixmap: QPixmap | None) -> None:
+        if pixmap is None or pixmap.isNull():
+            self._pixmap = self._placeholder
+        else:
+            self._pixmap = pixmap
         self._update_pixmap()
 
     def _update_pixmap(self) -> None:
@@ -122,6 +130,10 @@ class CameraGridWidget(QWidget):
     def update_frame(self, index: int, frame: np.ndarray | None) -> None:
         if 0 <= index < len(self.items):
             self.items[index].set_frame(frame)
+
+    def update_pixmap(self, index: int, pixmap: QPixmap | None) -> None:
+        if 0 <= index < len(self.items):
+            self.items[index].set_pixmap(pixmap)
 
 
 __all__ = ["CameraGridItem", "CameraGridWidget"]
