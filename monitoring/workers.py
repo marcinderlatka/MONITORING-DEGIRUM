@@ -493,10 +493,12 @@ class CameraWorker(QThread):
 
     def _build_recording_meta(self, **kwargs: Any) -> dict:
         event_time = datetime.datetime.fromtimestamp(float(kwargs["event_start_ts"]))
+        scene_thumb = str(kwargs.get("scene_thumb") or kwargs.get("alert_thumb") or kwargs.get("thumb_path") or "")
         return build_recording_sidecar_metadata(
             camera=self.camera.get("name", ""), label=kwargs["label"], confidence=kwargs["confidence"],
             event_time=event_time.strftime("%Y-%m-%d %H:%M:%S"), filepath=kwargs["filepath"], thumb=kwargs["thumb_path"],
-            alert_thumb=kwargs.get("alert_thumb", kwargs.get("thumb_path", "")),
+            alert_thumb=scene_thumb,
+            scene_thumb=scene_thumb,
             source_fps=kwargs["source_fps"], writer_fps=kwargs["writer_fps"], detect_fps=kwargs["detect_fps"],
             event_start_ts=kwargs["event_start_ts"], thumbnail_ts=kwargs["thumbnail_ts"], frames_written=kwargs["frames_written"],
             dropped_frames=kwargs["dropped_frames"], thumbnail_mode=kwargs["thumbnail_mode"], inference_count=self.inference_count,
@@ -529,30 +531,26 @@ class CameraWorker(QThread):
     def _update_event_thumbnail(self, preview_frame: np.ndarray, best_bbox: tuple[int, int, int, int] | None, best_label: str, best_score: float) -> None:
         if not self.output_file or not best_label:
             return
-        if not self.current_event_scene_thumbnail_path:
-            scene_thumb_path = self.output_file + ".alert.jpg"
-            scene_thumb_frame = self._build_scene_thumbnail_frame(preview_frame)
-            if cv2.imwrite(scene_thumb_path, scene_thumb_frame):
-                self.current_event_scene_thumbnail_path = scene_thumb_path
-            else:
-                app_log("warning", "alert thumbnail write failed", camera=str(self.camera.get("name", self.index)), source="worker", level="WARNING", details=scene_thumb_path)
         if self.thumbnail_mode == "first_detection" and self.current_detection_frame_saved:
             return
         if self.thumbnail_mode == "best_detection" and best_score <= self.current_event_best_confidence:
             return
         if self.thumbnail_mode == "first_frame" and self.current_detection_frame_saved:
             return
-        thumb_path = self.output_file + ".jpg"
+        scene_thumb_path = self.output_file + ".alert.jpg"
         thumb_frame = self._build_thumbnail_frame(preview_frame, best_bbox, best_label, best_score)
-        if cv2.imwrite(thumb_path, thumb_frame):
-            self.current_event_thumbnail_path = thumb_path
+        if cv2.imwrite(scene_thumb_path, thumb_frame):
+            app_log("worker", "event thumbnail created", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO", details=f"path={scene_thumb_path} type=scene")
+            self.current_event_scene_thumbnail_path = scene_thumb_path
+            self.current_event_thumbnail_path = scene_thumb_path
             self.current_thumbnail_ts = time.time()
             self.current_detection_frame_saved = True
+            app_log("worker", "event thumbnail assigned", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO", details=f"path={scene_thumb_path}")
             if best_score >= self.current_event_best_confidence:
                 self.current_event_best_confidence = float(best_score)
                 self.current_event_best_frame = thumb_frame
         else:
-            app_log("warning", "thumbnail write failed", camera=str(self.camera.get("name", self.index)), source="worker", level="WARNING", details=thumb_path)
+            app_log("warning", "alert thumbnail write failed", camera=str(self.camera.get("name", self.index)), source="worker", level="WARNING", details=scene_thumb_path)
             return
 
     def _should_start_recording_now(self) -> bool:
@@ -602,9 +600,12 @@ class CameraWorker(QThread):
         else:
             self.record_thread.write(raw_frame)
         self._update_event_thumbnail(preview_frame, best_bbox, self.current_event_label, best_score)
+        scene_thumb_path = self.current_event_scene_thumbnail_path or self.current_event_thumbnail_path
+        self.current_event_scene_thumbnail_path = scene_thumb_path
+        self.current_event_thumbnail_path = scene_thumb_path
         meta = self._build_recording_meta(
-            filepath=self.output_file, thumb_path=self.current_event_thumbnail_path, label=self.current_event_label, confidence=self.current_event_confidence,
-            alert_thumb=self.current_event_scene_thumbnail_path,
+            filepath=self.output_file, thumb_path=scene_thumb_path, label=self.current_event_label, confidence=self.current_event_confidence,
+            alert_thumb=scene_thumb_path, scene_thumb=scene_thumb_path,
             event_start_ts=self.current_event_start_ts, writer_fps=self.current_writer_fps, source_fps=self.source_fps, detect_fps=detect_fps,
             frames_written=0, dropped_frames=0, thumbnail_ts=self.current_thumbnail_ts, thumbnail_mode=self.thumbnail_mode,
             preview_role_at_start=self.preview_role, overload_degraded_at_start=self.is_overload_degraded,
@@ -632,9 +633,12 @@ class CameraWorker(QThread):
         avg_conf = float(self.current_event_confidence_sum / detection_count) if detection_count > 0 else 0.0
         max_conf = float(self.current_event_max_confidence)
         event_elapsed = max(0.001, event_end_ts - (self.current_event_start_ts or event_end_ts))
+        scene_thumb_path = self.current_event_scene_thumbnail_path or self.current_event_thumbnail_path
+        self.current_event_scene_thumbnail_path = scene_thumb_path
+        self.current_event_thumbnail_path = scene_thumb_path
         meta = self._build_recording_meta(
-            filepath=self.output_file, thumb_path=self.current_event_thumbnail_path, label=self.current_event_label or "object",
-            alert_thumb=self.current_event_scene_thumbnail_path,
+            filepath=self.output_file, thumb_path=scene_thumb_path, label=self.current_event_label or "object",
+            alert_thumb=scene_thumb_path, scene_thumb=scene_thumb_path,
             confidence=self.current_event_confidence, event_start_ts=event_start_ts, writer_fps=self.current_writer_fps,
             source_fps=self.source_fps, detect_fps=self._effective_detect_fps(event_elapsed), frames_written=frames_written,
             dropped_frames=dropped_frames, thumbnail_ts=self.current_thumbnail_ts, thumbnail_mode=self.thumbnail_mode,
@@ -646,6 +650,7 @@ class CameraWorker(QThread):
             app_overload_mode=self.app_overload_mode, recorder_queue_peak=queue_peak,
         )
         self._save_recording_metadata(meta)
+        app_log("worker", "event finalized", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO", details=f"scene_thumb={scene_thumb_path}")
         self.record_signal.emit("stop", self.output_file)
         app_log("recording", "recording session finalized", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO", details=f"frames_written={frames_written} dropped_frames={dropped_frames} queue_peak={queue_peak}")
         if dropped_frames > 0:

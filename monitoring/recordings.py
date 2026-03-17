@@ -89,8 +89,8 @@ def alert_thumbnail_candidates_for_event(alert: Mapping[str, object]) -> List[st
 
     filepath = str(alert.get("filepath") or alert.get("file") or "")
     explicit = [
-        alert.get("alert_thumb"),
         alert.get("scene_thumb"),
+        alert.get("alert_thumb"),
         alert.get("thumb_scene"),
     ]
     candidates: List[str] = []
@@ -220,6 +220,7 @@ def build_recording_sidecar_metadata(
     app_overload_mode: bool | None = None,
     recorder_queue_peak: int = 0,
     alert_thumb: str = "",
+    scene_thumb: str = "",
 ) -> Dict[str, object]:
     """Build backward-compatible recording metadata payload."""
     return {
@@ -231,7 +232,8 @@ def build_recording_sidecar_metadata(
         "file": filepath,
         "filepath": filepath,
         "thumb": thumb,
-        "alert_thumb": str(alert_thumb or thumb),
+        "scene_thumb": str(scene_thumb or alert_thumb or thumb),
+        "alert_thumb": str(alert_thumb or scene_thumb or thumb),
         "source_fps": float(source_fps),
         "writer_fps": float(writer_fps),
         "detect_fps": float(detect_fps),

@@ -146,6 +146,7 @@ def test_build_recording_sidecar_metadata_contains_reliability_fields():
     assert payload["recording_duration"] == 4.0
     assert payload["duration"] == 4.0
     assert payload["detection_count"] == 12
+    assert payload["scene_thumb"] == "/tmp/a.mp4.jpg"
 
 
 def test_metadata_duration_fields(tmp_path):
@@ -324,6 +325,20 @@ def test_alert_thumbnail_prefers_scene_preview_not_object_crop(tmp_path):
     )
     assert candidates[0].endswith(".alert.jpg")
     assert candidates[1].endswith(".scene.jpg") or candidates[1].endswith(".preview.jpg") or candidates[1].endswith(".jpg")
+
+
+def test_alert_thumbnail_candidates_prefer_scene_thumb_over_alert_thumb(tmp_path):
+    video = tmp_path / "event2.mp4"
+    video.write_bytes(b"")
+    candidates = alert_thumbnail_candidates_for_event(
+        {
+            "filepath": str(video),
+            "scene_thumb": str(video) + ".scene.jpg",
+            "alert_thumb": str(video) + ".alert.jpg",
+        }
+    )
+    assert candidates[0].endswith(".scene.jpg")
+    assert candidates[1].endswith(".alert.jpg")
 
 
 def test_recording_thumbnail_candidate_order_prefers_explicit_jpg(tmp_path):
