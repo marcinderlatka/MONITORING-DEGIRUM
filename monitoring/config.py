@@ -58,6 +58,9 @@ DEFAULT_OVERLOAD_REDUCE_DETECT_FPS_FACTOR = 0.75
 DEFAULT_OVERLOAD_DISABLE_NONESSENTIAL_OVERLAYS = True
 DEFAULT_OVERLOAD_ENTER_DEBOUNCE_SECONDS = 3.0
 DEFAULT_OVERLOAD_EXIT_DEBOUNCE_SECONDS = 5.0
+DEFAULT_OVERLOAD_MAX_UI_RENDER_MS = 14.0
+DEFAULT_OVERLOAD_MAX_QUEUE_SIZE = 24
+DEFAULT_OVERLOAD_MAX_PREVIEW_BANDWIDTH_MBPS = 12.0
 
 
 def _resolve_path(value: str | os.PathLike[str] | None, *, default: Path) -> Path:
@@ -169,6 +172,9 @@ def load_config(path: Path | None = None) -> Dict[str, object]:
     cfg.setdefault("overload_disable_nonessential_overlays", DEFAULT_OVERLOAD_DISABLE_NONESSENTIAL_OVERLAYS)
     cfg.setdefault("overload_enter_debounce_seconds", DEFAULT_OVERLOAD_ENTER_DEBOUNCE_SECONDS)
     cfg.setdefault("overload_exit_debounce_seconds", DEFAULT_OVERLOAD_EXIT_DEBOUNCE_SECONDS)
+    cfg.setdefault("overload_max_ui_render_ms", DEFAULT_OVERLOAD_MAX_UI_RENDER_MS)
+    cfg.setdefault("overload_max_queue_size", DEFAULT_OVERLOAD_MAX_QUEUE_SIZE)
+    cfg.setdefault("overload_max_preview_bandwidth_mbps", DEFAULT_OVERLOAD_MAX_PREVIEW_BANDWIDTH_MBPS)
 
     for camera in cfg.get("cameras", []):
         if isinstance(camera, MutableMapping):
@@ -227,6 +233,9 @@ __all__ = [
     "DEFAULT_OVERLOAD_DISABLE_NONESSENTIAL_OVERLAYS",
     "DEFAULT_OVERLOAD_ENTER_DEBOUNCE_SECONDS",
     "DEFAULT_OVERLOAD_EXIT_DEBOUNCE_SECONDS",
+    "DEFAULT_OVERLOAD_MAX_UI_RENDER_MS",
+    "DEFAULT_OVERLOAD_MAX_QUEUE_SIZE",
+    "DEFAULT_OVERLOAD_MAX_PREVIEW_BANDWIDTH_MBPS",
     "DEFAULT_THUMBNAIL_MODE",
     "ICON_DIR",
     "LOG_HISTORY_PATH",

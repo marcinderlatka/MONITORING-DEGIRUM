@@ -303,6 +303,10 @@ class CameraWorker(QThread):
         self.app_overload_mode = False
         self.overload_disable_nonessential_overlays = bool(self.camera.get("overload_disable_nonessential_overlays", DEFAULT_OVERLOAD_DISABLE_NONESSENTIAL_OVERLAYS))
         self.detect_fps_factor = 1.0
+        self.overload_level = 0
+        self.overlay_stride = 1
+        self.preview_resolution_factor = 1.0
+        self.performance_log_interval_s = 10.0
         self.is_recording_active = False
 
         rec_path = str(self.camera.get("record_path", DEFAULT_RECORD_PATH))
@@ -364,10 +368,20 @@ class CameraWorker(QThread):
     def set_preview_role(self, role: str) -> None:
         self.preview_role = role if role in {"main", "thumb", "hidden"} else "thumb"
 
-    def set_overload_state(self, overload_active: bool, detect_fps_factor: float | None = None, thumb_preview_fps: float | None = None, disable_overlays: bool | None = None) -> None:
-        previous = self.app_overload_mode
-        self.app_overload_mode = bool(overload_active)
-        self.is_overload_degraded = bool(overload_active and self.preview_role != "main")
+    def set_overload_state(
+        self,
+        overload_level: int,
+        detect_fps_factor: float | None = None,
+        thumb_preview_fps: float | None = None,
+        disable_overlays: bool | None = None,
+        overlay_stride: int | None = None,
+        preview_resolution_factor: float | None = None,
+    ) -> None:
+        previous_level = self.overload_level
+        level = max(0, min(3, int(overload_level)))
+        self.overload_level = level
+        self.app_overload_mode = level > 0
+        self.is_overload_degraded = bool(self.app_overload_mode and self.preview_role != "main")
         if detect_fps_factor is not None:
             self.detect_fps_factor = float(max(0.2, min(1.0, detect_fps_factor)))
         else:
@@ -376,8 +390,13 @@ class CameraWorker(QThread):
             self.preview_fps_thumb = float(thumb_preview_fps)
         if disable_overlays is not None:
             self.overload_disable_nonessential_overlays = bool(disable_overlays)
-        if previous != self.app_overload_mode:
-            app_log("worker", "overload state updated", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO", details=f"active={self.app_overload_mode} detect_fps_factor={self.detect_fps_factor:.2f} preview_role={self.preview_role}")
+        if overlay_stride is not None:
+            self.overlay_stride = int(max(1, overlay_stride))
+        if preview_resolution_factor is not None:
+            self.preview_resolution_factor = float(max(0.3, min(1.0, preview_resolution_factor)))
+        self.performance_log_interval_s = 10.0 + float(self.overload_level * 4.0)
+        if previous_level != self.overload_level:
+            app_log("worker", "overload state updated", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO", details=f"level=L{self.overload_level} active={self.app_overload_mode} detect_fps_factor={self.detect_fps_factor:.2f} overlay_stride={self.overlay_stride} preview_res_factor={self.preview_resolution_factor:.2f} preview_role={self.preview_role}")
 
     def _build_thumbnail_frame(self, preview_frame: np.ndarray, best_bbox: tuple[int, int, int, int] | None, best_label: str, best_score: float) -> np.ndarray:
         scene = self._build_scene_thumbnail_frame(preview_frame)
@@ -831,15 +850,25 @@ class CameraWorker(QThread):
             return
         self.state.preview_frame_skip_counter = 0
         main_emit_frame = preview_frame
-        should_draw = bool(overlays) and self.draw_overlays and not (self.preview_role == "hidden") and not (self.app_overload_mode and self.overload_disable_nonessential_overlays and not self.recording)
+        should_draw = (
+            bool(overlays)
+            and self.draw_overlays
+            and not (self.preview_role == "hidden")
+            and not (self.app_overload_mode and self.overload_disable_nonessential_overlays and not self.recording)
+            and ((self.state.frames_emitted % max(1, self.overlay_stride)) == 0)
+        )
         if should_draw:
             main_emit_frame = preview_frame.copy()
             for x1, y1, x2, y2, label, confidence, color in overlays:
                 cv2.rectangle(main_emit_frame, (x1, y1), (x2, y2), color, 2)
                 cv2.putText(main_emit_frame, f"{label}: {confidence * 100:.1f}%", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
-        main_emit_frame = self._resize_for_preview(main_emit_frame, self.preview_main_max_width, self.preview_main_max_height)
-        thumb_emit_frame = self._resize_for_preview(main_emit_frame, self.preview_thumb_max_width, self.preview_thumb_max_height)
+        target_main_w = int(max(1, round(self.preview_main_max_width * self.preview_resolution_factor)))
+        target_main_h = int(max(1, round(self.preview_main_max_height * self.preview_resolution_factor)))
+        target_thumb_w = int(max(1, round(self.preview_thumb_max_width * self.preview_resolution_factor)))
+        target_thumb_h = int(max(1, round(self.preview_thumb_max_height * self.preview_resolution_factor)))
+        main_emit_frame = self._resize_for_preview(main_emit_frame, target_main_w, target_main_h)
+        thumb_emit_frame = self._resize_for_preview(main_emit_frame, target_thumb_w, target_thumb_h)
         if self.preview_role in {"thumb", "hidden"}:
             main_emit_frame = thumb_emit_frame
 
@@ -864,7 +893,7 @@ class CameraWorker(QThread):
 
     def _maybe_log_metrics(self, detection_interval: float) -> None:
         now = time.monotonic()
-        if self.state.last_metrics_log_ts and now - self.state.last_metrics_log_ts < 10.0:
+        if self.state.last_metrics_log_ts and now - self.state.last_metrics_log_ts < max(4.0, float(self.performance_log_interval_s)):
             return
 
         elapsed = max(1e-6, now - (self.state.metrics_window_started_ts or now))
