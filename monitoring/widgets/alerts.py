@@ -175,7 +175,7 @@ class AlertItemWidget(QWidget):
             )
             self.thumb.setPixmap(scaled)
         except Exception as exc:
-            app_log("error", "alert widget thumbnail render failure", source="alerts", level="ERROR", details=str(exc), traceback=traceback.format_exc())
+            app_log("error", "alert widget thumbnail render failure", source="alerts", level="ERROR", details=f"{exc}\n\n{traceback.format_exc()}")
 
     def set_selected(self, selected: bool) -> None:
         self.setStyleSheet(self.SELECTED_STYLE if selected else self.BASE_STYLE)

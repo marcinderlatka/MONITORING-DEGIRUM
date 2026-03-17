@@ -1249,7 +1249,12 @@ class AppLogBridge(QObject):
             return False
         return (now - last_ts) < self._dedupe_window_seconds
 
-    def log(self, group: str, message: str, camera: str = "", source: str = "", level: str = "INFO", details: str = "", traceback_text: str = "", action: str = "") -> None:
+    def log(self, group: str, message: str, camera: str = "", source: str = "", level: str = "INFO", details: str = "", traceback_text: str = "", action: str = "", **kwargs) -> None:
+        legacy_traceback = kwargs.pop("traceback", "")
+        if legacy_traceback and not traceback_text:
+            traceback_text = str(legacy_traceback)
+        if traceback_text and traceback_text not in details:
+            details = f"{details}\n\n{traceback_text}".strip() if details else traceback_text
         if self._should_suppress_duplicate(group=group, source=source, message=message):
             return
         payload = {
