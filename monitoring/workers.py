@@ -260,6 +260,8 @@ class CameraWorker(QThread):
     status_signal = pyqtSignal(str, int)
     record_signal = pyqtSignal(str, str)
     worker_status_signal = pyqtSignal(str, object)
+    _active_workers_lock = Lock()
+    _active_workers_by_camera: dict[str, int] = {}
 
     def __init__(self, camera: dict, model: Any, index: int = 0) -> None:
         super().__init__()
@@ -360,10 +362,47 @@ class CameraWorker(QThread):
         self.last_metrics_log_ts = 0.0
         self._runtime_limit_logged = False
         self._record_queue_full_warned = False
+        self._worker_slot_key: str | None = None
         now_mono = time.monotonic()
         self.state.metrics_window_started_ts = now_mono
         self.state.metrics_last_cpu_wall_ts = now_mono
         self.state.metrics_last_cpu_process_ts = time.process_time()
+
+    def _camera_worker_key(self) -> str:
+        camera_type = str(self.camera.get("type", "rtsp")).lower()
+        src = str(self.camera.get("rtsp", ""))
+        if camera_type == "usb":
+            with suppress(Exception):
+                src = str(int(src))
+        return f"{camera_type}:{src}"
+
+    def _acquire_worker_slot(self) -> bool:
+        key = self._camera_worker_key()
+        with self._active_workers_lock:
+            owner = self._active_workers_by_camera.get(key)
+            if owner is not None and owner != self.index:
+                app_log(
+                    "warning",
+                    "duplicate worker blocked",
+                    camera=str(self.camera.get("name", self.index)),
+                    source="worker",
+                    level="WARNING",
+                    details=f"camera_key={key} owner_index={owner} blocked_index={self.index}",
+                )
+                return False
+            self._active_workers_by_camera[key] = self.index
+            self._worker_slot_key = key
+            return True
+
+    def _release_worker_slot(self) -> None:
+        key = self._worker_slot_key
+        if not key:
+            return
+        with self._active_workers_lock:
+            owner = self._active_workers_by_camera.get(key)
+            if owner == self.index:
+                self._active_workers_by_camera.pop(key, None)
+        self._worker_slot_key = None
 
     def set_preview_role(self, role: str) -> None:
         self.preview_role = role if role in {"main", "thumb", "hidden"} else "thumb"
@@ -1008,113 +1047,156 @@ class CameraWorker(QThread):
         self.error_signal.emit(msg, self.index)
 
     def run(self) -> None:
-        while not self.stop_signal:
-            connected = False
-            src = self.camera.get("rtsp", "")
-            if self.camera.get("type") == "usb":
-                with suppress(Exception):
-                    src = int(src)
-            try:
-                self.status_signal.emit("Łączenie…", self.index)
-                app_log("worker", "stream connect attempt", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO", details=str(src))
-                self.state.stream_start_ts = time.monotonic()
-                with degirum_tools.open_video_stream(src) as stream:
-                    self._current_stream = stream
-                    stream_fps = float(stream.get(cv2.CAP_PROP_FPS) or 0.0)
-                    if stream_fps <= 1e-2:
-                        stream_fps = 30.0
-                    self.stream_fps = stream_fps
-                    self.source_fps = float(self.rtsp_fps if self.rtsp_fps > 0 else stream_fps)
-                    self._sync_prerecord_buffer()
-                    source_fps = self.rtsp_fps if self.rtsp_fps > 0 else None
-                    self.state.next_inference_due_ts = 0.0
-                    if not self._runtime_limit_logged and (self.rtsp_fps > 0 or self.fps <= 2):
-                        self._runtime_limit_logged = True
-                        app_log("performance", "camera runtime limited by config", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO", details=f"rtsp_fps={self.rtsp_fps} detect_fps={self.fps}")
+        if not self._acquire_worker_slot():
+            self.status_signal.emit("Zduplikowany worker zablokowany", self.index)
+            return
+        try:
+            while not self.stop_signal:
+                connected = False
+                src = self.camera.get("rtsp", "")
+                if self.camera.get("type") == "usb":
+                    with suppress(Exception):
+                        src = int(src)
+                try:
+                    self.status_signal.emit("Łączenie…", self.index)
+                    app_log("worker", "stream connect attempt", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO", details=str(src))
+                    self.state.stream_start_ts = time.monotonic()
+                    with degirum_tools.open_video_stream(src) as stream:
+                        self._current_stream = stream
+                        stream_fps = float(stream.get(cv2.CAP_PROP_FPS) or 0.0)
+                        if stream_fps <= 1e-2:
+                            stream_fps = 30.0
+                        self.stream_fps = stream_fps
+                        self.source_fps = float(self.rtsp_fps if self.rtsp_fps > 0 else stream_fps)
+                        self._sync_prerecord_buffer()
+                        source_fps = self.rtsp_fps if self.rtsp_fps > 0 else None
+                        self.state.next_inference_due_ts = 0.0
+                        if not self._runtime_limit_logged and (self.rtsp_fps > 0 or self.fps <= 2):
+                            self._runtime_limit_logged = True
+                            app_log("performance", "camera runtime limited by config", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO", details=f"rtsp_fps={self.rtsp_fps} detect_fps={self.fps}")
 
-                    for frame in degirum_tools.video_source(stream, fps=source_fps):
-                        now_mono = time.monotonic()
-                        if now_mono - self.last_frame_ts > self.stream_stall_seconds and self.last_frame_ts > 0:
-                            self.last_stream_reset_ts = now_mono
-                            self.error_counter += 1
-                            app_log("warning", "stream stall detected", camera=str(self.camera.get("name", self.index)), source="worker", level="WARNING")
-                            break
-                        if self.stop_signal:
-                            break
-                        if frame is None:
-                            self.error_signal.emit("Brak sygnału: pusta klatka", self.index)
-                            self.error_counter += 1
-                            app_log("warning", "empty frame received", camera=str(self.camera.get("name", self.index)), source="worker", level="WARNING", details=f"consecutive_errors={self.error_counter}")
-                            if self.error_counter > 10:
-                                self.last_stream_reset_ts = time.monotonic()
+                        video_iter = iter(degirum_tools.video_source(stream, fps=source_fps))
+                        frame_retry_count = 0
+                        iterator_restart_count = 0
+                        while not self.stop_signal:
+                            try:
+                                frame = next(video_iter)
+                            except StopIteration:
+                                iterator_restart_count += 1
+                                app_log("warning", "restart video iterator", camera=str(self.camera.get("name", self.index)), source="worker", level="WARNING", details=f"reason=stop_iteration restart_count={iterator_restart_count}")
+                                if iterator_restart_count >= 3:
+                                    app_log("warning", "reconnect stream", camera=str(self.camera.get("name", self.index)), source="worker", level="WARNING", details="reason=iterator_exhausted")
+                                    break
+                                video_iter = iter(degirum_tools.video_source(stream, fps=source_fps))
+                                QThread.msleep(20)
+                                continue
+                            except Exception as frame_exc:
+                                frame_retry_count += 1
+                                self.error_counter += 1
+                                app_log("warning", "frame read failed", camera=str(self.camera.get("name", self.index)), source="worker", level="WARNING", details=f"retry_count={frame_retry_count} error={frame_exc}")
+                                if frame_retry_count <= 3:
+                                    app_log("warning", "retry frame", camera=str(self.camera.get("name", self.index)), source="worker", level="WARNING", details=f"attempt={frame_retry_count}")
+                                    QThread.msleep(40)
+                                    continue
+                                iterator_restart_count += 1
+                                app_log("warning", "restart video iterator", camera=str(self.camera.get("name", self.index)), source="worker", level="WARNING", details=f"reason=frame_exception restart_count={iterator_restart_count}")
+                                frame_retry_count = 0
+                                if iterator_restart_count >= 3:
+                                    app_log("warning", "reconnect stream", camera=str(self.camera.get("name", self.index)), source="worker", level="WARNING", details=f"reason=frame_exception error={frame_exc}")
+                                    break
+                                video_iter = iter(degirum_tools.video_source(stream, fps=source_fps))
+                                QThread.msleep(80)
+                                continue
+
+                            frame_retry_count = 0
+                            iterator_restart_count = 0
+                            now_mono = time.monotonic()
+                            if now_mono - self.last_frame_ts > self.stream_stall_seconds and self.last_frame_ts > 0:
+                                self.last_stream_reset_ts = now_mono
+                                self.error_counter += 1
+                                app_log("warning", "stream stall detected", camera=str(self.camera.get("name", self.index)), source="worker", level="WARNING")
                                 break
-                            continue
-                        if self.restart_requested:
-                            self.restart_requested = False
-                            break
+                            if self.stop_signal:
+                                break
+                            if frame is None:
+                                self.error_signal.emit("Brak sygnału: pusta klatka", self.index)
+                                self.error_counter += 1
+                                app_log("warning", "empty frame received", camera=str(self.camera.get("name", self.index)), source="worker", level="WARNING", details=f"consecutive_errors={self.error_counter}")
+                                if self.error_counter > 10:
+                                    self.last_stream_reset_ts = time.monotonic()
+                                    break
+                                continue
+                            if self.restart_requested:
+                                self.restart_requested = False
+                                break
 
+                            self.error_counter = 0
+                            if not connected:
+                                self.status_signal.emit("Połączono", self.index)
+                                app_log("worker", "stream connected", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO")
+                                connected = True
+
+                            raw_frame, preview_frame = self._capture_next_frame(frame, now_mono)
+                            inference_result, detected, best_label, best_score, best_bbox, overlays = self._maybe_run_inference(raw_frame, now_mono)
+
+                            if detected:
+                                self.positive_detection_count += 1
+                                self.state.positive_detections += 1
+                                self.detection_last_seen_ts = now_mono
+                                self.state.last_detection_ts = now_mono
+                                self.pending_miss_count = 0
+                                self.pending_positive_hits += 1
+                                if not self.detection_active:
+                                    app_log("worker", "detection became active", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO")
+                                self.detection_active = True
+                                if not self.recording and self._should_start_recording_now():
+                                    started = self._start_recording_session(raw_frame, preview_frame, best_label or "object", best_score, best_bbox, stream_fps, float(self.fps))
+                                    if started:
+                                        self.alert_signal.emit({
+                                            "camera": self.camera["name"], "label": best_label or "object", "confidence": float(best_score),
+                                            "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                            "frame": self._make_detection_overlay_frame(preview_frame, best_bbox, best_label or "object", best_score),
+                                            "filepath": self.output_file or "", "thumb": self.current_event_thumbnail_path,
+                                            "alert_thumb": self.current_event_scene_thumbnail_path,
+                                        })
+                                if self.recording:
+                                    self.current_event_confidence = max(self.current_event_confidence, best_score)
+                                    self.current_event_detection_count += 1
+                                    self.current_event_confidence_sum += float(best_score)
+                                    self.current_event_max_confidence = max(self.current_event_max_confidence, float(best_score))
+                                    self._update_event_thumbnail(preview_frame, best_bbox, best_label or "object", best_score)
+                            else:
+                                if inference_result is not None:
+                                    self.pending_miss_count += 1
+                                    if not self.recording:
+                                        self.pending_positive_hits = 0
+
+                            self._maybe_enqueue_record_frame(raw_frame, now_mono)
+                            self._maybe_emit_preview(preview_frame, overlays, now_mono)
+                            detection_interval = 1.0 / max(1e-3, self.fps * (1.0 if self.recording else self.detect_fps_factor))
+                            self._maybe_log_metrics(detection_interval)
+                            self._maybe_emit_heartbeat()
+
+                        with suppress(Exception):
+                            stream.release()
+
+                except Exception as exc:  # pragma: no cover
+                    self._current_stream = None
+                    logger.exception("Worker stream failure")
+                    app_log("error", "worker stream exception", camera=str(self.camera.get("name", self.index)), source="worker", level="ERROR", details=str(exc), traceback=traceback.format_exc())
+                    self._handle_stream_failure(exc)
+                    if self.error_counter > 10:
+                        QThread.msleep(2000)
                         self.error_counter = 0
-                        if not connected:
-                            self.status_signal.emit("Połączono", self.index)
-                            app_log("worker", "stream connected", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO")
-                            connected = True
 
-                        raw_frame, preview_frame = self._capture_next_frame(frame, now_mono)
-                        inference_result, detected, best_label, best_score, best_bbox, overlays = self._maybe_run_inference(raw_frame, now_mono)
-
-                        if detected:
-                            self.positive_detection_count += 1
-                            self.state.positive_detections += 1
-                            self.detection_last_seen_ts = now_mono
-                            self.state.last_detection_ts = now_mono
-                            self.pending_miss_count = 0
-                            self.pending_positive_hits += 1
-                            if not self.detection_active:
-                                app_log("worker", "detection became active", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO")
-                            self.detection_active = True
-                            if not self.recording and self._should_start_recording_now():
-                                started = self._start_recording_session(raw_frame, preview_frame, best_label or "object", best_score, best_bbox, stream_fps, float(self.fps))
-                                if started:
-                                    self.alert_signal.emit({
-                                        "camera": self.camera["name"], "label": best_label or "object", "confidence": float(best_score),
-                                        "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                        "frame": self._make_detection_overlay_frame(preview_frame, best_bbox, best_label or "object", best_score),
-                                        "filepath": self.output_file or "", "thumb": self.current_event_thumbnail_path,
-                                        "alert_thumb": self.current_event_scene_thumbnail_path,
-                                    })
-                            if self.recording:
-                                self.current_event_confidence = max(self.current_event_confidence, best_score)
-                                self.current_event_detection_count += 1
-                                self.current_event_confidence_sum += float(best_score)
-                                self.current_event_max_confidence = max(self.current_event_max_confidence, float(best_score))
-                                self._update_event_thumbnail(preview_frame, best_bbox, best_label or "object", best_score)
-                        else:
-                            if inference_result is not None:
-                                self.pending_miss_count += 1
-                                if not self.recording:
-                                    self.pending_positive_hits = 0
-
-                        self._maybe_enqueue_record_frame(raw_frame, now_mono)
-                        self._maybe_emit_preview(preview_frame, overlays, now_mono)
-                        detection_interval = 1.0 / max(1e-3, self.fps * (1.0 if self.recording else self.detect_fps_factor))
-                        self._maybe_log_metrics(detection_interval)
-                        self._maybe_emit_heartbeat()
-
-            except Exception as exc:  # pragma: no cover
+                if self.recording:
+                    self._finalize_recording_session()
                 self._current_stream = None
-                logger.exception("Worker stream failure")
-                app_log("error", "worker stream exception", camera=str(self.camera.get("name", self.index)), source="worker", level="ERROR", details=str(exc), traceback=traceback.format_exc())
-                self._handle_stream_failure(exc)
-                if self.error_counter > 10:
-                    QThread.msleep(2000)
-                    self.error_counter = 0
-
-            if self.recording:
-                self._finalize_recording_session()
-            self._current_stream = None
-            if self.stop_signal:
-                break
-            QThread.msleep(300)
+                if self.stop_signal:
+                    break
+                QThread.msleep(300)
+        finally:
+            self._release_worker_slot()
 
     def stop(self, timeout_ms: int = 3500) -> bool:
         app_log("worker", "worker stop begin", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO", details=f"timeout_ms={timeout_ms}")
