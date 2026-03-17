@@ -345,3 +345,24 @@ def test_thumb_hidden_role_downscales_payload_before_emit():
     assert emitted_main[-1].shape[0] <= 180
     assert emitted_thumb[-1].shape[1] <= 320
     assert emitted_thumb[-1].shape[0] <= 180
+
+def test_duplicate_worker_slot_is_blocked_for_same_camera_source():
+    first = CameraWorker(camera={"name": "CamA", "rtsp": "rtsp://same"}, model=_DummyModel(), index=1)
+    second = CameraWorker(camera={"name": "CamB", "rtsp": "rtsp://same"}, model=_DummyModel(), index=2)
+
+    assert first._acquire_worker_slot() is True
+    try:
+        assert second._acquire_worker_slot() is False
+    finally:
+        first._release_worker_slot()
+        second._release_worker_slot()
+
+
+def test_worker_slot_release_allows_new_worker_after_cleanup():
+    first = CameraWorker(camera={"name": "CamA", "rtsp": "rtsp://again"}, model=_DummyModel(), index=10)
+    second = CameraWorker(camera={"name": "CamB", "rtsp": "rtsp://again"}, model=_DummyModel(), index=11)
+
+    assert first._acquire_worker_slot() is True
+    first._release_worker_slot()
+    assert second._acquire_worker_slot() is True
+    second._release_worker_slot()
