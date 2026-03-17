@@ -7,7 +7,7 @@ from typing import Dict, List, Mapping, Sequence
 
 import cv2
 import numpy as np
-from PyQt5.QtCore import QDate, QObject, QPoint, QRunnable, QSize, Qt, QThreadPool, pyqtSignal, pyqtSlot
+from PyQt5.QtCore import QDate, QObject, QPoint, QRunnable, QSize, Qt, QThreadPool, QTimer, pyqtSignal, pyqtSlot
 from PyQt5.QtGui import QImage, QPalette, QPixmap, QColor, QPainter
 from PyQt5.QtWidgets import (
     QAbstractItemView,
@@ -35,7 +35,7 @@ from ..recordings import (
     CameraDirectory,
     RecordingMetadata,
     default_filter_bounds,
-    load_recording_entries,
+    iter_recording_entries_progressive,
     thumbnail_candidates_for_entry,
 )
 from ..storage import remove_from_recordings_catalog
@@ -115,6 +115,51 @@ class ThumbnailTask(QRunnable):
         return QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy()
 
 
+class RefreshTaskSignals(QObject):
+    started = pyqtSignal(int)
+    chunk = pyqtSignal(int, object, object)
+    ready = pyqtSignal(int, object, object)
+    failed = pyqtSignal(int, str)
+
+
+class RefreshTask(QRunnable):
+    def __init__(
+        self,
+        request_id: int,
+        camera_dirs: Sequence[CameraDirectory],
+        history_source: object,
+    ) -> None:
+        super().__init__()
+        self._request_id = int(request_id)
+        self._camera_dirs = list(camera_dirs)
+        self._history_source = history_source
+        self.signals = RefreshTaskSignals()
+        self.setAutoDelete(True)
+
+    def run(self) -> None:  # pragma: no cover - async GUI path
+        try:
+            self.signals.started.emit(self._request_id)
+            entries: List[RecordingMetadata] = []
+            diagnostics: Dict[str, object] = {}
+            for chunk, progress in iter_recording_entries_progressive(
+                self._camera_dirs,
+                self._history_source,
+                prefer_catalog=True,
+                allow_disk_fallback=True,
+                heal_catalog=True,
+                chunk_size=120,
+            ):
+                phase = str(progress.get("phase", ""))
+                if phase != "final":
+                    continue
+                entries.extend(chunk)
+                diagnostics = dict(progress.get("diagnostics") or diagnostics)
+                self.signals.chunk.emit(self._request_id, list(chunk), dict(progress))
+            self.signals.ready.emit(self._request_id, entries, diagnostics)
+        except Exception as exc:
+            self.signals.failed.emit(self._request_id, str(exc))
+
+
 class RecordingCardWidget(QWidget):
     def __init__(self, entry: RecordingMetadata, thumb_size: QSize, parent: QWidget | None = None):
         super().__init__(parent)
@@ -173,6 +218,9 @@ class RecordingCardWidget(QWidget):
 
 class RecordingsBrowserDialog(QDialog):
     open_video = pyqtSignal(str)
+    refresh_started = pyqtSignal(int)
+    refresh_ready = pyqtSignal(int, object, object)
+    refresh_failed = pyqtSignal(int, str)
 
     def __init__(
         self,
@@ -204,6 +252,18 @@ class RecordingsBrowserDialog(QDialog):
         self.thumbnail_pool.setMaxThreadCount(2)
         self._tile_view_dirty = True
         self._table_view_dirty = True
+        self._refresh_request_seq = 0
+        self._active_refresh_request_id = 0
+        self._refresh_tasks: Dict[int, RefreshTask] = {}
+        self._refresh_active = False
+        self._spinner_timer = QTimer(self)
+        self._spinner_timer.setInterval(140)
+        self._spinner_phase = 0
+        self._spinner_timer.timeout.connect(self._update_loading_status)
+
+        self.refresh_started.connect(self._on_refresh_started, Qt.QueuedConnection)
+        self.refresh_ready.connect(self._on_refresh_ready, Qt.QueuedConnection)
+        self.refresh_failed.connect(self._on_refresh_failed, Qt.QueuedConnection)
 
         self._class_options: Dict[str, str] = {str(c).casefold(): str(c) for c in VISIBLE_CLASSES}
         self._apply_light_theme()
@@ -328,26 +388,80 @@ class RecordingsBrowserDialog(QDialog):
         return layout
 
     def refresh(self, retry_failed: bool = True) -> None:
-        self.refresh_btn.setEnabled(False)
-        try:
-            history_source = self._history_items if self._history_items is not None else self._history_path
-            if retry_failed:
-                for failed_key in list(self._failed_thumbnails):
-                    self.thumbnail_cache.pop(failed_key, None)
-                self._failed_thumbnails.clear()
-            app_log("browser", "refresh recordings browser", source="recordings-browser", level="INFO")
-            entries, diag = load_recording_entries(self._camera_dirs, history_source, prefer_catalog=True, allow_disk_fallback=True, heal_catalog=True)
-            self._entries = entries
-            self._load_diagnostics = diag
+        history_source = self._history_items if self._history_items is not None else self._history_path
+        if retry_failed:
+            for failed_key in list(self._failed_thumbnails):
+                self.thumbnail_cache.pop(failed_key, None)
+            self._failed_thumbnails.clear()
 
-            self._ensure_class_filter_entries(entries)
-            self._set_default_date_bounds(entries)
-            self._apply_filters()
-        except Exception as exc:
-            app_log("error", "browser refresh failure", source="recordings-browser", level="ERROR", details=str(exc), traceback=traceback.format_exc())
-            QMessageBox.warning(self, "Nagrania", f"Nie udało się odczytać nagrań: {exc}")
-        finally:
-            self.refresh_btn.setEnabled(True)
+        self._refresh_request_seq += 1
+        request_id = self._refresh_request_seq
+        self._active_refresh_request_id = request_id
+        self.refresh_started.emit(request_id)
+        app_log("browser", "refresh recordings browser", source="recordings-browser", level="INFO", details=f"request_id={request_id}")
+
+        task = RefreshTask(request_id, self._camera_dirs, history_source)
+        task.signals.started.connect(self.refresh_started.emit, Qt.QueuedConnection)
+        task.signals.ready.connect(self.refresh_ready.emit, Qt.QueuedConnection)
+        task.signals.failed.connect(self.refresh_failed.emit, Qt.QueuedConnection)
+        task.signals.chunk.connect(self._on_refresh_chunk, Qt.QueuedConnection)
+        self._refresh_tasks[request_id] = task
+        self.thumbnail_pool.start(task)
+
+    @pyqtSlot(int)
+    def _on_refresh_started(self, request_id: int) -> None:
+        if request_id != self._active_refresh_request_id:
+            return
+        self._refresh_active = True
+        self.refresh_btn.setEnabled(False)
+        self.status_label.setText("Wczytywanie nagrań...")
+        self._spinner_phase = 0
+        if not self._spinner_timer.isActive():
+            self._spinner_timer.start()
+
+    @pyqtSlot(int, object, object)
+    def _on_refresh_ready(self, request_id: int, entries: object, diagnostics: object) -> None:
+        self._refresh_tasks.pop(request_id, None)
+        if request_id != self._active_refresh_request_id:
+            return
+        self._refresh_active = False
+        if self._spinner_timer.isActive():
+            self._spinner_timer.stop()
+        self.refresh_btn.setEnabled(True)
+        self._entries = list(entries) if isinstance(entries, list) else []
+        self._load_diagnostics = dict(diagnostics or {}) if isinstance(diagnostics, dict) else {}
+        self._ensure_class_filter_entries(self._entries)
+        self._set_default_date_bounds(self._entries)
+        self._apply_filters()
+
+    @pyqtSlot(int, str)
+    def _on_refresh_failed(self, request_id: int, reason: str) -> None:
+        self._refresh_tasks.pop(request_id, None)
+        if request_id != self._active_refresh_request_id:
+            return
+        self._refresh_active = False
+        if self._spinner_timer.isActive():
+            self._spinner_timer.stop()
+        self.refresh_btn.setEnabled(True)
+        app_log("error", "browser refresh failure", source="recordings-browser", level="ERROR", details=reason)
+        QMessageBox.warning(self, "Nagrania", f"Nie udało się odczytać nagrań: {reason}")
+
+    @pyqtSlot(int, object, object)
+    def _on_refresh_chunk(self, request_id: int, chunk: object, progress: object) -> None:
+        if request_id != self._active_refresh_request_id:
+            return
+        chunk_len = len(chunk) if isinstance(chunk, list) else 0
+        total = chunk_len
+        if isinstance(progress, dict):
+            total = int(progress.get("offset", 0) or 0) + chunk_len
+        self.status_label.setText(f"Wczytywanie... {total} nagrań")
+
+    def _update_loading_status(self) -> None:
+        if not self._refresh_active:
+            return
+        frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        self._spinner_phase = (self._spinner_phase + 1) % len(frames)
+        self.status_label.setText(f"{frames[self._spinner_phase]} Wczytywanie nagrań...")
 
     def _set_default_date_bounds(self, entries: Sequence[RecordingMetadata]) -> None:
         dfrom, dto = default_filter_bounds(entries)
