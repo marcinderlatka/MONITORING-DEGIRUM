@@ -547,6 +547,99 @@ def load_recording_entries(
     return merged, diagnostics
 
 
+def iter_recording_entries_progressive(
+    camera_dirs: Sequence[CameraDirectory],
+    history_source: HistorySource,
+    *,
+    prefer_catalog: bool = True,
+    allow_disk_fallback: bool = True,
+    heal_catalog: bool = True,
+    chunk_size: int = 100,
+) -> Iterator[tuple[List[RecordingMetadata], Dict[str, object]]]:
+    """Yield recording entries progressively in timestamp-sorted chunks.
+
+    Each yielded item is ``(entries_chunk, progress_info)`` where
+    ``progress_info`` contains at least ``phase`` and may contain a
+    ``diagnostics`` dict for the final phase.
+    """
+
+    safe_chunk = max(1, int(chunk_size or 1))
+    history = load_history_metadata(history_source)
+
+    catalog_entries = list(iter_catalog_entries(camera_dirs, history_meta=history)) if prefer_catalog else []
+    valid_catalog_entries = [entry for entry in catalog_entries if os.path.exists(entry.filepath)]
+    should_scan_disk = allow_disk_fallback and (
+        not valid_catalog_entries
+        or len(valid_catalog_entries) < len(catalog_entries)
+    )
+
+    preliminary = sorted(valid_catalog_entries, key=lambda item: item.timestamp, reverse=True)
+    for idx in range(0, len(preliminary), safe_chunk):
+        yield preliminary[idx: idx + safe_chunk], {
+            "phase": "catalog",
+            "catalog_entries": len(catalog_entries),
+            "valid_catalog_entries": len(valid_catalog_entries),
+            "should_scan_disk": bool(should_scan_disk),
+        }
+
+    disk_entries: List[RecordingMetadata] = []
+    if should_scan_disk:
+        scanned_chunk: List[RecordingMetadata] = []
+        for entry in discover_recordings(camera_dirs, history):
+            scanned_chunk.append(entry)
+            if len(scanned_chunk) >= safe_chunk:
+                yield list(scanned_chunk), {
+                    "phase": "disk_scan",
+                    "catalog_entries": len(catalog_entries),
+                    "valid_catalog_entries": len(valid_catalog_entries),
+                    "should_scan_disk": True,
+                }
+                disk_entries.extend(scanned_chunk)
+                scanned_chunk.clear()
+        if scanned_chunk:
+            yield list(scanned_chunk), {
+                "phase": "disk_scan",
+                "catalog_entries": len(catalog_entries),
+                "valid_catalog_entries": len(valid_catalog_entries),
+                "should_scan_disk": True,
+            }
+            disk_entries.extend(scanned_chunk)
+
+    merged, disk_only = merge_recording_entries(valid_catalog_entries, disk_entries, hide_missing_files=True)
+
+    if heal_catalog and disk_only:
+        for entry in disk_only:
+            payload: Dict[str, object] = {
+                "filepath": entry.filepath,
+                "file": entry.filepath,
+                "camera": entry.camera,
+                "label": entry.label,
+                "confidence": entry.confidence,
+                "time": entry.display_time,
+                "timestamp": entry.timestamp,
+                "thumb": entry.thumb_path,
+            }
+            payload.update(entry.extra)
+            update_recordings_catalog(payload)
+
+    diagnostics: Dict[str, object] = {
+        "catalog_entries": len(catalog_entries),
+        "valid_catalog_entries": len(valid_catalog_entries),
+        "disk_entries": len(disk_entries),
+        "disk_only_entries": len(disk_only),
+        "used_disk_fallback": bool(should_scan_disk and disk_entries),
+        "catalog_incomplete": len(valid_catalog_entries) < len(catalog_entries),
+    }
+
+    for idx in range(0, len(merged), safe_chunk):
+        yield merged[idx: idx + safe_chunk], {
+            "phase": "final",
+            "diagnostics": diagnostics,
+            "total": len(merged),
+            "offset": idx,
+        }
+
+
 __all__ = [
     "CameraDirectory",
     "RecordingMetadata",
@@ -556,6 +649,7 @@ __all__ = [
     "discover_recordings",
     "default_filter_bounds",
     "iter_catalog_entries",
+    "iter_recording_entries_progressive",
     "load_recording_entries",
     "merge_recording_entries",
     "load_history_metadata",
