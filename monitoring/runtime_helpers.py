@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import logging
 from dataclasses import dataclass
 from threading import Lock
 from typing import Callable
@@ -10,6 +11,7 @@ from typing import Callable
 
 _APP_LOGGER: Callable[..., object] | None = None
 _LOGGER_LOCK = Lock()
+_FALLBACK_LOGGER = logging.getLogger(__name__)
 
 
 def register_app_logger(logger_callable: Callable[..., object] | None) -> None:
@@ -21,12 +23,23 @@ def register_app_logger(logger_callable: Callable[..., object] | None) -> None:
 
 def app_log(group: str, message: str, **kwargs) -> bool:
     """Forward a structured log entry to UI bridge if available."""
+    if "traceback" in kwargs and "traceback_text" not in kwargs:
+        kwargs["traceback_text"] = kwargs.pop("traceback")
+    details = str(kwargs.get("details", "") or "")
+    traceback_text = str(kwargs.get("traceback_text", "") or "")
+    if traceback_text and traceback_text not in details:
+        kwargs["details"] = f"{details}\n\n{traceback_text}".strip() if details else traceback_text
+
     with _LOGGER_LOCK:
         logger_callable = _APP_LOGGER
     if logger_callable is None:
         return False
-    logger_callable(group=group, message=message, **kwargs)
-    return True
+    try:
+        logger_callable(group=group, message=message, **kwargs)
+        return True
+    except Exception:
+        _FALLBACK_LOGGER.exception("app_log forwarding failed: group=%s message=%s", group, message)
+        return False
 
 
 def classify_camera_setting_changes(old_camera: dict, new_camera: dict, restart_required_fields: set[str]) -> tuple[list[str], list[str]]:

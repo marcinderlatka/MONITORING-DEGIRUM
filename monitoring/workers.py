@@ -835,7 +835,7 @@ class CameraWorker(QThread):
         try:
             result = self.model.predict(raw_frame)
         except Exception as exc:
-            app_log("error", "model prediction failure", camera=str(self.camera.get("name", self.index)), source="worker", level="ERROR", details=str(exc), traceback=traceback.format_exc())
+            app_log("error", "model prediction failure", camera=str(self.camera.get("name", self.index)), source="worker", level="ERROR", details=f"{exc}\n\n{traceback.format_exc()}")
             self.error_signal.emit("Błąd predykcji modelu", self.index)
             return None, detected, best_label, best_score, best_bbox, overlays
         self.state.last_inference_ts = now_mono
@@ -1043,7 +1043,7 @@ class CameraWorker(QThread):
             msg = "No route to host"
         else:
             msg = str(exc)
-        app_log("error", f"stream failure: {msg}", camera=str(self.camera.get("name", self.index)), source="worker", level="ERROR", details=str(exc), traceback=traceback.format_exc())
+        app_log("error", f"stream failure: {msg}", camera=str(self.camera.get("name", self.index)), source="worker", level="ERROR", details=f"{exc}\n\n{traceback.format_exc()}")
         self.error_signal.emit(msg, self.index)
 
     def run(self) -> None:
@@ -1051,6 +1051,7 @@ class CameraWorker(QThread):
             self.status_signal.emit("Zduplikowany worker zablokowany", self.index)
             return
         try:
+            app_log("worker", "CameraWorker run v2 active", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO", details=f"worker_index={self.index} camera_key={self._camera_worker_key()}")
             while not self.stop_signal:
                 connected = False
                 src = self.camera.get("rtsp", "")
@@ -1183,7 +1184,7 @@ class CameraWorker(QThread):
                 except Exception as exc:  # pragma: no cover
                     self._current_stream = None
                     logger.exception("Worker stream failure")
-                    app_log("error", "worker stream exception", camera=str(self.camera.get("name", self.index)), source="worker", level="ERROR", details=str(exc), traceback=traceback.format_exc())
+                    app_log("error", "worker stream exception", camera=str(self.camera.get("name", self.index)), source="worker", level="ERROR", details=f"{exc}\n\n{traceback.format_exc()}")
                     self._handle_stream_failure(exc)
                     if self.error_counter > 10:
                         QThread.msleep(2000)

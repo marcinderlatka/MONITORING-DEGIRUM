@@ -43,8 +43,8 @@ from ..runtime_helpers import app_log
 
 
 class ThumbnailTaskSignals(QObject):
-    ready = pyqtSignal(str, object, str)
-    failed = pyqtSignal(str, str)
+    ready = pyqtSignal(str, object, str, int)
+    failed = pyqtSignal(str, str, int)
 
 
 class ThumbnailTask(QRunnable):
@@ -54,10 +54,11 @@ class ThumbnailTask(QRunnable):
     multiple-inheritance lifetime issues.
     """
 
-    def __init__(self, entry: RecordingMetadata, allow_mp4_fallback: bool = False):
+    def __init__(self, entry: RecordingMetadata, allow_mp4_fallback: bool = False, request_token: int = 0):
         super().__init__()
         self._entry = entry
         self._allow_mp4_fallback = bool(allow_mp4_fallback)
+        self._request_token = int(request_token)
         self.signals = ThumbnailTaskSignals()
         self.setAutoDelete(True)
 
@@ -65,12 +66,12 @@ class ThumbnailTask(QRunnable):
         try:
             image, source = self._load_image()
             if image is None or image.isNull():
-                self.signals.failed.emit(self._entry.filepath, source or "brak poprawnej miniatury")
+                self.signals.failed.emit(self._entry.filepath, source or "brak poprawnej miniatury", self._request_token)
                 return
-            self.signals.ready.emit(self._entry.filepath, image, source)
+            self.signals.ready.emit(self._entry.filepath, image, source, self._request_token)
         except Exception as exc:  # pragma: no cover - defensive async path
-            app_log("error", "thumbnail task crash", source="recordings-browser", level="ERROR", details=f"filepath={self._entry.filepath}; error={exc}", traceback=traceback.format_exc())
-            self.signals.failed.emit(self._entry.filepath, f"thumbnail task crash: {exc}")
+            app_log("error", "thumbnail task crash", source="recordings-browser", level="ERROR", details=f"filepath={self._entry.filepath}; error={exc}\n\n{traceback.format_exc()}")
+            self.signals.failed.emit(self._entry.filepath, f"thumbnail task crash: {exc}", self._request_token)
 
     def _load_image(self) -> tuple[QImage | None, str]:
         candidates = thumbnail_candidates_for_entry(self._entry)
@@ -98,7 +99,7 @@ class ThumbnailTask(QRunnable):
                     return QImage(), "mp4-open-failed"
                 ok, frame = cap.read()
             except Exception as exc:
-                app_log("error", "thumbnail worker exception", source="recordings-browser", level="ERROR", details=str(exc), traceback=traceback.format_exc())
+                app_log("error", "thumbnail worker exception", source="recordings-browser", level="ERROR", details=f"{exc}\n\n{traceback.format_exc()}")
                 ok, frame = False, None
             finally:
                 cap.release()
@@ -254,6 +255,9 @@ class RecordingsBrowserDialog(QDialog):
         self._failed_thumbnails: set[str] = set()
         self._thumbnail_tasks: Dict[str, ThumbnailTask] = {}
         self._thumbnail_entries: Dict[str, RecordingMetadata] = {}
+        self._thumbnail_request_tokens: Dict[str, int] = {}
+        self._thumbnail_generation = 0
+        self._thumbnail_buffer_items = 8
         self._mp4_fallback_requested: set[str] = set()
         self._tile_items: Dict[str, QListWidgetItem] = {}
         self._tile_cards: Dict[str, RecordingCardWidget] = {}
@@ -374,6 +378,7 @@ class RecordingsBrowserDialog(QDialog):
         self.tile_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tile_list.customContextMenuRequested.connect(self._context_menu)
         self.tile_list.itemSelectionChanged.connect(self._sync_card_selection_state)
+        self.tile_list.verticalScrollBar().valueChanged.connect(lambda *_: self._schedule_visible_thumbnail_requests())
         self.tile_list.itemDoubleClicked.connect(self._tile_double_clicked)
         self._view_stack.addWidget(self.tile_list)
 
@@ -408,6 +413,7 @@ class RecordingsBrowserDialog(QDialog):
             self._failed_thumbnails.clear()
 
         self._refresh_request_seq += 1
+        self._thumbnail_generation += 1
         request_id = self._refresh_request_seq
         self._active_refresh_request_id = request_id
         app_log("browser", "refresh recordings browser", source="recordings-browser", level="INFO", details=f"request_id={request_id}")
@@ -592,7 +598,8 @@ class RecordingsBrowserDialog(QDialog):
                 else:
                     card.set_thumbnail_success(cached)
             else:
-                self._start_thumbnail_request(entry, allow_mp4_fallback=False)
+                self._thumbnail_entries[key] = entry
+        self._schedule_visible_thumbnail_requests()
 
     def _rebuild_table_view(self, entries: Sequence[RecordingMetadata]) -> None:
         self.table.setSortingEnabled(False)
@@ -626,7 +633,8 @@ class RecordingsBrowserDialog(QDialog):
             self.table.setItem(row, 7, file_item)
             self._table_rows[key] = row
             if key not in self.thumbnail_cache:
-                self._start_thumbnail_request(entry, allow_mp4_fallback=False)
+                self._thumbnail_entries[key] = entry
+        self._schedule_visible_thumbnail_requests()
         self.table.setSortingEnabled(True)
 
     def _update_empty_state(self) -> None:
@@ -645,6 +653,29 @@ class RecordingsBrowserDialog(QDialog):
         else:
             self.empty_label.hide()
 
+    def _schedule_visible_thumbnail_requests(self) -> None:
+        if self.view_mode.currentText() != "Kafelki":
+            for entry in self._filtered_entries[: max(1, self._thumbnail_buffer_items * 2)]:
+                key = self._thumb_cache_key(entry.filepath)
+                if key not in self.thumbnail_cache:
+                    self._start_thumbnail_request(entry, allow_mp4_fallback=False)
+            return
+        viewport = self.tile_list.viewport().rect()
+        remaining = max(1, self._thumbnail_buffer_items)
+        for idx, entry in enumerate(self._filtered_entries):
+            key = self._thumb_cache_key(entry.filepath)
+            if key in self.thumbnail_cache:
+                continue
+            item = self._tile_items.get(key)
+            visible = False
+            if item is not None:
+                rect = self.tile_list.visualItemRect(item)
+                visible = rect.isValid() and viewport.intersects(rect)
+            if visible or remaining > 0:
+                self._start_thumbnail_request(entry, allow_mp4_fallback=False)
+                if not visible:
+                    remaining -= 1
+
     def _start_thumbnail_request(self, entry: RecordingMetadata, allow_mp4_fallback: bool = False) -> None:
         key = self._thumb_cache_key(entry.filepath)
         self._thumbnail_entries[key] = entry
@@ -661,16 +692,20 @@ class RecordingsBrowserDialog(QDialog):
                 self._apply_thumbnail_to_table(entry.filepath, self.thumbnail_cache[key])
             return
         app_log("browser", "thumbnail task started", source="recordings-browser", level="INFO", details=f"filepath={entry.filepath}; mp4_fallback={allow_mp4_fallback}")
-        task = ThumbnailTask(entry, allow_mp4_fallback=allow_mp4_fallback)
+        request_token = self._thumbnail_generation
+        self._thumbnail_request_tokens[key] = request_token
+        task = ThumbnailTask(entry, allow_mp4_fallback=allow_mp4_fallback, request_token=request_token)
         task.signals.ready.connect(self._on_thumbnail_ready, Qt.QueuedConnection)
         task.signals.failed.connect(self._on_thumbnail_failed, Qt.QueuedConnection)
         self._thumbnail_tasks[key] = task
         self._pending_thumbnails.add(key)
         self.thumbnail_pool.start(task)
 
-    @pyqtSlot(str, object, str)
-    def _on_thumbnail_ready(self, filepath: str, image: object, source: str) -> None:
+    @pyqtSlot(str, object, str, int)
+    def _on_thumbnail_ready(self, filepath: str, image: object, source: str, request_token: int = -1) -> None:
         key = self._thumb_cache_key(filepath)
+        if request_token >= 0 and self._thumbnail_request_tokens.get(key, -1) != int(request_token):
+            return
         self._pending_thumbnails.discard(key)
         self._thumbnail_tasks.pop(key, None)
         if isinstance(image, QImage) and not image.isNull():
@@ -682,11 +717,13 @@ class RecordingsBrowserDialog(QDialog):
             elif source == "mp4-fallback":
                 app_log("browser", "użyto klatki MP4 jako miniatury", source="recordings-browser", level="INFO", details=filepath)
             return
-        self._on_thumbnail_failed(filepath, f"niepoprawny obraz miniatury, źródło={source}")
+        self._on_thumbnail_failed(filepath, f"niepoprawny obraz miniatury, źródło={source}", request_token)
 
-    @pyqtSlot(str, str)
-    def _on_thumbnail_failed(self, filepath: str, reason: str) -> None:
+    @pyqtSlot(str, str, int)
+    def _on_thumbnail_failed(self, filepath: str, reason: str, request_token: int = -1) -> None:
         key = self._thumb_cache_key(filepath)
+        if request_token >= 0 and self._thumbnail_request_tokens.get(key, -1) != int(request_token):
+            return
         self._pending_thumbnails.discard(key)
         self._thumbnail_tasks.pop(key, None)
         if reason == "jpg-missing":
@@ -748,7 +785,7 @@ class RecordingsBrowserDialog(QDialog):
                 if isinstance(widget, QLabel):
                     widget.setPixmap(pixmap)
             except Exception as exc:
-                app_log("error", "thumbnail apply-to-widget failure", source="recordings-browser", level="ERROR", details=str(exc), traceback=traceback.format_exc())
+                app_log("error", "thumbnail apply-to-widget failure", source="recordings-browser", level="ERROR", details=f"{exc}\n\n{traceback.format_exc()}")
 
     def _loading_pixmap(self) -> QPixmap:
         pix = QPixmap(self._thumb_size)
@@ -786,6 +823,7 @@ class RecordingsBrowserDialog(QDialog):
             self._view_stack.setCurrentWidget(self.table)
         if current:
             self._restore_selection(current)
+        self._schedule_visible_thumbnail_requests()
 
     def _is_tile_visible(self, filepath: str) -> bool:
         key = self._thumb_cache_key(filepath)
@@ -930,5 +968,8 @@ class RecordingsBrowserDialog(QDialog):
                 card._set_selected(idx in selected)
 
     def closeEvent(self, event):  # noqa: D401
+        self._thumbnail_generation += 1
+        self._pending_thumbnails.clear()
+        self._thumbnail_tasks.clear()
         self.thumbnail_pool.clear()
         super().closeEvent(event)
