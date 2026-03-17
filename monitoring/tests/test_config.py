@@ -68,6 +68,10 @@ def test_preview_role_defaults_and_config_fill():
     assert updated["preview_fps_main"] == 15
     assert updated["preview_fps_thumb"] == 3
     assert updated["preview_pause_when_hidden"] is True
+    assert updated["preview_main_max_width"] == 1280
+    assert updated["preview_main_max_height"] == 720
+    assert updated["preview_thumb_max_width"] == 320
+    assert updated["preview_thumb_max_height"] == 180
 
 
 def test_overload_config_backward_compat(tmp_path):

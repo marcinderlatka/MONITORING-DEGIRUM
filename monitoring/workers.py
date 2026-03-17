@@ -34,7 +34,11 @@ from .config import (
     DEFAULT_POST_SECONDS,
     DEFAULT_PREVIEW_FPS_MAIN,
     DEFAULT_PREVIEW_FPS_THUMB,
+    DEFAULT_PREVIEW_MAIN_MAX_HEIGHT,
+    DEFAULT_PREVIEW_MAIN_MAX_WIDTH,
     DEFAULT_PREVIEW_PAUSE_WHEN_HIDDEN,
+    DEFAULT_PREVIEW_THUMB_MAX_HEIGHT,
+    DEFAULT_PREVIEW_THUMB_MAX_WIDTH,
     DEFAULT_PRE_SECONDS,
     DEFAULT_RECORD_PATH,
     DEFAULT_RECORD_START_MODE,
@@ -249,7 +253,8 @@ class RecordingThread(QThread):
 
 
 class CameraWorker(QThread):
-    frame_signal = pyqtSignal(object, int)
+    main_preview_signal = pyqtSignal(object, int)
+    thumb_preview_signal = pyqtSignal(object, int)
     alert_signal = pyqtSignal(object)
     error_signal = pyqtSignal(str, int)
     status_signal = pyqtSignal(str, int)
@@ -289,6 +294,10 @@ class CameraWorker(QThread):
         self.preview_fps_main = float(self.camera.get("preview_fps_main", DEFAULT_PREVIEW_FPS_MAIN))
         self.preview_fps_thumb = float(self.camera.get("preview_fps_thumb", DEFAULT_PREVIEW_FPS_THUMB))
         self.preview_pause_when_hidden = bool(self.camera.get("preview_pause_when_hidden", DEFAULT_PREVIEW_PAUSE_WHEN_HIDDEN))
+        self.preview_main_max_width = int(self.camera.get("preview_main_max_width", DEFAULT_PREVIEW_MAIN_MAX_WIDTH))
+        self.preview_main_max_height = int(self.camera.get("preview_main_max_height", DEFAULT_PREVIEW_MAIN_MAX_HEIGHT))
+        self.preview_thumb_max_width = int(self.camera.get("preview_thumb_max_width", DEFAULT_PREVIEW_THUMB_MAX_WIDTH))
+        self.preview_thumb_max_height = int(self.camera.get("preview_thumb_max_height", DEFAULT_PREVIEW_THUMB_MAX_HEIGHT))
         self.preview_role = "thumb"
         self.is_overload_degraded = False
         self.app_overload_mode = False
@@ -474,9 +483,17 @@ class CameraWorker(QThread):
         self.preview_fps_main = float(camera_config.get("preview_fps_main", self.preview_fps_main))
         self.preview_fps_thumb = float(camera_config.get("preview_fps_thumb", self.preview_fps_thumb))
         self.preview_pause_when_hidden = bool(camera_config.get("preview_pause_when_hidden", self.preview_pause_when_hidden))
+        self.preview_main_max_width = int(camera_config.get("preview_main_max_width", self.preview_main_max_width))
+        self.preview_main_max_height = int(camera_config.get("preview_main_max_height", self.preview_main_max_height))
+        self.preview_thumb_max_width = int(camera_config.get("preview_thumb_max_width", self.preview_thumb_max_width))
+        self.preview_thumb_max_height = int(camera_config.get("preview_thumb_max_height", self.preview_thumb_max_height))
         self.camera["preview_fps_main"] = self.preview_fps_main
         self.camera["preview_fps_thumb"] = self.preview_fps_thumb
         self.camera["preview_pause_when_hidden"] = self.preview_pause_when_hidden
+        self.camera["preview_main_max_width"] = self.preview_main_max_width
+        self.camera["preview_main_max_height"] = self.preview_main_max_height
+        self.camera["preview_thumb_max_width"] = self.preview_thumb_max_width
+        self.camera["preview_thumb_max_height"] = self.preview_thumb_max_height
 
         self.camera["pre_seconds"] = self.pre_seconds
         self.camera["lost_seconds"] = self.lost_seconds
@@ -782,6 +799,22 @@ class CameraWorker(QThread):
                     best_score, best_label, best_bbox = confidence, label, scaled
         return result, detected, best_label, best_score, best_bbox, overlays
 
+    @staticmethod
+    def _resize_for_preview(frame: np.ndarray, max_width: int, max_height: int) -> np.ndarray:
+        if frame is None or getattr(frame, "size", 0) == 0:
+            return frame
+        h, w = frame.shape[:2]
+        if h <= 0 or w <= 0:
+            return frame
+        max_w = max(1, int(max_width))
+        max_h = max(1, int(max_height))
+        scale = min(1.0, max_w / float(w), max_h / float(h))
+        if scale >= 0.999:
+            return frame
+        new_w = max(1, int(round(w * scale)))
+        new_h = max(1, int(round(h * scale)))
+        return cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
     def _maybe_emit_preview(self, preview_frame: np.ndarray, overlays: list[tuple[int, int, int, int, str, float, tuple[int, int, int]]], now_mono: float) -> None:
         interval = _preview_interval_for_role(self.preview_role, self.preview_fps_main, self.preview_fps_thumb, self.preview_pause_when_hidden)
         if interval == float("inf"):
@@ -797,14 +830,21 @@ class CameraWorker(QThread):
             self.state.preview_frames_dropped_total += 1
             return
         self.state.preview_frame_skip_counter = 0
-        emit_frame = preview_frame
+        main_emit_frame = preview_frame
         should_draw = bool(overlays) and self.draw_overlays and not (self.preview_role == "hidden") and not (self.app_overload_mode and self.overload_disable_nonessential_overlays and not self.recording)
         if should_draw:
-            emit_frame = preview_frame.copy()
+            main_emit_frame = preview_frame.copy()
             for x1, y1, x2, y2, label, confidence, color in overlays:
-                cv2.rectangle(emit_frame, (x1, y1), (x2, y2), color, 2)
-                cv2.putText(emit_frame, f"{label}: {confidence * 100:.1f}%", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-        self.frame_signal.emit(emit_frame, self.index)
+                cv2.rectangle(main_emit_frame, (x1, y1), (x2, y2), color, 2)
+                cv2.putText(main_emit_frame, f"{label}: {confidence * 100:.1f}%", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+
+        main_emit_frame = self._resize_for_preview(main_emit_frame, self.preview_main_max_width, self.preview_main_max_height)
+        thumb_emit_frame = self._resize_for_preview(main_emit_frame, self.preview_thumb_max_width, self.preview_thumb_max_height)
+        if self.preview_role in {"thumb", "hidden"}:
+            main_emit_frame = thumb_emit_frame
+
+        self.main_preview_signal.emit(main_emit_frame, self.index)
+        self.thumb_preview_signal.emit(thumb_emit_frame, self.index)
         self.state.last_preview_emit_ts = now_mono
         self.state.frames_emitted += 1
 

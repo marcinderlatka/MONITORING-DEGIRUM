@@ -91,7 +91,11 @@ from .config import (
     DEFAULT_POST_SECONDS,
     DEFAULT_PREVIEW_FPS_MAIN,
     DEFAULT_PREVIEW_FPS_THUMB,
+    DEFAULT_PREVIEW_MAIN_MAX_HEIGHT,
+    DEFAULT_PREVIEW_MAIN_MAX_WIDTH,
     DEFAULT_PREVIEW_PAUSE_WHEN_HIDDEN,
+    DEFAULT_PREVIEW_THUMB_MAX_HEIGHT,
+    DEFAULT_PREVIEW_THUMB_MAX_WIDTH,
     DEFAULT_SHOW_CAMERA_INFO_OVERLAY,
     DEFAULT_OVERLOAD_PROTECTION_ENABLED,
     DEFAULT_OVERLOAD_MIN_CAMERA_COUNT,
@@ -1542,7 +1546,8 @@ QToolButton:focus { outline: none; }
 
         # FPS liczniki i HUD stan
         self._fps_times = {}
-        self._last_frame = {}
+        self._last_main_frame = {}
+        self._last_thumb_frame = {}
         self._last_status = {}
         self._last_error = {}
         self._last_fps_text = {}
@@ -1553,6 +1558,10 @@ QToolButton:focus { outline: none; }
         self.preview_fps_main = float(self.config.get("preview_fps_main", DEFAULT_PREVIEW_FPS_MAIN)) if hasattr(self, "config") else DEFAULT_PREVIEW_FPS_MAIN
         self.preview_fps_thumb = float(self.config.get("preview_fps_thumb", DEFAULT_PREVIEW_FPS_THUMB)) if hasattr(self, "config") else DEFAULT_PREVIEW_FPS_THUMB
         self.preview_pause_when_hidden = bool(self.config.get("preview_pause_when_hidden", DEFAULT_PREVIEW_PAUSE_WHEN_HIDDEN)) if hasattr(self, "config") else DEFAULT_PREVIEW_PAUSE_WHEN_HIDDEN
+        self.preview_main_max_width = int(self.config.get("preview_main_max_width", DEFAULT_PREVIEW_MAIN_MAX_WIDTH)) if hasattr(self, "config") else DEFAULT_PREVIEW_MAIN_MAX_WIDTH
+        self.preview_main_max_height = int(self.config.get("preview_main_max_height", DEFAULT_PREVIEW_MAIN_MAX_HEIGHT)) if hasattr(self, "config") else DEFAULT_PREVIEW_MAIN_MAX_HEIGHT
+        self.preview_thumb_max_width = int(self.config.get("preview_thumb_max_width", DEFAULT_PREVIEW_THUMB_MAX_WIDTH)) if hasattr(self, "config") else DEFAULT_PREVIEW_THUMB_MAX_WIDTH
+        self.preview_thumb_max_height = int(self.config.get("preview_thumb_max_height", DEFAULT_PREVIEW_THUMB_MAX_HEIGHT)) if hasattr(self, "config") else DEFAULT_PREVIEW_THUMB_MAX_HEIGHT
         self.overload_protection_enabled = bool(self.config.get("overload_protection_enabled", DEFAULT_OVERLOAD_PROTECTION_ENABLED)) if hasattr(self, "config") else DEFAULT_OVERLOAD_PROTECTION_ENABLED
         self.overload_min_camera_count = int(self.config.get("overload_min_camera_count", DEFAULT_OVERLOAD_MIN_CAMERA_COUNT)) if hasattr(self, "config") else DEFAULT_OVERLOAD_MIN_CAMERA_COUNT
         self.overload_camera_count_threshold = int(self.config.get("overload_camera_count_threshold", DEFAULT_OVERLOAD_CAMERA_COUNT_THRESHOLD)) if hasattr(self, "config") else DEFAULT_OVERLOAD_CAMERA_COUNT_THRESHOLD
@@ -1843,6 +1852,10 @@ QToolButton:focus { outline: none; }
             worker.preview_fps_main = self.preview_fps_main
             worker.preview_fps_thumb = self.preview_fps_thumb
             worker.preview_pause_when_hidden = self.preview_pause_when_hidden
+            worker.preview_main_max_width = self.preview_main_max_width
+            worker.preview_main_max_height = self.preview_main_max_height
+            worker.preview_thumb_max_width = self.preview_thumb_max_width
+            worker.preview_thumb_max_height = self.preview_thumb_max_height
             worker.set_preview_role(role)
 
     def _evaluate_overload_mode(self) -> None:
@@ -1935,7 +1948,12 @@ QToolButton:focus { outline: none; }
         w.preview_fps_main = self.preview_fps_main
         w.preview_fps_thumb = self.preview_fps_thumb
         w.preview_pause_when_hidden = self.preview_pause_when_hidden
-        w.frame_signal.connect(self.update_frame)
+        w.preview_main_max_width = self.preview_main_max_width
+        w.preview_main_max_height = self.preview_main_max_height
+        w.preview_thumb_max_width = self.preview_thumb_max_width
+        w.preview_thumb_max_height = self.preview_thumb_max_height
+        w.main_preview_signal.connect(lambda frame, cam_idx: self.update_frame(frame, cam_idx, "main"))
+        w.thumb_preview_signal.connect(lambda frame, cam_idx: self.update_frame(frame, cam_idx, "thumb"))
         w.alert_signal.connect(self.on_new_alert)
         w.error_signal.connect(self._worker_error)
         w.status_signal.connect(self._worker_status)
@@ -1963,7 +1981,9 @@ QToolButton:focus { outline: none; }
             self._log_warning("worker", "stop_camera timeout", source="app", camera=str(cam.get("name", idx)), details="worker did not stop in timeout window")
 
         with suppress(Exception):
-            w.frame_signal.disconnect(self.update_frame)
+            w.main_preview_signal.disconnect()
+        with suppress(Exception):
+            w.thumb_preview_signal.disconnect()
         with suppress(Exception):
             w.alert_signal.disconnect(self.on_new_alert)
         with suppress(Exception):
@@ -1972,7 +1992,8 @@ QToolButton:focus { outline: none; }
             w.status_signal.disconnect(self._worker_status)
 
         self.workers[idx] = None
-        self._last_frame.pop(idx, None)
+        self._last_main_frame.pop(idx, None)
+        self._last_thumb_frame.pop(idx, None)
         self._last_fps_text[idx] = ""
         self._last_status[idx] = "Zatrzymano"
         self._last_error.pop(idx, None)
@@ -2349,12 +2370,13 @@ QToolButton:focus { outline: none; }
         self._evaluate_overload_mode()
         self._render_current()
 
-    def update_frame(self, frame, index):
+    def update_frame(self, frame, index, quality: str = "main"):
         try:
             idx = int(index)
         except (TypeError, ValueError):
             logger.warning("Ignoring frame with invalid index %r", index)
             return
+        quality_mode = "thumb" if str(quality).lower() == "thumb" else "main"
         is_valid = (
             isinstance(frame, np.ndarray)
             and frame.size > 0
@@ -2365,7 +2387,8 @@ QToolButton:focus { outline: none; }
         if not is_valid:
             self._last_status[idx] = "Brak sygnału (pusta klatka)"
             self._last_error[idx] = "Brak sygnału (pusta klatka)"
-            self._last_frame.pop(idx, None)
+            self._last_main_frame.pop(idx, None)
+            self._last_thumb_frame.pop(idx, None)
             self._last_fps_text[idx] = ""
             self._invalidate_preview_cache(idx)
             if hasattr(self.camera_list, "update_thumbnail_pixmap"):
@@ -2378,23 +2401,28 @@ QToolButton:focus { outline: none; }
 
         self._last_frame_update_ts[idx] = time.monotonic()
         self._invalidate_preview_cache(idx)
-        stage_started = time.perf_counter()
         now_mono = time.monotonic()
-        if now_mono - float(self._last_thumb_update_ts.get(idx, 0.0)) >= self._thumb_update_interval_s:
-            thumb_pm = self._get_scaled_preview_pixmap(idx, "thumb", frame, 192, 108)
+        if quality_mode == "main":
+            self._last_main_frame[idx] = frame
+        else:
+            self._last_thumb_frame[idx] = frame
+
+        stage_started = time.perf_counter()
+        thumb_source = self._last_thumb_frame.get(idx) or self._last_main_frame.get(idx)
+        if thumb_source is not None and now_mono - float(self._last_thumb_update_ts.get(idx, 0.0)) >= self._thumb_update_interval_s:
+            thumb_pm = self._get_scaled_preview_pixmap(idx, "thumb", thumb_source, 192, 108)
             if hasattr(self.camera_list, "update_thumbnail_pixmap"):
                 self.camera_list.update_thumbnail_pixmap(idx, thumb_pm)
             self._last_thumb_update_ts[idx] = now_mono
             self._record_render_stage(idx, "thumb", (time.perf_counter() - stage_started) * 1000.0)
 
         grid_started = time.perf_counter()
-        if self.camera_grid.isVisible():
-            grid_pm = self._get_scaled_preview_pixmap(idx, "grid", frame, 320, 180)
+        if self.camera_grid.isVisible() and thumb_source is not None:
+            grid_pm = self._get_scaled_preview_pixmap(idx, "grid", thumb_source, 320, 180)
             if hasattr(self.camera_grid, "update_pixmap"):
                 self.camera_grid.update_pixmap(idx, grid_pm)
             self._record_render_stage(idx, "grid", (time.perf_counter() - grid_started) * 1000.0)
 
-        # FPS liczenie dla tej kamery
         from time import perf_counter
         t = perf_counter()
         dq = self._fps_times.setdefault(idx, [])
@@ -2408,15 +2436,12 @@ QToolButton:focus { outline: none; }
                 fps_now = (len(dq)-1) / dt
                 fps_txt = f"{fps_now:.1f} fps"
 
-        # zapisz stan
-        self._last_frame[idx] = frame
         self._last_fps_text[idx] = fps_txt
         self._last_status[idx] = "Połączono"
         self._last_error.pop(idx, None)
 
-        if idx == self.camera_list.currentRow():
+        if quality_mode == "main" and idx == self.camera_list.currentRow():
             self._render_current()
-
     def _invalidate_preview_cache(self, idx: int | None = None) -> None:
         if idx is None:
             self._preview_cache.clear()
@@ -2564,7 +2589,7 @@ QToolButton:focus { outline: none; }
             return
         cam_name = str(self.cameras[idx].get("name", idx)) if 0 <= idx < len(self.cameras) else str(idx)
         render_started = time.perf_counter()
-        frame = self._last_frame.get(idx)
+        frame = self._last_main_frame.get(idx)
         composed_qimg = self._compose_letterboxed(
             frame if frame is not None else np.zeros((720, 1280, 3), dtype=np.uint8),
             idx,
