@@ -97,6 +97,7 @@ from .config import (
     DEFAULT_PREVIEW_THUMB_MAX_HEIGHT,
     DEFAULT_PREVIEW_THUMB_MAX_WIDTH,
     DEFAULT_SHOW_CAMERA_INFO_OVERLAY,
+    DEFAULT_CAMERA_INFO_OVERLAY_ALPHA,
     DEFAULT_OVERLOAD_PROTECTION_ENABLED,
     DEFAULT_OVERLOAD_MIN_CAMERA_COUNT,
     DEFAULT_OVERLOAD_CAMERA_COUNT_THRESHOLD,
@@ -2604,7 +2605,9 @@ QToolButton:focus { outline: none; }
             box_h = (line_h * len(lines)) + (2 * pad_y)
             x, y = self._camera_info_overlay_anchor(image_rect, (box_w, box_h), padding=10)
 
-            overlay_color = QColor(0, 0, 0, 127)
+            overlay_alpha = int(cam.get("camera_info_overlay_alpha", DEFAULT_CAMERA_INFO_OVERLAY_ALPHA))
+            overlay_alpha = max(0, min(255, overlay_alpha))
+            overlay_color = QColor(0, 0, 0, overlay_alpha)
             border_color = QColor(255, 255, 255, 40)
             painter.setPen(border_color)
             painter.setBrush(overlay_color)
@@ -2613,6 +2616,8 @@ QToolButton:focus { outline: none; }
             baseline = y + pad_y + fm.ascent()
             for i, line in enumerate(lines):
                 ty = baseline + (i * line_h)
+                painter.setPen(QColor(0, 0, 0, 230))
+                painter.drawText(x + pad_x + 2, ty + 2, line)
                 painter.setPen(QColor(0, 0, 0, 180))
                 painter.drawText(x + pad_x + 1, ty + 1, line)
                 painter.setPen(QColor(255, 255, 255))
