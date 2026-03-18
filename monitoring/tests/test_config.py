@@ -77,12 +77,18 @@ def test_preview_role_defaults_and_config_fill():
     updated = config.fill_camera_defaults(camera)
 
     assert updated["preview_fps_main"] == 15
+    assert updated["preview_fps_grid"] == 4
     assert updated["preview_fps_thumb"] == 3
     assert updated["preview_pause_when_hidden"] is True
     assert updated["preview_main_max_width"] == 1280
     assert updated["preview_main_max_height"] == 720
+    assert updated["preview_grid_max_width"] == 640
+    assert updated["preview_grid_max_height"] == 360
     assert updated["preview_thumb_max_width"] == 320
     assert updated["preview_thumb_max_height"] == 180
+    assert updated["camera_priority"] == "normal"
+    assert "preview_channel_policies" in updated
+    assert updated["preview_channel_policies"]["grid"]["fps"] == 4.0
 
 
 def test_overload_config_backward_compat(tmp_path):
@@ -95,6 +101,8 @@ def test_overload_config_backward_compat(tmp_path):
     assert cfg["overload_protection_enabled"] is True
     assert cfg["overload_camera_count_threshold"] == 6
     assert cfg["overload_reduce_thumb_preview_fps"] == 1
+    assert cfg["quality_performance_preset"] == "balanced"
+    assert cfg["config_watchdog_enabled"] is True
 
 
 def test_restart_required_for_model_or_rtsp_url_change():

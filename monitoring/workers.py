@@ -315,12 +315,16 @@ class CameraWorker(QThread):
             self.min_record_seconds = int(self.camera.get("min_record_seconds", self.min_record_seconds))
 
         self.preview_fps_main = float(self.camera.get("preview_fps_main", DEFAULT_PREVIEW_FPS_MAIN))
+        self.preview_fps_grid = float(self.camera.get("preview_fps_grid", DEFAULT_PREVIEW_FPS_THUMB))
         self.preview_fps_thumb = float(self.camera.get("preview_fps_thumb", DEFAULT_PREVIEW_FPS_THUMB))
         self.preview_pause_when_hidden = bool(self.camera.get("preview_pause_when_hidden", DEFAULT_PREVIEW_PAUSE_WHEN_HIDDEN))
         self.preview_main_max_width = int(self.camera.get("preview_main_max_width", DEFAULT_PREVIEW_MAIN_MAX_WIDTH))
         self.preview_main_max_height = int(self.camera.get("preview_main_max_height", DEFAULT_PREVIEW_MAIN_MAX_HEIGHT))
+        self.preview_grid_max_width = int(self.camera.get("preview_grid_max_width", DEFAULT_PREVIEW_THUMB_MAX_WIDTH))
+        self.preview_grid_max_height = int(self.camera.get("preview_grid_max_height", DEFAULT_PREVIEW_THUMB_MAX_HEIGHT))
         self.preview_thumb_max_width = int(self.camera.get("preview_thumb_max_width", DEFAULT_PREVIEW_THUMB_MAX_WIDTH))
         self.preview_thumb_max_height = int(self.camera.get("preview_thumb_max_height", DEFAULT_PREVIEW_THUMB_MAX_HEIGHT))
+        self.camera_priority = str(self.camera.get("camera_priority", "normal"))
         self.preview_role = "thumb"
         self.is_overload_degraded = False
         self.app_overload_mode = False
@@ -585,19 +589,27 @@ class CameraWorker(QThread):
         self.record_start_mode = str(camera_config.get("record_start_mode", self.record_start_mode))
 
         self.preview_fps_main = float(camera_config.get("preview_fps_main", self.preview_fps_main))
+        self.preview_fps_grid = float(camera_config.get("preview_fps_grid", getattr(self, "preview_fps_grid", self.preview_fps_thumb)))
         self.preview_fps_thumb = float(camera_config.get("preview_fps_thumb", self.preview_fps_thumb))
         self.preview_pause_when_hidden = bool(camera_config.get("preview_pause_when_hidden", self.preview_pause_when_hidden))
         self.preview_main_max_width = int(camera_config.get("preview_main_max_width", self.preview_main_max_width))
         self.preview_main_max_height = int(camera_config.get("preview_main_max_height", self.preview_main_max_height))
+        self.preview_grid_max_width = int(camera_config.get("preview_grid_max_width", getattr(self, "preview_grid_max_width", self.preview_thumb_max_width)))
+        self.preview_grid_max_height = int(camera_config.get("preview_grid_max_height", getattr(self, "preview_grid_max_height", self.preview_thumb_max_height)))
         self.preview_thumb_max_width = int(camera_config.get("preview_thumb_max_width", self.preview_thumb_max_width))
         self.preview_thumb_max_height = int(camera_config.get("preview_thumb_max_height", self.preview_thumb_max_height))
+        self.camera_priority = str(camera_config.get("camera_priority", getattr(self, "camera_priority", "normal")))
         self.camera["preview_fps_main"] = self.preview_fps_main
+        self.camera["preview_fps_grid"] = self.preview_fps_grid
         self.camera["preview_fps_thumb"] = self.preview_fps_thumb
         self.camera["preview_pause_when_hidden"] = self.preview_pause_when_hidden
         self.camera["preview_main_max_width"] = self.preview_main_max_width
         self.camera["preview_main_max_height"] = self.preview_main_max_height
+        self.camera["preview_grid_max_width"] = self.preview_grid_max_width
+        self.camera["preview_grid_max_height"] = self.preview_grid_max_height
         self.camera["preview_thumb_max_width"] = self.preview_thumb_max_width
         self.camera["preview_thumb_max_height"] = self.preview_thumb_max_height
+        self.camera["camera_priority"] = self.camera_priority
 
         self.camera["pre_seconds"] = self.pre_seconds
         self.camera["lost_seconds"] = self.lost_seconds

@@ -79,6 +79,11 @@ DEFAULT_THUMBNAIL_OVERLAY_ENABLED = True
 DEFAULT_THUMBNAIL_BOX_THICKNESS = 1
 DEFAULT_THUMBNAIL_FONT_SCALE = 0.5
 DEFAULT_THUMBNAIL_FONT_THICKNESS = 1
+DEFAULT_CAMERA_PRIORITY = "normal"
+CAMERA_PRIORITIES = ("high", "normal", "low")
+DEFAULT_PREVIEW_FPS_GRID = 4
+DEFAULT_PREVIEW_GRID_MAX_WIDTH = 640
+DEFAULT_PREVIEW_GRID_MAX_HEIGHT = 360
 
 DEFAULT_OVERLOAD_PROTECTION_ENABLED = True
 DEFAULT_OVERLOAD_MIN_CAMERA_COUNT = 2
@@ -91,6 +96,49 @@ DEFAULT_OVERLOAD_EXIT_DEBOUNCE_SECONDS = 5.0
 DEFAULT_OVERLOAD_MAX_UI_RENDER_MS = 14.0
 DEFAULT_OVERLOAD_MAX_QUEUE_SIZE = 24
 DEFAULT_OVERLOAD_MAX_PREVIEW_BANDWIDTH_MBPS = 12.0
+DEFAULT_QUALITY_PERFORMANCE_PRESET = "balanced"
+QUALITY_PERFORMANCE_PRESETS = {
+    "quality_monitoring": {
+        "label": "Monitoring jakościowy",
+        "preview_fps_main": 20.0,
+        "preview_fps_grid": 10.0,
+        "preview_fps_thumb": 4.0,
+        "preview_main_max_width": 1600,
+        "preview_main_max_height": 900,
+        "preview_grid_max_width": 960,
+        "preview_grid_max_height": 540,
+        "preview_thumb_max_width": 384,
+        "preview_thumb_max_height": 216,
+    },
+    "balanced": {
+        "label": "Zbalansowany",
+        "preview_fps_main": float(DEFAULT_PREVIEW_FPS_MAIN),
+        "preview_fps_grid": float(DEFAULT_PREVIEW_FPS_GRID),
+        "preview_fps_thumb": float(DEFAULT_PREVIEW_FPS_THUMB),
+        "preview_main_max_width": int(DEFAULT_PREVIEW_MAIN_MAX_WIDTH),
+        "preview_main_max_height": int(DEFAULT_PREVIEW_MAIN_MAX_HEIGHT),
+        "preview_grid_max_width": int(DEFAULT_PREVIEW_GRID_MAX_WIDTH),
+        "preview_grid_max_height": int(DEFAULT_PREVIEW_GRID_MAX_HEIGHT),
+        "preview_thumb_max_width": int(DEFAULT_PREVIEW_THUMB_MAX_WIDTH),
+        "preview_thumb_max_height": int(DEFAULT_PREVIEW_THUMB_MAX_HEIGHT),
+    },
+    "economy_monitoring": {
+        "label": "Monitoring oszczędny",
+        "preview_fps_main": 12.0,
+        "preview_fps_grid": 4.0,
+        "preview_fps_thumb": 2.0,
+        "preview_main_max_width": 1280,
+        "preview_main_max_height": 720,
+        "preview_grid_max_width": 512,
+        "preview_grid_max_height": 288,
+        "preview_thumb_max_width": 256,
+        "preview_thumb_max_height": 144,
+    },
+}
+DEFAULT_CONFIG_WATCHDOG_ENABLED = True
+DEFAULT_CONFIG_WATCHDOG_EVAL_SECONDS = 20.0
+DEFAULT_CONFIG_WATCHDOG_DROP_DELTA_THRESHOLD = 5
+DEFAULT_CONFIG_WATCHDOG_QUEUE_DELTA_THRESHOLD = 4
 
 
 
@@ -148,12 +196,16 @@ def fill_camera_defaults(camera: MutableMapping[str, object]) -> MutableMapping[
         "min_record_seconds": DEFAULT_MIN_RECORD_SECONDS,
         "sensitivity_profile": DEFAULT_SENSITIVITY_PROFILE,
         "preview_fps_main": DEFAULT_PREVIEW_FPS_MAIN,
+        "preview_fps_grid": DEFAULT_PREVIEW_FPS_GRID,
         "preview_fps_thumb": DEFAULT_PREVIEW_FPS_THUMB,
         "preview_pause_when_hidden": DEFAULT_PREVIEW_PAUSE_WHEN_HIDDEN,
         "preview_main_max_width": DEFAULT_PREVIEW_MAIN_MAX_WIDTH,
         "preview_main_max_height": DEFAULT_PREVIEW_MAIN_MAX_HEIGHT,
+        "preview_grid_max_width": DEFAULT_PREVIEW_GRID_MAX_WIDTH,
+        "preview_grid_max_height": DEFAULT_PREVIEW_GRID_MAX_HEIGHT,
         "preview_thumb_max_width": DEFAULT_PREVIEW_THUMB_MAX_WIDTH,
         "preview_thumb_max_height": DEFAULT_PREVIEW_THUMB_MAX_HEIGHT,
+        "camera_priority": DEFAULT_CAMERA_PRIORITY,
         "show_camera_info_overlay": DEFAULT_SHOW_CAMERA_INFO_OVERLAY,
         "camera_info_overlay_alpha": DEFAULT_CAMERA_INFO_OVERLAY_ALPHA,
         "thumbnail_overlay_enabled": DEFAULT_THUMBNAIL_OVERLAY_ENABLED,
@@ -198,6 +250,28 @@ def fill_camera_defaults(camera: MutableMapping[str, object]) -> MutableMapping[
     # absolute location rooted at :data:`BASE_DIR`.
     record_path = _resolve_path(camera.get("record_path"), default=DEFAULT_RECORD_PATH)
     camera["record_path"] = str(record_path)
+    camera_priority = str(camera.get("camera_priority", DEFAULT_CAMERA_PRIORITY)).lower()
+    camera["camera_priority"] = camera_priority if camera_priority in CAMERA_PRIORITIES else DEFAULT_CAMERA_PRIORITY
+    camera.setdefault(
+        "preview_channel_policies",
+        {
+            "main": {
+                "fps": float(camera.get("preview_fps_main", DEFAULT_PREVIEW_FPS_MAIN)),
+                "max_width": int(camera.get("preview_main_max_width", DEFAULT_PREVIEW_MAIN_MAX_WIDTH)),
+                "max_height": int(camera.get("preview_main_max_height", DEFAULT_PREVIEW_MAIN_MAX_HEIGHT)),
+            },
+            "grid": {
+                "fps": float(camera.get("preview_fps_grid", DEFAULT_PREVIEW_FPS_GRID)),
+                "max_width": int(camera.get("preview_grid_max_width", DEFAULT_PREVIEW_GRID_MAX_WIDTH)),
+                "max_height": int(camera.get("preview_grid_max_height", DEFAULT_PREVIEW_GRID_MAX_HEIGHT)),
+            },
+            "thumb": {
+                "fps": float(camera.get("preview_fps_thumb", DEFAULT_PREVIEW_FPS_THUMB)),
+                "max_width": int(camera.get("preview_thumb_max_width", DEFAULT_PREVIEW_THUMB_MAX_WIDTH)),
+                "max_height": int(camera.get("preview_thumb_max_height", DEFAULT_PREVIEW_THUMB_MAX_HEIGHT)),
+            },
+        },
+    )
     return camera
 
 
@@ -251,6 +325,14 @@ def load_config(path: Path | None = None) -> Dict[str, object]:
     cfg.setdefault("overload_max_ui_render_ms", DEFAULT_OVERLOAD_MAX_UI_RENDER_MS)
     cfg.setdefault("overload_max_queue_size", DEFAULT_OVERLOAD_MAX_QUEUE_SIZE)
     cfg.setdefault("overload_max_preview_bandwidth_mbps", DEFAULT_OVERLOAD_MAX_PREVIEW_BANDWIDTH_MBPS)
+    cfg.setdefault("quality_performance_preset", DEFAULT_QUALITY_PERFORMANCE_PRESET)
+    cfg.setdefault("preview_fps_grid", DEFAULT_PREVIEW_FPS_GRID)
+    cfg.setdefault("preview_grid_max_width", DEFAULT_PREVIEW_GRID_MAX_WIDTH)
+    cfg.setdefault("preview_grid_max_height", DEFAULT_PREVIEW_GRID_MAX_HEIGHT)
+    cfg.setdefault("config_watchdog_enabled", DEFAULT_CONFIG_WATCHDOG_ENABLED)
+    cfg.setdefault("config_watchdog_eval_seconds", DEFAULT_CONFIG_WATCHDOG_EVAL_SECONDS)
+    cfg.setdefault("config_watchdog_drop_delta_threshold", DEFAULT_CONFIG_WATCHDOG_DROP_DELTA_THRESHOLD)
+    cfg.setdefault("config_watchdog_queue_delta_threshold", DEFAULT_CONFIG_WATCHDOG_QUEUE_DELTA_THRESHOLD)
 
     for camera in cfg.get("cameras", []):
         if isinstance(camera, MutableMapping):
@@ -295,12 +377,17 @@ __all__ = [
     "DEFAULT_REQUIRED_MISSES_TO_END_DETECTION",
     "DEFAULT_MIN_RECORD_SECONDS",
     "DEFAULT_PREVIEW_FPS_MAIN",
+    "DEFAULT_PREVIEW_FPS_GRID",
     "DEFAULT_PREVIEW_FPS_THUMB",
     "DEFAULT_PREVIEW_PAUSE_WHEN_HIDDEN",
     "DEFAULT_PREVIEW_MAIN_MAX_WIDTH",
     "DEFAULT_PREVIEW_MAIN_MAX_HEIGHT",
+    "DEFAULT_PREVIEW_GRID_MAX_WIDTH",
+    "DEFAULT_PREVIEW_GRID_MAX_HEIGHT",
     "DEFAULT_PREVIEW_THUMB_MAX_WIDTH",
     "DEFAULT_PREVIEW_THUMB_MAX_HEIGHT",
+    "DEFAULT_CAMERA_PRIORITY",
+    "CAMERA_PRIORITIES",
     "DEFAULT_SHOW_CAMERA_INFO_OVERLAY",
     "DEFAULT_CAMERA_INFO_OVERLAY_ALPHA",
     "DEFAULT_OVERLOAD_PROTECTION_ENABLED",
@@ -314,6 +401,12 @@ __all__ = [
     "DEFAULT_OVERLOAD_MAX_UI_RENDER_MS",
     "DEFAULT_OVERLOAD_MAX_QUEUE_SIZE",
     "DEFAULT_OVERLOAD_MAX_PREVIEW_BANDWIDTH_MBPS",
+    "DEFAULT_QUALITY_PERFORMANCE_PRESET",
+    "QUALITY_PERFORMANCE_PRESETS",
+    "DEFAULT_CONFIG_WATCHDOG_ENABLED",
+    "DEFAULT_CONFIG_WATCHDOG_EVAL_SECONDS",
+    "DEFAULT_CONFIG_WATCHDOG_DROP_DELTA_THRESHOLD",
+    "DEFAULT_CONFIG_WATCHDOG_QUEUE_DELTA_THRESHOLD",
     "DEFAULT_THUMBNAIL_OVERLAY_ENABLED",
     "DEFAULT_THUMBNAIL_BOX_THICKNESS",
     "DEFAULT_THUMBNAIL_FONT_SCALE",
