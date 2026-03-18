@@ -11,7 +11,7 @@ import time
 import traceback
 from collections import deque
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from queue import Empty, Full, Queue
 from threading import Lock
 from typing import Any
@@ -95,6 +95,8 @@ class PipelineState:
     metrics_dropped_frames: int = 0
     metrics_last_cpu_process_ts: float = 0.0
     metrics_last_cpu_wall_ts: float = 0.0
+    last_cpu_percent: float = 0.0
+    cpu_percent_samples: deque[float] = field(default_factory=lambda: deque(maxlen=3))
 
 
 METRIC_KEYS = (
@@ -971,7 +973,10 @@ class CameraWorker(QThread):
         cpu_wall = max(1e-6, now - (self.state.metrics_last_cpu_wall_ts or now))
         cpu_proc_now = time.process_time()
         cpu_proc_delta = max(0.0, cpu_proc_now - self.state.metrics_last_cpu_process_ts)
-        cpu_percent = float(max(0.0, min(100.0, (cpu_proc_delta / cpu_wall) * 100.0)))
+        cpu_percent_raw = float(max(0.0, min(100.0, (cpu_proc_delta / cpu_wall) * 100.0)))
+        self.state.cpu_percent_samples.append(cpu_percent_raw)
+        cpu_percent = float(sum(self.state.cpu_percent_samples) / len(self.state.cpu_percent_samples)) if self.state.cpu_percent_samples else cpu_percent_raw
+        self.state.last_cpu_percent = cpu_percent
 
         metrics = _build_metrics_payload(
             capture_fps=_aggregate_fps(self.state.frames_captured - self.state.metrics_frames_captured, elapsed),
@@ -1042,7 +1047,7 @@ class CameraWorker(QThread):
             "ui_render_ms": 0.0,
             "queue_size": int(queue_size),
             "dropped_frames": int(dropped),
-            "cpu_percent": 0.0,
+            "cpu_percent": float(self.state.last_cpu_percent),
             "rss_mb": _rss_mb(),
             "recording_active": bool(self.recording),
             "preview_role": self.preview_role,

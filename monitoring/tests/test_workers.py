@@ -374,6 +374,34 @@ def test_metrics_payload_uses_consistent_keys():
     assert payload["infer_fps"] == 0.0
 
 
+def test_heartbeat_reports_nonzero_cpu_after_metrics_window(monkeypatch):
+    worker = _worker()
+    worker.state.last_metrics_log_ts = 0.0
+    worker.state.metrics_window_started_ts = 100.0
+    worker.state.metrics_last_cpu_wall_ts = 100.0
+    worker.state.metrics_last_cpu_process_ts = 10.0
+
+    monotonic_values = iter([110.0, 110.0, 120.0, 120.0])
+    monkeypatch.setattr("monitoring.workers.time.monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr("monitoring.workers.time.process_time", lambda: 15.0)
+
+    captured_status: dict[str, object] = {}
+
+    class _SignalRecorder:
+        def emit(self, camera_name, status):
+            captured_status["camera_name"] = camera_name
+            captured_status["status"] = status
+
+    worker.worker_status_signal = _SignalRecorder()
+
+    worker._maybe_log_metrics(detection_interval=1.0)
+    worker._maybe_emit_heartbeat()
+
+    assert worker.state.last_cpu_percent > 0.0
+    status = dict(captured_status.get("status") or {})
+    assert float(status.get("cpu_percent", 0.0)) > 0.0
+
+
 def test_thumb_hidden_role_downscales_payload_before_emit():
     worker = _worker()
     worker.set_preview_role("thumb")
