@@ -2614,13 +2614,14 @@ QToolButton:focus { outline: none; }
             painter.drawRoundedRect(x, y, box_w, box_h, 8, 8)
 
             baseline = y + pad_y + fm.ascent()
+            text_color = QColor(255, 255, 255, 178)
             for i, line in enumerate(lines):
                 ty = baseline + (i * line_h)
                 painter.setPen(QColor(0, 0, 0, 230))
                 painter.drawText(x + pad_x + 2, ty + 2, line)
                 painter.setPen(QColor(0, 0, 0, 180))
                 painter.drawText(x + pad_x + 1, ty + 1, line)
-                painter.setPen(QColor(255, 255, 255))
+                painter.setPen(text_color)
                 painter.drawText(x + pad_x, ty, line)
         finally:
             painter.end()
