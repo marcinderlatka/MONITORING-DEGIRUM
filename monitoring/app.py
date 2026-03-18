@@ -90,14 +90,24 @@ from .config import (
     DEFAULT_MODEL,
     DEFAULT_POST_SECONDS,
     DEFAULT_PREVIEW_FPS_MAIN,
+    DEFAULT_PREVIEW_FPS_GRID,
     DEFAULT_PREVIEW_FPS_THUMB,
     DEFAULT_PREVIEW_MAIN_MAX_HEIGHT,
+    DEFAULT_PREVIEW_GRID_MAX_HEIGHT,
     DEFAULT_PREVIEW_MAIN_MAX_WIDTH,
+    DEFAULT_PREVIEW_GRID_MAX_WIDTH,
     DEFAULT_PREVIEW_PAUSE_WHEN_HIDDEN,
     DEFAULT_PREVIEW_THUMB_MAX_HEIGHT,
     DEFAULT_PREVIEW_THUMB_MAX_WIDTH,
     DEFAULT_SHOW_CAMERA_INFO_OVERLAY,
+    DEFAULT_QUALITY_PERFORMANCE_PRESET,
+    DEFAULT_CONFIG_WATCHDOG_ENABLED,
+    DEFAULT_CONFIG_WATCHDOG_EVAL_SECONDS,
+    DEFAULT_CONFIG_WATCHDOG_DROP_DELTA_THRESHOLD,
+    DEFAULT_CONFIG_WATCHDOG_QUEUE_DELTA_THRESHOLD,
+    QUALITY_PERFORMANCE_PRESETS,
     DEFAULT_CAMERA_INFO_OVERLAY_ALPHA,
+    CAMERA_PRIORITIES,
     DEFAULT_OVERLOAD_PROTECTION_ENABLED,
     DEFAULT_OVERLOAD_MIN_CAMERA_COUNT,
     DEFAULT_OVERLOAD_CAMERA_COUNT_THRESHOLD,
@@ -167,7 +177,9 @@ CAMERA_RUNTIME_APPLY_FIELDS = {
     "draw_overlays", "enable_detection", "enable_recording", "visible_classes", "record_classes",
     "detection_hours", "record_path", "pre_seconds", "lost_seconds", "post_seconds",
     "required_hits_to_start_recording", "required_misses_to_end_detection", "min_record_seconds", "sensitivity_profile",
-    "thumbnail_mode", "record_start_mode", "preview_fps_main", "preview_fps_thumb", "preview_pause_when_hidden", "show_camera_info_overlay",
+    "thumbnail_mode", "record_start_mode", "preview_fps_main", "preview_fps_grid", "preview_fps_thumb",
+    "preview_pause_when_hidden", "preview_grid_max_width", "preview_grid_max_height", "camera_priority",
+    "show_camera_info_overlay",
 }
 
 CAMERA_SETTING_TOOLTIPS = {
@@ -857,6 +869,7 @@ class SingleCameraDialog(QDialog):
         self.model_combo.addItems(models)
 
         self.fps_spin = QSpinBox(); self.fps_spin.setRange(1, 60)
+        self.priority_combo = QComboBox(); self.priority_combo.addItems(list(CAMERA_PRIORITIES))
         self.rtsp_fps_spin = QSpinBox(); self.rtsp_fps_spin.setRange(0, 60); self.rtsp_fps_spin.setSpecialValueText("Auto")
         self.conf_spin = QDoubleSpinBox(); self.conf_spin.setRange(0.0, 1.0); self.conf_spin.setSingleStep(0.05)
         self.conf_draw_spin = QDoubleSpinBox(); self.conf_draw_spin.setRange(0.0, 1.0); self.conf_draw_spin.setSingleStep(0.05)
@@ -897,6 +910,7 @@ class SingleCameraDialog(QDialog):
         self._add_field_row(left_layout, "rtsp", "Adres/Urządzenie", self.source_stack, input_widget=self.rtsp_edit, focus_widgets=[self.rtsp_edit, self.device_combo, self.source_stack])
         self._add_field_row(left_layout, "model", "Model detekcji", self.model_combo)
         self._add_field_row(left_layout, "fps", "FPS/S DETECT", self.fps_spin)
+        self._add_field_row(left_layout, "camera_priority", "Priorytet kamery", self.priority_combo)
         self._add_field_row(left_layout, "rtsp_fps", "FPS/S RTSP", self.rtsp_fps_spin)
         self._add_field_row(left_layout, "show_camera_info_overlay", "Pokaż informacje na obrazie", self.info_overlay_chk)
 
@@ -1105,6 +1119,7 @@ class SingleCameraDialog(QDialog):
             self.source_stack.setCurrentWidget(self.rtsp_edit)
         self.model_combo.setCurrentText(cam.get("model", DEFAULT_MODEL))
         self.fps_spin.setValue(int(cam.get("fps", DEFAULT_FPS)))
+        self.priority_combo.setCurrentText(str(cam.get("camera_priority", "normal")))
         self.rtsp_fps_spin.setValue(int(cam.get("rtsp_fps", DEFAULT_RTSP_FPS)))
         legacy_conf = float(cam.get("confidence_threshold", DEFAULT_CONFIDENCE_THRESHOLD))
         self.conf_spin.setValue(legacy_conf)
@@ -1154,6 +1169,7 @@ class SingleCameraDialog(QDialog):
             "type": self.type_combo.currentText(),
             "model": self.model_combo.currentText(),
             "fps": int(self.fps_spin.value()),
+            "camera_priority": self.priority_combo.currentText(),
             "confidence_threshold": float(self.conf_spin.value()),
             "confidence_threshold_draw": float(self.conf_draw_spin.value()),
             "confidence_threshold_record": float(self.conf_record_spin.value()),
@@ -1453,6 +1469,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("AI Monitoring – PyQt5 (pełne GUI)")
         self.resize(1400, 900)
+        self.config = load_config()
 
         # Pamięć alertów
         self.alert_mem = AlertMemory(ALERTS_HISTORY_PATH, max_items=5000)
@@ -1496,7 +1513,7 @@ class MainWindow(QMainWindow):
         main_hlayout.setContentsMargins(10,10,10,10)
         main_hlayout.setSpacing(10)
 
-        self.cameras = list(cameras)
+        self.cameras = list(cameras or self.config.get("cameras", []))
         if self.cameras:
             self.output_dir = str(self.cameras[0].get("record_path", DEFAULT_RECORD_PATH))
         else:
@@ -1651,12 +1668,16 @@ QToolButton:focus { outline: none; }
         self.last_render_time = 0.0
         self._render_interval_s = 1 / 15
         self.preview_fps_main = float(self.config.get("preview_fps_main", DEFAULT_PREVIEW_FPS_MAIN)) if hasattr(self, "config") else DEFAULT_PREVIEW_FPS_MAIN
+        self.preview_fps_grid = float(self.config.get("preview_fps_grid", DEFAULT_PREVIEW_FPS_GRID)) if hasattr(self, "config") else DEFAULT_PREVIEW_FPS_GRID
         self.preview_fps_thumb = float(self.config.get("preview_fps_thumb", DEFAULT_PREVIEW_FPS_THUMB)) if hasattr(self, "config") else DEFAULT_PREVIEW_FPS_THUMB
         self.preview_pause_when_hidden = bool(self.config.get("preview_pause_when_hidden", DEFAULT_PREVIEW_PAUSE_WHEN_HIDDEN)) if hasattr(self, "config") else DEFAULT_PREVIEW_PAUSE_WHEN_HIDDEN
         self.preview_main_max_width = int(self.config.get("preview_main_max_width", DEFAULT_PREVIEW_MAIN_MAX_WIDTH)) if hasattr(self, "config") else DEFAULT_PREVIEW_MAIN_MAX_WIDTH
         self.preview_main_max_height = int(self.config.get("preview_main_max_height", DEFAULT_PREVIEW_MAIN_MAX_HEIGHT)) if hasattr(self, "config") else DEFAULT_PREVIEW_MAIN_MAX_HEIGHT
+        self.preview_grid_max_width = int(self.config.get("preview_grid_max_width", DEFAULT_PREVIEW_GRID_MAX_WIDTH)) if hasattr(self, "config") else DEFAULT_PREVIEW_GRID_MAX_WIDTH
+        self.preview_grid_max_height = int(self.config.get("preview_grid_max_height", DEFAULT_PREVIEW_GRID_MAX_HEIGHT)) if hasattr(self, "config") else DEFAULT_PREVIEW_GRID_MAX_HEIGHT
         self.preview_thumb_max_width = int(self.config.get("preview_thumb_max_width", DEFAULT_PREVIEW_THUMB_MAX_WIDTH)) if hasattr(self, "config") else DEFAULT_PREVIEW_THUMB_MAX_WIDTH
         self.preview_thumb_max_height = int(self.config.get("preview_thumb_max_height", DEFAULT_PREVIEW_THUMB_MAX_HEIGHT)) if hasattr(self, "config") else DEFAULT_PREVIEW_THUMB_MAX_HEIGHT
+        self.quality_performance_preset = str(self.config.get("quality_performance_preset", DEFAULT_QUALITY_PERFORMANCE_PRESET))
         self.overload_protection_enabled = bool(self.config.get("overload_protection_enabled", DEFAULT_OVERLOAD_PROTECTION_ENABLED)) if hasattr(self, "config") else DEFAULT_OVERLOAD_PROTECTION_ENABLED
         self.overload_min_camera_count = int(self.config.get("overload_min_camera_count", DEFAULT_OVERLOAD_MIN_CAMERA_COUNT)) if hasattr(self, "config") else DEFAULT_OVERLOAD_MIN_CAMERA_COUNT
         self.overload_camera_count_threshold = int(self.config.get("overload_camera_count_threshold", DEFAULT_OVERLOAD_CAMERA_COUNT_THRESHOLD)) if hasattr(self, "config") else DEFAULT_OVERLOAD_CAMERA_COUNT_THRESHOLD
@@ -1676,6 +1697,13 @@ QToolButton:focus { outline: none; }
         self._performance_log_last_ts_by_camera: dict[str, float] = {}
         self._performance_log_interval_s = 10.0
         self.grid_preview_quality = str(self.config.get("grid_preview_quality", "normal")) if hasattr(self, "config") else "normal"
+        self.config_watchdog_enabled = bool(self.config.get("config_watchdog_enabled", DEFAULT_CONFIG_WATCHDOG_ENABLED))
+        self.config_watchdog_eval_seconds = float(self.config.get("config_watchdog_eval_seconds", DEFAULT_CONFIG_WATCHDOG_EVAL_SECONDS))
+        self.config_watchdog_drop_delta_threshold = int(self.config.get("config_watchdog_drop_delta_threshold", DEFAULT_CONFIG_WATCHDOG_DROP_DELTA_THRESHOLD))
+        self.config_watchdog_queue_delta_threshold = int(self.config.get("config_watchdog_queue_delta_threshold", DEFAULT_CONFIG_WATCHDOG_QUEUE_DELTA_THRESHOLD))
+        self._config_watchdog_state: dict[str, object] | None = None
+        self._config_watchdog_rollback_running = False
+        self._stable_config_snapshot = self._build_runtime_config()
         self._preview_cache: dict[tuple[int, str, int, int, int, int, str], QPixmap] = {}
         self._last_thumb_update_ts: dict[int, float] = {}
         self._thumb_update_interval_s = 1.0 / max(0.5, float(self.preview_fps_thumb))
@@ -1711,7 +1739,85 @@ QToolButton:focus { outline: none; }
     def _log_exception(self, group: str, message: str, exc: BaseException | None = None, **kwargs) -> None:
         APP_LOG_BRIDGE.exception(group, message, exc=exc, **kwargs)
 
+    def _build_runtime_config(self) -> dict:
+        cfg = load_config()
+        cfg["cameras"] = list(self.cameras)
+        cfg["preview_fps_main"] = float(self.preview_fps_main)
+        cfg["preview_fps_grid"] = float(self.preview_fps_grid)
+        cfg["preview_fps_thumb"] = float(self.preview_fps_thumb)
+        cfg["preview_main_max_width"] = int(self.preview_main_max_width)
+        cfg["preview_main_max_height"] = int(self.preview_main_max_height)
+        cfg["preview_grid_max_width"] = int(self.preview_grid_max_width)
+        cfg["preview_grid_max_height"] = int(self.preview_grid_max_height)
+        cfg["preview_thumb_max_width"] = int(self.preview_thumb_max_width)
+        cfg["preview_thumb_max_height"] = int(self.preview_thumb_max_height)
+        cfg["quality_performance_preset"] = str(self.quality_performance_preset)
+        cfg["config_watchdog_enabled"] = bool(self.config_watchdog_enabled)
+        cfg["config_watchdog_eval_seconds"] = float(self.config_watchdog_eval_seconds)
+        cfg["config_watchdog_drop_delta_threshold"] = int(self.config_watchdog_drop_delta_threshold)
+        cfg["config_watchdog_queue_delta_threshold"] = int(self.config_watchdog_queue_delta_threshold)
+        return cfg
+
+    def _save_runtime_config(self) -> dict:
+        cfg = self._build_runtime_config()
+        save_config(cfg)
+        self.config = cfg
+        return cfg
+
+    def _metrics_baseline(self) -> dict[str, float]:
+        queue_total = sum(int(st.get("queue_size", 0)) for st in self.worker_status.values())
+        dropped_total = sum(int(st.get("dropped_frames", 0)) for st in self.worker_status.values())
+        cameras = max(1, len(self.worker_status))
+        return {
+            "queue_avg": float(queue_total / cameras),
+            "dropped_avg": float(dropped_total / cameras),
+        }
+
+    def _start_config_watchdog(self, previous_cfg: dict, candidate_cfg: dict, reason: str) -> None:
+        if not self.config_watchdog_enabled or self._config_watchdog_rollback_running:
+            self._stable_config_snapshot = candidate_cfg
+            return
+        self._config_watchdog_state = {
+            "started_ts": time.monotonic(),
+            "reason": str(reason),
+            "previous_cfg": dict(previous_cfg),
+            "candidate_cfg": dict(candidate_cfg),
+            "baseline": self._metrics_baseline(),
+        }
+
+    def _run_config_change_watchdog(self) -> None:
+        state = self._config_watchdog_state
+        if not state or self._config_watchdog_rollback_running:
+            return
+        elapsed = time.monotonic() - float(state.get("started_ts", 0.0))
+        baseline = dict(state.get("baseline", {}) or {})
+        current = self._metrics_baseline()
+        queue_delta = current["queue_avg"] - float(baseline.get("queue_avg", 0.0))
+        dropped_delta = current["dropped_avg"] - float(baseline.get("dropped_avg", 0.0))
+        if queue_delta >= self.config_watchdog_queue_delta_threshold or dropped_delta >= self.config_watchdog_drop_delta_threshold:
+            previous_cfg = dict(state.get("previous_cfg", {}) or {})
+            if previous_cfg:
+                self._config_watchdog_rollback_running = True
+                self._log_warning(
+                    "settings",
+                    "config watchdog rollback",
+                    source="config-watchdog",
+                    details=f"queue_delta={queue_delta:.2f} dropped_delta={dropped_delta:.2f}",
+                )
+                save_config(previous_cfg)
+                self.config = previous_cfg
+                self.cameras = list(previous_cfg.get("cameras", []))
+                self.restart_workers_and_ui()
+                self._config_watchdog_rollback_running = False
+                self._stable_config_snapshot = previous_cfg
+            self._config_watchdog_state = None
+            return
+        if elapsed >= float(self.config_watchdog_eval_seconds):
+            self._stable_config_snapshot = dict(state.get("candidate_cfg", {}) or {})
+            self._config_watchdog_state = None
+
     def _run_watchdogs(self) -> None:
+        self._run_config_change_watchdog()
         active = {}
         for idx, cam in enumerate(self.cameras):
             name = str(cam.get("name", idx))
@@ -2028,15 +2134,36 @@ QToolButton:focus { outline: none; }
             if not isinstance(worker, CameraWorker) or not worker.isRunning():
                 continue
             is_main = idx == selected_idx
-            detect_factor = 1.0 if is_main or worker.recording else profile.detect_fps_factor
-            thumb_fps = max(0.5, self.preview_fps_thumb * profile.thumb_preview_fps_factor)
+            camera_cfg = self.cameras[idx] if idx < len(self.cameras) else {}
+            camera_priority = str(camera_cfg.get("camera_priority", "normal")).lower()
+            priority_detect_scale = 1.0
+            priority_thumb_scale = 1.0
+            priority_resolution_floor = 0.3
+            if camera_priority == "high":
+                priority_detect_scale = 1.0
+                priority_thumb_scale = 1.0
+                priority_resolution_floor = 0.9
+            elif camera_priority == "low":
+                extra = {0: 1.0, 1: 0.8, 2: 0.65, 3: 0.5}.get(int(self.overload_level), 0.5)
+                priority_detect_scale = extra
+                priority_thumb_scale = extra
+                priority_resolution_floor = 0.45
+            detect_factor = 1.0 if is_main or worker.recording else max(0.2, profile.detect_fps_factor * priority_detect_scale)
+            if camera_priority == "high" and not is_main:
+                detect_factor = max(0.9, detect_factor)
+            thumb_fps = max(0.5, self.preview_fps_thumb * profile.thumb_preview_fps_factor * priority_thumb_scale)
+            preview_resolution_factor = profile.preview_resolution_factor
+            if camera_priority == "high":
+                preview_resolution_factor = max(0.9, preview_resolution_factor)
+            else:
+                preview_resolution_factor = max(priority_resolution_floor, preview_resolution_factor)
             worker.set_overload_state(
                 overload_level=(self.overload_level if not is_main else 0),
                 detect_fps_factor=detect_factor,
                 thumb_preview_fps=thumb_fps,
                 disable_overlays=(self.overload_disable_nonessential_overlays or profile.disable_nonessential_overlays),
                 overlay_stride=profile.overlay_stride,
-                preview_resolution_factor=profile.preview_resolution_factor,
+                preview_resolution_factor=preview_resolution_factor,
             )
 
     def _refresh_camera_status_indicators(self) -> None:
@@ -2430,10 +2557,9 @@ QToolButton:focus { outline: none; }
                 return
 
             fill_camera_defaults(new_data)
+            previous_cfg = self._build_runtime_config()
             self.cameras[idx] = new_data
-            cfg = load_config()
-            cfg["cameras"] = self.cameras
-            save_config(cfg)
+            candidate_cfg = self._save_runtime_config()
 
             self.camera_list.rebuild(self.cameras)
             self.camera_grid.rebuild(self.cameras)
@@ -2454,6 +2580,7 @@ QToolButton:focus { outline: none; }
                 "settings",
                 f"zapisano ustawienia kamery {new_data.get('name')} changed={result.get('changed_keys', [])} restart={result.get('restart_reason_keys', [])} {details}",
             )
+            self._start_config_watchdog(previous_cfg, candidate_cfg, reason=f"camera-settings:{new_data.get('name', idx)}")
             self._show_camera_settings_result_message(new_data.get("name", "kamera"), result)
         except Exception as exc:
             self._log_exception("error", f"błąd zapisu ustawień kamery {new_data.get('name', 'unknown')}: {exc}", exc=exc, source="ui", camera=str(new_data.get("name", "unknown")))
@@ -2647,7 +2774,7 @@ QToolButton:focus { outline: none; }
             self._preview_cache.pop(key, None)
 
     def _grid_target_fps(self) -> float:
-        target_fps = float(self.preview_fps_thumb)
+        target_fps = float(self.preview_fps_grid)
         if self._is_fullscreen and self.camera_grid.isVisible() and str(self.grid_preview_quality).lower() == "high-quality":
             target_fps = max(target_fps, float(self.preview_fps_main))
         if self.overload_mode_active:
@@ -2680,8 +2807,8 @@ QToolButton:focus { outline: none; }
                 source = main_source
                 source_tag = "main"
             else:
-                tile_width = max(tile_width, int(self.preview_thumb_max_width))
-                tile_height = max(tile_height, int(self.preview_thumb_max_height))
+                tile_width = max(tile_width, int(self.preview_grid_max_width))
+                tile_height = max(tile_height, int(self.preview_grid_max_height))
                 source_tag = "thumb-hq"
 
         if self.overload_mode_active:
@@ -2689,6 +2816,9 @@ QToolButton:focus { outline: none; }
             tile_width = max(1, int(round(tile_width * overload_scale)))
             tile_height = max(1, int(round(tile_height * overload_scale)))
             source_tag = f"{source_tag}-overload"
+
+        tile_width = min(tile_width, int(self.preview_grid_max_width))
+        tile_height = min(tile_height, int(self.preview_grid_max_height))
 
         return source, tile_width, tile_height, dpr, source_tag
 
@@ -2932,6 +3062,49 @@ QToolButton:focus { outline: none; }
         dlg = SettingsHub(self)
         dlg.exec_()
 
+    def open_quality_performance_panel(self):
+        dlg = QualityPerformanceDialog(self)
+        dlg.exec_()
+
+    def apply_quality_performance_preset(self, preset_key: str) -> None:
+        preset = QUALITY_PERFORMANCE_PRESETS.get(str(preset_key))
+        if not preset:
+            return
+        previous_cfg = self._build_runtime_config()
+        self.quality_performance_preset = str(preset_key)
+        self.preview_fps_main = float(preset.get("preview_fps_main", self.preview_fps_main))
+        self.preview_fps_grid = float(preset.get("preview_fps_grid", self.preview_fps_grid))
+        self.preview_fps_thumb = float(preset.get("preview_fps_thumb", self.preview_fps_thumb))
+        self.preview_main_max_width = int(preset.get("preview_main_max_width", self.preview_main_max_width))
+        self.preview_main_max_height = int(preset.get("preview_main_max_height", self.preview_main_max_height))
+        self.preview_grid_max_width = int(preset.get("preview_grid_max_width", self.preview_grid_max_width))
+        self.preview_grid_max_height = int(preset.get("preview_grid_max_height", self.preview_grid_max_height))
+        self.preview_thumb_max_width = int(preset.get("preview_thumb_max_width", self.preview_thumb_max_width))
+        self.preview_thumb_max_height = int(preset.get("preview_thumb_max_height", self.preview_thumb_max_height))
+        self._thumb_update_interval_s = 1.0 / max(0.5, float(self.preview_fps_thumb))
+        for cam in self.cameras:
+            if not isinstance(cam, dict):
+                continue
+            cam["preview_fps_main"] = float(self.preview_fps_main)
+            cam["preview_fps_grid"] = float(self.preview_fps_grid)
+            cam["preview_fps_thumb"] = float(self.preview_fps_thumb)
+            cam["preview_main_max_width"] = int(self.preview_main_max_width)
+            cam["preview_main_max_height"] = int(self.preview_main_max_height)
+            cam["preview_grid_max_width"] = int(self.preview_grid_max_width)
+            cam["preview_grid_max_height"] = int(self.preview_grid_max_height)
+            cam["preview_thumb_max_width"] = int(self.preview_thumb_max_width)
+            cam["preview_thumb_max_height"] = int(self.preview_thumb_max_height)
+            cam["preview_channel_policies"] = {
+                "main": {"fps": float(self.preview_fps_main), "max_width": int(self.preview_main_max_width), "max_height": int(self.preview_main_max_height)},
+                "grid": {"fps": float(self.preview_fps_grid), "max_width": int(self.preview_grid_max_width), "max_height": int(self.preview_grid_max_height)},
+                "thumb": {"fps": float(self.preview_fps_thumb), "max_width": int(self.preview_thumb_max_width), "max_height": int(self.preview_thumb_max_height)},
+            }
+        candidate_cfg = self._save_runtime_config()
+        self._apply_worker_preview_roles()
+        self._evaluate_overload_mode()
+        self._invalidate_preview_cache()
+        self._start_config_watchdog(previous_cfg, candidate_cfg, reason=f"quality-preset:{preset_key}")
+
 
 # --- Centrum ustawień ---
 class SettingsHub(QDialog):
@@ -2945,17 +3118,60 @@ class SettingsHub(QDialog):
         btn_add_cam = QPushButton("Dodaj kamerę RTSP")
         btn_add_usb = QPushButton("Dodaj kamerę USB")
         btn_remove_cam = QPushButton("Usuń kamerę")
+        btn_quality_perf = QPushButton("Jakość/Wydajność")
         btn_restart = QPushButton("Restart aplikacji")
         btn_close = QPushButton("Zamknij")
 
-        for b in [btn_add_cam, btn_add_usb, btn_remove_cam, btn_restart, btn_close]:
+        for b in [btn_add_cam, btn_add_usb, btn_remove_cam, btn_quality_perf, btn_restart, btn_close]:
             layout.addWidget(b)
 
         btn_add_cam.clicked.connect(parent.add_camera_wizard)
         btn_add_usb.clicked.connect(parent.add_usb_camera)
         btn_remove_cam.clicked.connect(parent.remove_camera_dialog)
+        btn_quality_perf.clicked.connect(parent.open_quality_performance_panel)
         btn_restart.clicked.connect(parent.restart_app)
         btn_close.clicked.connect(self.accept)
+
+
+class QualityPerformanceDialog(QDialog):
+    def __init__(self, parent: MainWindow):
+        super().__init__(parent)
+        self.setWindowTitle("Jakość/Wydajność")
+        self.resize(420, 220)
+        self.parent_window = parent
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.preset_combo = QComboBox()
+        items = [
+            ("Monitoring jakościowy", "quality_monitoring"),
+            ("Zbalansowany", "balanced"),
+            ("Monitoring oszczędny", "economy_monitoring"),
+        ]
+        for label, key in items:
+            self.preset_combo.addItem(label, key)
+        idx = self.preset_combo.findData(parent.quality_performance_preset)
+        if idx >= 0:
+            self.preset_combo.setCurrentIndex(idx)
+        form.addRow("Preset globalny", self.preset_combo)
+        layout.addLayout(form)
+        hint = QLabel("Preset aktualizuje limity kanałów: main, grid, thumb (FPS + rozdzielczość).")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        buttons = QHBoxLayout()
+        btn_cancel = QPushButton("Anuluj")
+        btn_apply = QPushButton("Zastosuj")
+        buttons.addStretch(1)
+        buttons.addWidget(btn_cancel)
+        buttons.addWidget(btn_apply)
+        layout.addLayout(buttons)
+        btn_cancel.clicked.connect(self.reject)
+        btn_apply.clicked.connect(self._apply)
+
+    def _apply(self):
+        key = str(self.preset_combo.currentData() or "balanced")
+        self.parent_window.apply_quality_performance_preset(key)
+        self.accept()
 
 # --- START ---
 def main(windowed: bool = False):
