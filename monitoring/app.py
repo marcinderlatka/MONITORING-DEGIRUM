@@ -2136,6 +2136,22 @@ QToolButton:focus { outline: none; }
             self.last_render_time = 0.0
             self._render_current()
 
+
+    def _is_heartbeat_stale(self, camera_name: str, timeout_seconds: float = 15.0) -> bool:
+        last_seen = float(self._heartbeat_last_seen.get(str(camera_name), 0.0) or 0.0)
+        if last_seen <= 0.0:
+            return True
+        return (time.monotonic() - last_seen) > float(timeout_seconds)
+
+    @staticmethod
+    def _fmt_metric_or_stale(value: object, *, stale: bool, fmt: str, suffix: str = "") -> str:
+        if stale:
+            return f"--{suffix}"
+        try:
+            return f"{fmt.format(float(value))}{suffix}"
+        except (TypeError, ValueError):
+            return f"--{suffix}"
+
     def _update_diagnostics_panel(self):
         if not self.diag_panel.isVisible():
             return
@@ -2148,10 +2164,12 @@ QToolButton:focus { outline: none; }
         if not stat:
             self.diag_panel.setText(f"Diagnostyka [{name}]: oczekiwanie na heartbeat")
             return
+        stale = self._is_heartbeat_stale(name)
+        cpu_text = self._fmt_metric_or_stale(stat.get('cpu_percent', 0.0), stale=stale, fmt='{:.1f}')
         self.diag_panel.setText(
             "\n".join(
                 [
-                    f"[{name}]",
+                    f"[{name}]" + (" (heartbeat przeterminowany)" if stale else ""),
                     f"stream fps: {float(stat.get('stream_fps', 0.0)):.2f}",
                     f"detect fps: {float(stat.get('detect_fps', 0.0)):.2f}",
                     f"capture fps: {float(stat.get('capture_fps', 0.0)):.2f}",
@@ -2161,7 +2179,7 @@ QToolButton:focus { outline: none; }
                     f"writer fps: {float(stat.get('writer_fps', 0.0)):.2f}",
                     f"recording queue size: {int(stat.get('queue_size', 0))}",
                     f"dropped frames: {int(stat.get('dropped_frames', 0))}",
-                    f"cpu %: {float(stat.get('cpu_percent', 0.0)):.1f}",
+                    f"cpu %: {cpu_text}",
                     f"rss mb: {float(stat.get('rss_mb', 0.0)):.1f}",
                     f"preview role: {stat.get('preview_role', '-')}",
                     f"overload degraded: {bool(stat.get('overload_degraded', False))}",
@@ -2542,7 +2560,7 @@ QToolButton:focus { outline: none; }
             f"Zapis FPS: {float(stat.get('writer_fps', 0.0)):.1f}",
             f"Kolejka: {int(stat.get('queue_size', 0))}",
             f"Pominięte klatki: {int(stat.get('dropped_frames', 0))}",
-            f"CPU: {float(stat.get('cpu_percent', 0.0)):.1f}%",
+            f"CPU: {self._fmt_metric_or_stale(stat.get('cpu_percent', 0.0), stale=self._is_heartbeat_stale(name), fmt='{:.1f}', suffix='%')}",
             f"RSS: {float(stat.get('rss_mb', 0.0)):.1f} MB",
             f"Tryb: {tryb}",
             f"Połączenie: {polaczenie}",
