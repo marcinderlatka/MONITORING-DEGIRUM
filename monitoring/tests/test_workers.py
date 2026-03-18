@@ -120,6 +120,32 @@ def test_detection_event_summary():
     assert worker.current_event_max_confidence == 0.8
 
 
+def test_sensitivity_profile_applies_thresholds():
+    worker = CameraWorker(
+        camera={"name": "Cam", "rtsp": "rtsp://x", "sensitivity_profile": "high_precision"},
+        model=_DummyModel(),
+        index=0,
+    )
+    assert worker.confidence_threshold_record == 0.7
+    assert worker.required_hits_to_start_recording == 3
+
+
+def test_telemetry_payload_contains_calibration_stats():
+    worker = _worker()
+    now = worker.telemetry_started_ts + 25 * 3600
+    worker.telemetry_trigger_count = 10
+    worker.telemetry_false_positive_proxy_count = 2
+    worker.telemetry_confidence_sum = 6.2
+    worker.telemetry_confidence_count = 10
+
+    payload = worker._telemetry_payload(now)
+
+    assert payload["false_positive_proxy_rate"] == 0.2
+    assert payload["avg_confidence"] == 0.62
+    assert payload["trigger_frequency_per_hour"] > 0
+    assert payload["suggested_record_threshold"] is not None
+
+
 def test_effective_preview_emit_policy_for_roles():
     main_i = _preview_interval_for_role("main", 15, 3, True)
     thumb_i = _preview_interval_for_role("thumb", 15, 3, True)

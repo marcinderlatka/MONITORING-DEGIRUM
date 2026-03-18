@@ -116,6 +116,7 @@ from .config import (
     DEFAULT_REQUIRED_MISSES_TO_END_DETECTION,
     DEFAULT_MIN_RECORD_SECONDS,
     DEFAULT_RTSP_FPS,
+    DEFAULT_SENSITIVITY_PROFILE,
     DEFAULT_THUMBNAIL_MODE,
     ICON_DIR,
     LOG_HISTORY_PATH,
@@ -123,8 +124,11 @@ from .config import (
     MODELS_PATH,
     RECORDINGS_CATALOG_PATH,
     RECORD_CLASSES,
+    SENSITIVITY_PROFILES,
     VISIBLE_CLASSES,
+    apply_sensitivity_profile,
     fill_camera_defaults,
+    infer_sensitivity_profile,
     list_usb_cameras,
     load_config,
     save_config,
@@ -162,7 +166,7 @@ CAMERA_RUNTIME_APPLY_FIELDS = {
     "fps", "rtsp_fps", "confidence_threshold", "confidence_threshold_draw", "confidence_threshold_record",
     "draw_overlays", "enable_detection", "enable_recording", "visible_classes", "record_classes",
     "detection_hours", "record_path", "pre_seconds", "lost_seconds", "post_seconds",
-    "required_hits_to_start_recording", "required_misses_to_end_detection", "min_record_seconds",
+    "required_hits_to_start_recording", "required_misses_to_end_detection", "min_record_seconds", "sensitivity_profile",
     "thumbnail_mode", "record_start_mode", "preview_fps_main", "preview_fps_thumb", "preview_pause_when_hidden", "show_camera_info_overlay",
 }
 
@@ -234,6 +238,13 @@ CAMERA_SETTING_TOOLTIPS = {
         "Zwiększenie tej wartości zmniejsza liczbę fałszywych alarmów, ale może powodować pomijanie trudniejszych "
         "wykryć.\n"
         "Zmniejszenie zwiększa czułość systemu, ale może prowadzić do częstszych niepotrzebnych nagrań."
+    ),
+    "sensitivity_profile": (
+        "Profil czułości mapuje zestaw kluczowych parametrów detekcji i nagrywania.\n\n"
+        "high_recall — większa czułość (więcej wykryć i potencjalnie więcej fałszywych alarmów),\n"
+        "balanced — ustawienie domyślne z kompromisem skuteczności,\n"
+        "high_precision — mniej fałszywych alarmów kosztem ryzyka pominięcia trudnych przypadków,\n"
+        "custom — ręczne wartości bez automatycznego mapowania."
     ),
     "draw_overlays": (
         "Włącza rysowanie ramek, etykiet i opisów detekcji na podglądzie na żywo.\n\n"
@@ -850,6 +861,7 @@ class SingleCameraDialog(QDialog):
         self.conf_spin = QDoubleSpinBox(); self.conf_spin.setRange(0.0, 1.0); self.conf_spin.setSingleStep(0.05)
         self.conf_draw_spin = QDoubleSpinBox(); self.conf_draw_spin.setRange(0.0, 1.0); self.conf_draw_spin.setSingleStep(0.05)
         self.conf_record_spin = QDoubleSpinBox(); self.conf_record_spin.setRange(0.0, 1.0); self.conf_record_spin.setSingleStep(0.05)
+        self.sensitivity_profile_combo = QComboBox(); self.sensitivity_profile_combo.addItems(["balanced", "high_recall", "high_precision", "custom"])
         self.draw_chk = QCheckBox(); self.detect_chk = QCheckBox(); self.record_chk = QCheckBox()
         self.info_overlay_chk = QCheckBox()
         self.hours_edit = QLineEdit(); self.visible_edit = QLineEdit(); self.record_edit = QLineEdit()
@@ -891,6 +903,7 @@ class SingleCameraDialog(QDialog):
         self._add_field_row(middle_layout, "confidence_threshold", "Próg pewności (legacy)", self.conf_spin)
         self._add_field_row(middle_layout, "confidence_threshold_draw", "Próg rysowania", self.conf_draw_spin)
         self._add_field_row(middle_layout, "confidence_threshold_record", "Próg nagrania", self.conf_record_spin)
+        self._add_field_row(middle_layout, "sensitivity_profile", "Profil czułości", self.sensitivity_profile_combo)
         self._add_field_row(middle_layout, "draw_overlays", "Rysuj nakładki", self.draw_chk)
         self._add_field_row(middle_layout, "enable_detection", "Wykrywaj obiekty", self.detect_chk)
         self._add_field_row(middle_layout, "enable_recording", "Nagrywaj detekcje", self.record_chk)
@@ -926,10 +939,12 @@ class SingleCameraDialog(QDialog):
         controls = QHBoxLayout()
         self.test_btn = QPushButton("Test połączenia")
         self.test_status = QLabel("")
+        self.calibration_btn = QPushButton("Kreator kalibracji 24h")
         self.btn_ok = QPushButton("Zapisz")
         self.btn_cancel = QPushButton("Anuluj")
         controls.addWidget(self.test_btn)
         controls.addWidget(self.test_status)
+        controls.addWidget(self.calibration_btn)
         controls.addStretch(1)
         controls.addWidget(self.btn_cancel)
         controls.addWidget(self.btn_ok)
@@ -939,6 +954,8 @@ class SingleCameraDialog(QDialog):
         self.btn_cancel.clicked.connect(self.reject)
         self.btn_path.clicked.connect(self._choose_path)
         self.test_btn.clicked.connect(self._test_source)
+        self.sensitivity_profile_combo.currentTextChanged.connect(self._on_sensitivity_profile_changed)
+        self.calibration_btn.clicked.connect(self._open_calibration_wizard)
 
         self.result_camera = None
         if camera:
@@ -949,6 +966,7 @@ class SingleCameraDialog(QDialog):
             self.preview_fps_thumb_spin.setValue(float(DEFAULT_PREVIEW_FPS_THUMB))
             self.preview_pause_chk.setChecked(bool(DEFAULT_PREVIEW_PAUSE_WHEN_HIDDEN))
             self.info_overlay_chk.setChecked(bool(DEFAULT_SHOW_CAMERA_INFO_OVERLAY))
+            self.sensitivity_profile_combo.setCurrentText(DEFAULT_SENSITIVITY_PROFILE)
 
     def _add_field_row(self, form: QFormLayout, field_key: str, label_text: str, widget, input_widget=None, focus_widgets=None):
         label = QLabel(label_text)
@@ -1014,6 +1032,63 @@ class SingleCameraDialog(QDialog):
         else:
             self.test_status.setText("⚠️ Błąd"); self.test_status.setStyleSheet("color:#f80;")
 
+    def _set_sensitivity_inputs_enabled(self, enabled: bool) -> None:
+        for widget in (
+            self.conf_draw_spin,
+            self.conf_record_spin,
+            self.required_hits_spin,
+            self.required_misses_spin,
+            self.min_record_seconds_spin,
+        ):
+            widget.setEnabled(bool(enabled))
+
+    def _on_sensitivity_profile_changed(self, profile_name: str) -> None:
+        profile = str(profile_name or "custom")
+        if profile == "custom":
+            self._set_sensitivity_inputs_enabled(True)
+            return
+        values = SENSITIVITY_PROFILES.get(profile, {})
+        if values:
+            self.conf_draw_spin.setValue(float(values.get("confidence_threshold_draw", self.conf_draw_spin.value())))
+            self.conf_record_spin.setValue(float(values.get("confidence_threshold_record", self.conf_record_spin.value())))
+            self.required_hits_spin.setValue(int(values.get("required_hits_to_start_recording", self.required_hits_spin.value())))
+            self.required_misses_spin.setValue(int(values.get("required_misses_to_end_detection", self.required_misses_spin.value())))
+            self.min_record_seconds_spin.setValue(int(values.get("min_record_seconds", self.min_record_seconds_spin.value())))
+        self._set_sensitivity_inputs_enabled(False)
+
+    def _open_calibration_wizard(self) -> None:
+        telemetry = dict(getattr(self, "_camera_runtime_telemetry", {}) or {})
+        samples = int(telemetry.get("calibration_sample_count", 0))
+        duration_h = float(telemetry.get("calibration_duration_hours", 0.0))
+        suggestion = telemetry.get("suggested_record_threshold")
+        if duration_h < 24.0 or suggestion is None:
+            QMessageBox.information(
+                self,
+                "Kreator kalibracji",
+                "Kalibracja wymaga minimum 24h danych telemetrycznych.\n"
+                f"Aktualnie: {duration_h:.1f}h, próbek: {samples}.",
+            )
+            return
+        suggestion_f = float(suggestion)
+        delta = suggestion_f - float(self.conf_record_spin.value())
+        action = "podnieść" if delta > 0 else "obniżyć"
+        msg = (
+            "Na podstawie 24h statystyk sugerowany jest nowy próg nagrywania.\n\n"
+            f"Obecny próg: {float(self.conf_record_spin.value()):.2f}\n"
+            f"Sugerowany próg: {suggestion_f:.2f} ({action} o {abs(delta):.2f})\n"
+            f"Średnie confidence: {float(telemetry.get('avg_confidence', 0.0)):.3f}\n"
+            f"False-positive proxy: {float(telemetry.get('false_positive_proxy_rate', 0.0)):.1%}"
+        )
+        if QMessageBox.question(
+            self,
+            "Kreator kalibracji",
+            msg + "\n\nZastosować sugestię?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        ) == QMessageBox.Yes:
+            self.conf_record_spin.setValue(suggestion_f)
+            self.sensitivity_profile_combo.setCurrentText("custom")
+
     def load_camera(self, cam):
         cam = cam or {}
         self.name_edit.setText(cam.get("name", ""))
@@ -1054,6 +1129,12 @@ class SingleCameraDialog(QDialog):
         self.preview_fps_main_spin.setValue(float(cam.get("preview_fps_main", DEFAULT_PREVIEW_FPS_MAIN)))
         self.preview_fps_thumb_spin.setValue(float(cam.get("preview_fps_thumb", DEFAULT_PREVIEW_FPS_THUMB)))
         self.preview_pause_chk.setChecked(bool(cam.get("preview_pause_when_hidden", DEFAULT_PREVIEW_PAUSE_WHEN_HIDDEN)))
+        self._camera_runtime_telemetry = dict(cam.get("runtime_telemetry", {}) or {})
+        profile_name = str(cam.get("sensitivity_profile", infer_sensitivity_profile(cam)) or DEFAULT_SENSITIVITY_PROFILE)
+        if profile_name not in {"balanced", "high_recall", "high_precision", "custom"}:
+            profile_name = "custom"
+        self.sensitivity_profile_combo.setCurrentText(profile_name)
+        self._on_sensitivity_profile_changed(profile_name)
 
     def accept(self):
         name = self.name_edit.text().strip()
@@ -1093,10 +1174,14 @@ class SingleCameraDialog(QDialog):
             "required_hits_to_start_recording": int(self.required_hits_spin.value()),
             "required_misses_to_end_detection": int(self.required_misses_spin.value()),
             "min_record_seconds": int(self.min_record_seconds_spin.value()),
+            "sensitivity_profile": self.sensitivity_profile_combo.currentText(),
             "preview_fps_main": float(self.preview_fps_main_spin.value()),
             "preview_fps_thumb": float(self.preview_fps_thumb_spin.value()),
             "preview_pause_when_hidden": self.preview_pause_chk.isChecked(),
         }
+        profile_name = str(cam.get("sensitivity_profile", "custom") or "custom")
+        if profile_name != "custom":
+            apply_sensitivity_profile(cam, profile_name, force=True)
         self.result_camera = cam
         super().accept()
 
@@ -2125,10 +2210,24 @@ QToolButton:focus { outline: none; }
                     f"preview_emit_fps={float(payload.get('preview_emit_fps', 0.0)):.2f} ui_render_ms={float(payload.get('ui_render_ms', 0.0)):.2f} "
                     f"thumb_ms={float(payload.get('ui_thumb_ms', 0.0)):.2f} grid_ms={float(payload.get('ui_grid_ms', 0.0)):.2f} main_ms={float(payload.get('ui_main_ms', 0.0)):.2f} "
                     f"queue_size={int(payload.get('queue_size', 0))} dropped_frames={int(payload.get('dropped_frames', 0))} "
-                    f"cpu_percent={float(payload.get('cpu_percent', 0.0)):.1f} rss_mb={float(payload.get('rss_mb', 0.0)):.1f}"
+                    f"cpu_percent={float(payload.get('cpu_percent', 0.0)):.1f} rss_mb={float(payload.get('rss_mb', 0.0)):.1f} "
+                    f"fp_proxy={float(payload.get('false_positive_proxy_rate', 0.0)):.3f} avg_conf={float(payload.get('avg_confidence', 0.0)):.3f} "
+                    f"trigger_h={float(payload.get('trigger_frequency_per_hour', 0.0)):.2f}"
                 ),
             )
             self._performance_log_last_ts_by_camera[cam_name] = now
+
+        for idx, cam in enumerate(self.cameras):
+            if str(cam.get("name", idx)) == cam_name:
+                cam["runtime_telemetry"] = {
+                    "false_positive_proxy_rate": float(payload.get("false_positive_proxy_rate", 0.0)),
+                    "avg_confidence": float(payload.get("avg_confidence", 0.0)),
+                    "trigger_frequency_per_hour": float(payload.get("trigger_frequency_per_hour", 0.0)),
+                    "calibration_sample_count": int(payload.get("calibration_sample_count", 0)),
+                    "calibration_duration_hours": float(payload.get("calibration_duration_hours", 0.0)),
+                    "suggested_record_threshold": payload.get("suggested_record_threshold"),
+                }
+                break
 
         self._evaluate_overload_mode()
         self._refresh_camera_status_indicators()
@@ -2332,9 +2431,19 @@ QToolButton:focus { outline: none; }
             self.camera_list.setCurrentRow(idx)
 
             result = self._apply_camera_settings_change(idx, cam, new_data)
+            profile_name = str(new_data.get("sensitivity_profile", "custom") or "custom")
+            details = (
+                f"profile={profile_name} "
+                f"confidence_threshold_draw={float(new_data.get('confidence_threshold_draw', 0.0)):.2f} "
+                f"confidence_threshold_record={float(new_data.get('confidence_threshold_record', 0.0)):.2f} "
+                f"required_hits_to_start_recording={int(new_data.get('required_hits_to_start_recording', 1))} "
+                f"required_misses_to_end_detection={int(new_data.get('required_misses_to_end_detection', 1))} "
+                f"min_record_seconds={int(new_data.get('min_record_seconds', 0))}"
+            )
+            self._log_info("settings", "camera settings persisted", source="settings", camera=str(new_data.get("name", idx)), details=details)
             self.log_window.add_entry(
                 "settings",
-                f"zapisano ustawienia kamery {new_data.get('name')} changed={result.get('changed_keys', [])} restart={result.get('restart_reason_keys', [])}",
+                f"zapisano ustawienia kamery {new_data.get('name')} changed={result.get('changed_keys', [])} restart={result.get('restart_reason_keys', [])} {details}",
             )
             self._show_camera_settings_result_message(new_data.get("name", "kamera"), result)
         except Exception as exc:

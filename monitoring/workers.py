@@ -45,13 +45,16 @@ from .config import (
     DEFAULT_REQUIRED_HITS_TO_START_RECORDING,
     DEFAULT_REQUIRED_MISSES_TO_END_DETECTION,
     DEFAULT_RTSP_FPS,
+    DEFAULT_SENSITIVITY_PROFILE,
     DEFAULT_THUMBNAIL_BOX_THICKNESS,
     DEFAULT_THUMBNAIL_FONT_SCALE,
     DEFAULT_THUMBNAIL_FONT_THICKNESS,
     DEFAULT_THUMBNAIL_MODE,
     DEFAULT_THUMBNAIL_OVERLAY_ENABLED,
     RECORD_CLASSES,
+    SENSITIVITY_PROFILES,
     VISIBLE_CLASSES,
+    apply_sensitivity_profile,
 )
 from .recordings import build_recording_sidecar_metadata
 from .runtime_helpers import app_log, compute_effective_writer_fps, worker_stop_timeout_details
@@ -302,6 +305,14 @@ class CameraWorker(QThread):
         self.required_hits_to_start_recording = int(self.camera.get("required_hits_to_start_recording", DEFAULT_REQUIRED_HITS_TO_START_RECORDING))
         self.required_misses_to_end_detection = int(self.camera.get("required_misses_to_end_detection", DEFAULT_REQUIRED_MISSES_TO_END_DETECTION))
         self.min_record_seconds = int(self.camera.get("min_record_seconds", DEFAULT_MIN_RECORD_SECONDS))
+        self.sensitivity_profile = str(self.camera.get("sensitivity_profile", DEFAULT_SENSITIVITY_PROFILE) or DEFAULT_SENSITIVITY_PROFILE)
+        if self.sensitivity_profile != "custom":
+            apply_sensitivity_profile(self.camera, self.sensitivity_profile, force=True)
+            self.confidence_threshold_draw = float(self.camera.get("confidence_threshold_draw", self.confidence_threshold_draw))
+            self.confidence_threshold_record = float(self.camera.get("confidence_threshold_record", self.confidence_threshold_record))
+            self.required_hits_to_start_recording = int(self.camera.get("required_hits_to_start_recording", self.required_hits_to_start_recording))
+            self.required_misses_to_end_detection = int(self.camera.get("required_misses_to_end_detection", self.required_misses_to_end_detection))
+            self.min_record_seconds = int(self.camera.get("min_record_seconds", self.min_record_seconds))
 
         self.preview_fps_main = float(self.camera.get("preview_fps_main", DEFAULT_PREVIEW_FPS_MAIN))
         self.preview_fps_thumb = float(self.camera.get("preview_fps_thumb", DEFAULT_PREVIEW_FPS_THUMB))
@@ -369,6 +380,14 @@ class CameraWorker(QThread):
 
         self.inference_count = 0
         self.positive_detection_count = 0
+        self.telemetry_started_ts = time.monotonic()
+        self.telemetry_trigger_count = 0
+        self.telemetry_false_positive_proxy_count = 0
+        self.telemetry_confidence_sum = 0.0
+        self.telemetry_confidence_count = 0
+        self.telemetry_trigger_timestamps: deque[float] = deque(maxlen=4096)
+        self._false_positive_candidate_expires_ts = 0.0
+        self._false_positive_candidate_active = False
         self.last_metrics_log_ts = 0.0
         self._runtime_limit_logged = False
         self._record_queue_full_warned = False
@@ -524,9 +543,17 @@ class CameraWorker(QThread):
         self.confidence_threshold = legacy_conf
         self.confidence_threshold_draw = float(camera_config.get("confidence_threshold_draw", legacy_conf))
         self.confidence_threshold_record = float(camera_config.get("confidence_threshold_record", legacy_conf))
+        profile_from_config = camera_config.get("sensitivity_profile")
+        if profile_from_config is not None:
+            self.sensitivity_profile = str(profile_from_config or self.sensitivity_profile)
+        if profile_from_config is not None and self.sensitivity_profile != "custom":
+            profile_values = SENSITIVITY_PROFILES.get(self.sensitivity_profile, {})
+            self.confidence_threshold_draw = float(profile_values.get("confidence_threshold_draw", self.confidence_threshold_draw))
+            self.confidence_threshold_record = float(profile_values.get("confidence_threshold_record", self.confidence_threshold_record))
         self.camera["confidence_threshold"] = legacy_conf
         self.camera["confidence_threshold_draw"] = self.confidence_threshold_draw
         self.camera["confidence_threshold_record"] = self.confidence_threshold_record
+        self.camera["sensitivity_profile"] = self.sensitivity_profile
 
         self.set_draw_overlays(camera_config.get("draw_overlays", self.draw_overlays))
         self.set_enable_detection(camera_config.get("enable_detection", self.enable_detection))
@@ -545,6 +572,11 @@ class CameraWorker(QThread):
         self.required_hits_to_start_recording = int(camera_config.get("required_hits_to_start_recording", self.required_hits_to_start_recording))
         self.required_misses_to_end_detection = int(camera_config.get("required_misses_to_end_detection", self.required_misses_to_end_detection))
         self.min_record_seconds = int(camera_config.get("min_record_seconds", self.min_record_seconds))
+        if profile_from_config is not None and self.sensitivity_profile != "custom":
+            profile_values = SENSITIVITY_PROFILES.get(self.sensitivity_profile, {})
+            self.required_hits_to_start_recording = int(profile_values.get("required_hits_to_start_recording", self.required_hits_to_start_recording))
+            self.required_misses_to_end_detection = int(profile_values.get("required_misses_to_end_detection", self.required_misses_to_end_detection))
+            self.min_record_seconds = int(profile_values.get("min_record_seconds", self.min_record_seconds))
         self.thumbnail_mode = str(camera_config.get("thumbnail_mode", self.thumbnail_mode))
         self.thumbnail_overlay_enabled = bool(camera_config.get("thumbnail_overlay_enabled", self.thumbnail_overlay_enabled))
         self.thumbnail_box_thickness = int(camera_config.get("thumbnail_box_thickness", self.thumbnail_box_thickness))
@@ -655,7 +687,8 @@ class CameraWorker(QThread):
             dropped_frames=kwargs["dropped_frames"], thumbnail_mode=kwargs["thumbnail_mode"], inference_count=self.inference_count,
             positive_detection_count=self.positive_detection_count, record_start_mode=self.record_start_mode,
             min_record_seconds=self.min_record_seconds, required_hits_to_start_recording=self.required_hits_to_start_recording,
-            required_misses_to_end_detection=self.required_misses_to_end_detection, event_end_ts=kwargs.get("event_end_ts", 0.0),
+            required_misses_to_end_detection=self.required_misses_to_end_detection, sensitivity_profile=self.sensitivity_profile,
+            event_end_ts=kwargs.get("event_end_ts", 0.0),
             recording_duration=kwargs.get("recording_duration", 0.0), detection_count=kwargs.get("detection_count", 0),
             max_confidence=kwargs.get("max_confidence", 0.0), avg_confidence=kwargs.get("avg_confidence", 0.0), stream_fps=kwargs.get("stream_fps", self.stream_fps),
             preview_role_at_start=kwargs.get("preview_role_at_start", self.preview_role),
@@ -722,6 +755,31 @@ class CameraWorker(QThread):
     def _effective_detect_fps(self, elapsed_window: float) -> float:
         return 0.0 if elapsed_window <= 0 else float(self.inference_count / elapsed_window)
 
+    def _update_false_positive_candidate(self, now_mono: float) -> None:
+        if self._false_positive_candidate_active and now_mono >= self._false_positive_candidate_expires_ts:
+            self.telemetry_false_positive_proxy_count += 1
+            self._false_positive_candidate_active = False
+            self._false_positive_candidate_expires_ts = 0.0
+
+    def _telemetry_payload(self, now_mono: float) -> dict[str, float | int | None]:
+        self._update_false_positive_candidate(now_mono)
+        elapsed_h = max(1e-6, (now_mono - self.telemetry_started_ts) / 3600.0)
+        avg_conf = self.telemetry_confidence_sum / self.telemetry_confidence_count if self.telemetry_confidence_count > 0 else 0.0
+        fp_rate = self.telemetry_false_positive_proxy_count / self.telemetry_trigger_count if self.telemetry_trigger_count > 0 else 0.0
+        trigger_h = self.telemetry_trigger_count / elapsed_h
+        suggested_threshold: float | None = None
+        if now_mono - self.telemetry_started_ts >= 24.0 * 3600.0 and self.telemetry_confidence_count >= 10:
+            candidate = avg_conf + (0.08 if fp_rate > 0.35 else 0.04)
+            suggested_threshold = float(max(0.2, min(0.95, round(candidate, 2))))
+        return {
+            "false_positive_proxy_rate": float(fp_rate),
+            "avg_confidence": float(avg_conf),
+            "trigger_frequency_per_hour": float(trigger_h),
+            "calibration_sample_count": int(self.telemetry_confidence_count),
+            "calibration_duration_hours": float((now_mono - self.telemetry_started_ts) / 3600.0),
+            "suggested_record_threshold": suggested_threshold,
+        }
+
     def _start_recording_session(self, raw_frame: np.ndarray, preview_frame: np.ndarray, best_label: str, best_score: float, best_bbox: tuple[int, int, int, int] | None, stream_fps: float, detect_fps: float) -> bool:
         if not self.enable_recording or not self.record_lock.acquire(blocking=False):
             return False
@@ -735,6 +793,10 @@ class CameraWorker(QThread):
         self.record_thread.start()
         self.recording = True
         self.is_recording_active = True
+        self.telemetry_trigger_count += 1
+        self.telemetry_trigger_timestamps.append(time.monotonic())
+        self._false_positive_candidate_active = False
+        self._false_positive_candidate_expires_ts = 0.0
         self.recording_started_ts = time.monotonic()
         self.state.recording_started_ts = self.recording_started_ts
         self.current_event_start_ts = time.time()
@@ -806,6 +868,11 @@ class CameraWorker(QThread):
         app_log("recording", "recording session finalized", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO", details=f"frames_written={frames_written} dropped_frames={dropped_frames} queue_peak={queue_peak}")
         if dropped_frames > 0:
             app_log("warning", "recorder dropped frames", camera=str(self.camera.get("name", self.index)), source="worker", level="WARNING", details=f"dropped_frames={dropped_frames}")
+        short_clip = duration <= max(4.0, float(self.min_record_seconds) + 1.0)
+        sparse_hits = detection_count <= max(1, int(self.required_hits_to_start_recording))
+        if short_clip and sparse_hits:
+            self._false_positive_candidate_active = True
+            self._false_positive_candidate_expires_ts = time.monotonic() + 30.0
         self.recording = False
         self.is_recording_active = False
         self.output_file = None
@@ -988,6 +1055,7 @@ class CameraWorker(QThread):
             cpu_percent=cpu_percent,
             rss_mb=_rss_mb(),
         )
+        telemetry = self._telemetry_payload(now)
 
         logger.info(
             "performance camera=%s mode=%s overload=%s capture_fps=%.2f infer_fps=%.2f preview_emit_fps=%.2f ui_render_ms=%.2f queue_size=%s dropped_frames=%s cpu_percent=%.1f rss_mb=%.1f detection_interval=%.3f dropped_delta=%s",
@@ -1016,7 +1084,9 @@ class CameraWorker(QThread):
                 f"capture_fps={float(metrics['capture_fps']):.2f} infer_fps={float(metrics['infer_fps']):.2f} "
                 f"preview_emit_fps={float(metrics['preview_emit_fps']):.2f} ui_render_ms={float(metrics['ui_render_ms']):.2f} "
                 f"queue_size={int(metrics['queue_size'])} dropped_frames={int(metrics['dropped_frames'])} "
-                f"cpu_percent={float(metrics['cpu_percent']):.1f} rss_mb={float(metrics['rss_mb']):.1f}"
+                f"cpu_percent={float(metrics['cpu_percent']):.1f} rss_mb={float(metrics['rss_mb']):.1f} "
+                f"fp_proxy={float(telemetry['false_positive_proxy_rate']):.3f} avg_conf={float(telemetry['avg_confidence']):.3f} "
+                f"trigger_h={float(telemetry['trigger_frequency_per_hour']):.2f}"
             ),
         )
 
@@ -1037,6 +1107,7 @@ class CameraWorker(QThread):
         dropped = self.record_thread.dropped_frames if self.record_thread else 0
         since_detect = (now - self.detection_last_seen_ts) if self.detection_last_seen_ts > 0 else -1.0
         elapsed = max(1e-6, now - (self.state.metrics_window_started_ts or now))
+        telemetry = self._telemetry_payload(now)
         status = {
             "stream_fps": float(self.stream_fps),
             "detect_fps": float(max(0.0, self.fps * (1.0 if self.recording else self.detect_fps_factor))),
@@ -1056,6 +1127,12 @@ class CameraWorker(QThread):
             "preview_frames_dropped": int(self.state.preview_frames_dropped_total),
             "skipped_inference_cycles": int(self.state.skipped_inference_cycles),
             "stream_error_active": bool(self.error_counter > 0),
+            "false_positive_proxy_rate": float(telemetry["false_positive_proxy_rate"]),
+            "avg_confidence": float(telemetry["avg_confidence"]),
+            "trigger_frequency_per_hour": float(telemetry["trigger_frequency_per_hour"]),
+            "calibration_sample_count": int(telemetry["calibration_sample_count"]),
+            "calibration_duration_hours": float(telemetry["calibration_duration_hours"]),
+            "suggested_record_threshold": telemetry["suggested_record_threshold"],
         }
         status["heartbeat_ts"] = float(time.monotonic())
         self.worker_status_signal.emit(str(self.camera.get("name", self.index)), status)
@@ -1176,6 +1253,10 @@ class CameraWorker(QThread):
                             if detected:
                                 self.positive_detection_count += 1
                                 self.state.positive_detections += 1
+                                self.telemetry_confidence_sum += float(best_score)
+                                self.telemetry_confidence_count += 1
+                                self._false_positive_candidate_active = False
+                                self._false_positive_candidate_expires_ts = 0.0
                                 self.detection_last_seen_ts = now_mono
                                 self.state.last_detection_ts = now_mono
                                 self.pending_miss_count = 0
@@ -1206,6 +1287,7 @@ class CameraWorker(QThread):
                                         self.pending_positive_hits = 0
 
                             self._maybe_enqueue_record_frame(raw_frame, now_mono)
+                            self._update_false_positive_candidate(now_mono)
                             self._maybe_emit_preview(preview_frame, overlays, now_mono)
                             detection_interval = 1.0 / max(1e-3, self.fps * (1.0 if self.recording else self.detect_fps_factor))
                             self._maybe_log_metrics(detection_interval)
