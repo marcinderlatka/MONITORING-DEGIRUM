@@ -45,7 +45,11 @@ from .config import (
     DEFAULT_REQUIRED_HITS_TO_START_RECORDING,
     DEFAULT_REQUIRED_MISSES_TO_END_DETECTION,
     DEFAULT_RTSP_FPS,
+    DEFAULT_THUMBNAIL_BOX_THICKNESS,
+    DEFAULT_THUMBNAIL_FONT_SCALE,
+    DEFAULT_THUMBNAIL_FONT_THICKNESS,
     DEFAULT_THUMBNAIL_MODE,
+    DEFAULT_THUMBNAIL_OVERLAY_ENABLED,
     RECORD_CLASSES,
     VISIBLE_CLASSES,
 )
@@ -288,6 +292,10 @@ class CameraWorker(QThread):
         self.post_seconds = int(self.camera.get("post_seconds", DEFAULT_POST_SECONDS))
         self.lost_seconds = int(self.camera.get("lost_seconds", DEFAULT_LOST_SECONDS))
         self.thumbnail_mode = str(self.camera.get("thumbnail_mode", DEFAULT_THUMBNAIL_MODE))
+        self.thumbnail_overlay_enabled = bool(self.camera.get("thumbnail_overlay_enabled", DEFAULT_THUMBNAIL_OVERLAY_ENABLED))
+        self.thumbnail_box_thickness = int(self.camera.get("thumbnail_box_thickness", DEFAULT_THUMBNAIL_BOX_THICKNESS))
+        self.thumbnail_font_scale = float(self.camera.get("thumbnail_font_scale", DEFAULT_THUMBNAIL_FONT_SCALE))
+        self.thumbnail_font_thickness = int(self.camera.get("thumbnail_font_thickness", DEFAULT_THUMBNAIL_FONT_THICKNESS))
         self.record_start_mode = str(self.camera.get("record_start_mode", DEFAULT_RECORD_START_MODE))
         self.required_hits_to_start_recording = int(self.camera.get("required_hits_to_start_recording", DEFAULT_REQUIRED_HITS_TO_START_RECORDING))
         self.required_misses_to_end_detection = int(self.camera.get("required_misses_to_end_detection", DEFAULT_REQUIRED_MISSES_TO_END_DETECTION))
@@ -536,6 +544,10 @@ class CameraWorker(QThread):
         self.required_misses_to_end_detection = int(camera_config.get("required_misses_to_end_detection", self.required_misses_to_end_detection))
         self.min_record_seconds = int(camera_config.get("min_record_seconds", self.min_record_seconds))
         self.thumbnail_mode = str(camera_config.get("thumbnail_mode", self.thumbnail_mode))
+        self.thumbnail_overlay_enabled = bool(camera_config.get("thumbnail_overlay_enabled", self.thumbnail_overlay_enabled))
+        self.thumbnail_box_thickness = int(camera_config.get("thumbnail_box_thickness", self.thumbnail_box_thickness))
+        self.thumbnail_font_scale = float(camera_config.get("thumbnail_font_scale", self.thumbnail_font_scale))
+        self.thumbnail_font_thickness = int(camera_config.get("thumbnail_font_thickness", self.thumbnail_font_thickness))
         self.record_start_mode = str(camera_config.get("record_start_mode", self.record_start_mode))
 
         self.preview_fps_main = float(camera_config.get("preview_fps_main", self.preview_fps_main))
@@ -560,6 +572,10 @@ class CameraWorker(QThread):
         self.camera["required_misses_to_end_detection"] = self.required_misses_to_end_detection
         self.camera["min_record_seconds"] = self.min_record_seconds
         self.camera["thumbnail_mode"] = self.thumbnail_mode
+        self.camera["thumbnail_overlay_enabled"] = self.thumbnail_overlay_enabled
+        self.camera["thumbnail_box_thickness"] = self.thumbnail_box_thickness
+        self.camera["thumbnail_font_scale"] = self.thumbnail_font_scale
+        self.camera["thumbnail_font_thickness"] = self.thumbnail_font_thickness
         self.camera["record_start_mode"] = self.record_start_mode
 
         record_base = camera_config.get("record_path", self.camera.get("record_path", DEFAULT_RECORD_PATH))
@@ -605,11 +621,23 @@ class CameraWorker(QThread):
 
     def _make_detection_overlay_frame(self, frame: np.ndarray, bbox: tuple[int, int, int, int] | None, label: str, confidence: float) -> np.ndarray:
         canvas = frame.copy()
-        if bbox:
+        if bbox and self.thumbnail_overlay_enabled:
             x1, y1, x2, y2 = bbox
             color = _label_color(label)
-            cv2.rectangle(canvas, (x1, y1), (x2, y2), color, 2)
-            cv2.putText(canvas, f"{label}: {confidence * 100:.1f}%", (x1, max(20, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+            box_thickness = max(0, int(self.thumbnail_box_thickness))
+            font_scale = max(0.1, float(self.thumbnail_font_scale))
+            font_thickness = max(1, int(self.thumbnail_font_thickness))
+            if box_thickness > 0:
+                cv2.rectangle(canvas, (x1, y1), (x2, y2), color, box_thickness)
+            cv2.putText(
+                canvas,
+                f"{label}: {confidence * 100:.1f}%",
+                (x1, max(20, y1 - 10)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                font_scale,
+                color,
+                font_thickness,
+            )
         return canvas
 
     def _build_recording_meta(self, **kwargs: Any) -> dict:

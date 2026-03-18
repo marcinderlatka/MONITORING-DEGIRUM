@@ -247,6 +247,10 @@ def test_runtime_settings_apply_without_restart_for_live_fields():
         "required_misses_to_end_detection": 2,
         "min_record_seconds": 4,
         "thumbnail_mode": "best_detection",
+        "thumbnail_overlay_enabled": False,
+        "thumbnail_box_thickness": 3,
+        "thumbnail_font_scale": 0.9,
+        "thumbnail_font_thickness": 2,
         "record_start_mode": "include_prerecord_first",
         "preview_fps_main": 10,
         "preview_fps_thumb": 2,
@@ -263,6 +267,63 @@ def test_runtime_settings_apply_without_restart_for_live_fields():
     assert worker.confidence_threshold_draw == 0.35
     assert worker.confidence_threshold_record == 0.5
     assert "car" in worker.visible_classes_lower
+    assert worker.thumbnail_overlay_enabled is False
+    assert worker.thumbnail_box_thickness == 3
+    assert worker.thumbnail_font_scale == 0.9
+    assert worker.thumbnail_font_thickness == 2
+
+
+def test_thumbnail_overlay_style_is_applied(monkeypatch):
+    worker = _worker()
+    worker.thumbnail_overlay_enabled = True
+    worker.thumbnail_box_thickness = 4
+    worker.thumbnail_font_scale = 1.1
+    worker.thumbnail_font_thickness = 3
+
+    calls: dict[str, object] = {}
+
+    def _rectangle(_canvas, _p1, _p2, _color, thickness):
+        calls["rectangle_thickness"] = thickness
+        return None
+
+    def _put_text(_canvas, _text, _org, _font, font_scale, _color, thickness):
+        calls["font_scale"] = font_scale
+        calls["font_thickness"] = thickness
+        return None
+
+    monkeypatch.setattr("monitoring.workers.cv2.rectangle", _rectangle)
+    monkeypatch.setattr("monitoring.workers.cv2.putText", _put_text)
+
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    worker._make_detection_overlay_frame(frame, (10, 10, 80, 80), "person", 0.99)
+
+    assert calls["rectangle_thickness"] == 4
+    assert calls["font_scale"] == 1.1
+    assert calls["font_thickness"] == 3
+
+
+def test_thumbnail_overlay_can_be_disabled(monkeypatch):
+    worker = _worker()
+    worker.thumbnail_overlay_enabled = False
+
+    draw_calls = {"rectangle": 0, "put_text": 0}
+
+    def _rectangle(*_args, **_kwargs):
+        draw_calls["rectangle"] += 1
+        return None
+
+    def _put_text(*_args, **_kwargs):
+        draw_calls["put_text"] += 1
+        return None
+
+    monkeypatch.setattr("monitoring.workers.cv2.rectangle", _rectangle)
+    monkeypatch.setattr("monitoring.workers.cv2.putText", _put_text)
+
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    worker._make_detection_overlay_frame(frame, (10, 10, 80, 80), "person", 0.99)
+
+    assert draw_calls["rectangle"] == 0
+    assert draw_calls["put_text"] == 0
 
 
 def test_apply_runtime_settings_refreshes_class_filters():

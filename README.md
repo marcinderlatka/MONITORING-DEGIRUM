@@ -78,6 +78,22 @@ Najważniejsze pola opcjonalne:
 | `record_path` | Folder bazowy nagrań (podkatalog o nazwie kamery tworzony automatycznie). |
 | `pre_seconds` / `post_seconds` | Liczba sekund bufora przed/po zdarzeniu używana w nagraniach. |
 | `lost_seconds` | Tolerancja braku detekcji zanim nagrywanie zostanie zamknięte. |
+| `thumbnail_overlay_enabled` | Czy na miniaturze alertu rysować ramkę i etykietę detekcji (`true` domyślnie). |
+| `thumbnail_box_thickness` | Grubość ramki na miniaturze alertu (domyślnie `1`, `0` = brak ramki). |
+| `thumbnail_font_scale` | Skala fontu etykiety na miniaturze alertu (domyślnie `0.5`). |
+| `thumbnail_font_thickness` | Grubość fontu etykiety na miniaturze alertu (domyślnie `1`). |
+
+Przykład „subtelnej” miniatury (cienka etykieta + brak ramki):
+
+```json
+{
+  "name": "Magazyn",
+  "thumbnail_overlay_enabled": false,
+  "thumbnail_box_thickness": 0,
+  "thumbnail_font_scale": 0.45,
+  "thumbnail_font_thickness": 1
+}
+```
 
 Zmiany w konfiguracji można wprowadzać z poziomu UI (przycisk „Ustawienia” → dialog kamery) lub ręcznie edytując plik i ponownie uruchamiając aplikację.
 

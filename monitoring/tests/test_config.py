@@ -117,3 +117,15 @@ def test_fill_camera_defaults_adds_info_overlay_flag():
     updated = config.fill_camera_defaults(camera)
 
     assert updated["show_camera_info_overlay"] is True
+
+
+def test_fill_camera_defaults_adds_thumbnail_overlay_style_defaults():
+    from monitoring import config
+
+    camera = {"name": "Cam"}
+    updated = config.fill_camera_defaults(camera)
+
+    assert updated["thumbnail_overlay_enabled"] is True
+    assert updated["thumbnail_box_thickness"] == 1
+    assert updated["thumbnail_font_scale"] == 0.5
+    assert updated["thumbnail_font_thickness"] == 1
