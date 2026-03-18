@@ -1675,9 +1675,12 @@ QToolButton:focus { outline: none; }
         self._ui_render_stage_ms_by_camera: dict[str, dict[str, float]] = {}
         self._performance_log_last_ts_by_camera: dict[str, float] = {}
         self._performance_log_interval_s = 10.0
-        self._preview_cache: dict[tuple[int, str, int, int], QPixmap] = {}
+        self.grid_preview_quality = str(self.config.get("grid_preview_quality", "normal")) if hasattr(self, "config") else "normal"
+        self._preview_cache: dict[tuple[int, str, int, int, int, int, str], QPixmap] = {}
         self._last_thumb_update_ts: dict[int, float] = {}
         self._thumb_update_interval_s = 1.0 / max(0.5, float(self.preview_fps_thumb))
+        self._ui_grid_ms_history_by_camera: dict[str, deque[float]] = {}
+        self._ui_grid_frame_times_by_camera: dict[str, deque[float]] = {}
 
         self.diag_panel = QLabel("Diagnostyka (debug): brak danych")
         self.diag_panel.setStyleSheet("color: #dddddd; background: #111; padding: 8px; border: 1px solid #333;")
@@ -2186,6 +2189,9 @@ QToolButton:focus { outline: none; }
         stage_stats = self._ui_render_stage_ms_by_camera.get(cam_name, {})
         payload["ui_thumb_ms"] = float(stage_stats.get("thumb", 0.0))
         payload["ui_grid_ms"] = float(stage_stats.get("grid", 0.0))
+        payload["ui_grid_avg_ms"] = float(stage_stats.get("grid_avg_ms", payload["ui_grid_ms"]))
+        payload["ui_grid_fps"] = float(stage_stats.get("grid_fps", 0.0))
+        payload["ui_grid_target_fps"] = float(stage_stats.get("grid_target_fps", self._grid_target_fps()))
         payload["ui_main_ms"] = float(stage_stats.get("main", 0.0))
         self._worker_diag[cam_name] = payload
         self.worker_status[cam_name] = payload
@@ -2208,7 +2214,8 @@ QToolButton:focus { outline: none; }
                     f"mode={mode} overload={overload} "
                     f"capture_fps={float(payload.get('capture_fps', 0.0)):.2f} infer_fps={float(payload.get('infer_fps', 0.0)):.2f} "
                     f"preview_emit_fps={float(payload.get('preview_emit_fps', 0.0)):.2f} ui_render_ms={float(payload.get('ui_render_ms', 0.0)):.2f} "
-                    f"thumb_ms={float(payload.get('ui_thumb_ms', 0.0)):.2f} grid_ms={float(payload.get('ui_grid_ms', 0.0)):.2f} main_ms={float(payload.get('ui_main_ms', 0.0)):.2f} "
+                    f"thumb_ms={float(payload.get('ui_thumb_ms', 0.0)):.2f} grid_ms={float(payload.get('ui_grid_ms', 0.0)):.2f} grid_avg_ms={float(payload.get('ui_grid_avg_ms', 0.0)):.2f} "
+                    f"grid_fps={float(payload.get('ui_grid_fps', 0.0)):.2f}/{float(payload.get('ui_grid_target_fps', 0.0)):.2f} main_ms={float(payload.get('ui_main_ms', 0.0)):.2f} "
                     f"queue_size={int(payload.get('queue_size', 0))} dropped_frames={int(payload.get('dropped_frames', 0))} "
                     f"cpu_percent={float(payload.get('cpu_percent', 0.0)):.1f} rss_mb={float(payload.get('rss_mb', 0.0)):.1f} "
                     f"fp_proxy={float(payload.get('false_positive_proxy_rate', 0.0)):.3f} avg_conf={float(payload.get('avg_confidence', 0.0)):.3f} "
@@ -2276,6 +2283,8 @@ QToolButton:focus { outline: none; }
                     f"infer fps: {float(stat.get('infer_fps', 0.0)):.2f}",
                     f"preview emit fps: {float(stat.get('preview_emit_fps', 0.0)):.2f}",
                     f"ui render ms: {float(stat.get('ui_render_ms', 0.0)):.2f}",
+                    f"ui grid avg ms: {float(stat.get('ui_grid_avg_ms', 0.0)):.2f}",
+                    f"ui grid fps/target: {float(stat.get('ui_grid_fps', 0.0)):.2f}/{float(stat.get('ui_grid_target_fps', self._grid_target_fps())):.2f}",
                     f"writer fps: {float(stat.get('writer_fps', 0.0)):.2f}",
                     f"recording queue size: {int(stat.get('queue_size', 0))}",
                     f"dropped frames: {int(stat.get('dropped_frames', 0))}",
@@ -2590,8 +2599,22 @@ QToolButton:focus { outline: none; }
             self._record_render_stage(idx, "thumb", (time.perf_counter() - stage_started) * 1000.0)
 
         grid_started = time.perf_counter()
-        if self.camera_grid.isVisible() and thumb_source is not None:
-            grid_pm = self._get_scaled_preview_pixmap(idx, "grid", thumb_source, 320, 180)
+        if self.camera_grid.isVisible():
+            grid_source, grid_w, grid_h, grid_dpr, source_tag = self._resolve_grid_render_params(idx)
+            if grid_source is not None:
+                grid_pm = self._get_scaled_preview_pixmap(
+                    idx,
+                    "grid",
+                    grid_source,
+                    grid_w,
+                    grid_h,
+                    tile_width=grid_w,
+                    tile_height=grid_h,
+                    dpr=grid_dpr,
+                    source_tag=source_tag,
+                )
+            else:
+                grid_pm = None
             if hasattr(self.camera_grid, "update_pixmap"):
                 self.camera_grid.update_pixmap(idx, grid_pm)
             self._record_render_stage(idx, "grid", (time.perf_counter() - grid_started) * 1000.0)
@@ -2623,14 +2646,81 @@ QToolButton:focus { outline: none; }
         for key in keys:
             self._preview_cache.pop(key, None)
 
-    def _get_scaled_preview_pixmap(self, idx: int, channel: str, frame: np.ndarray, width: int, height: int) -> QPixmap:
-        key = (int(idx), str(channel), int(width), int(height))
+    def _grid_target_fps(self) -> float:
+        target_fps = float(self.preview_fps_thumb)
+        if self._is_fullscreen and self.camera_grid.isVisible() and str(self.grid_preview_quality).lower() == "high-quality":
+            target_fps = max(target_fps, float(self.preview_fps_main))
+        if self.overload_mode_active:
+            target_fps *= max(0.4, float(overload_level_profile(self.overload_level).thumb_preview_fps_factor))
+        return max(0.5, target_fps)
+
+    def _resolve_grid_render_params(self, idx: int) -> tuple[np.ndarray | None, int, int, float, str]:
+        thumb_source = self._last_thumb_frame.get(idx)
+        main_source = self._last_main_frame.get(idx)
+        source = thumb_source if thumb_source is not None else main_source
+        source_tag = "thumb"
+
+        tile_width = 320
+        tile_height = 180
+        dpr = 1.0
+        if 0 <= idx < len(self.camera_grid.items):
+            label = self.camera_grid.items[idx].frame_label
+            tile_size = label.size()
+            tile_width = max(1, int(tile_size.width()))
+            tile_height = max(1, int(tile_size.height()))
+            try:
+                dpr = max(1.0, float(label.devicePixelRatioF()))
+            except Exception:
+                dpr = 1.0
+        if dpr <= 0:
+            dpr = 1.0
+
+        if self._is_fullscreen and self.camera_grid.isVisible() and str(self.grid_preview_quality).lower() == "high-quality":
+            if main_source is not None:
+                source = main_source
+                source_tag = "main"
+            else:
+                tile_width = max(tile_width, int(self.preview_thumb_max_width))
+                tile_height = max(tile_height, int(self.preview_thumb_max_height))
+                source_tag = "thumb-hq"
+
+        if self.overload_mode_active:
+            overload_scale = 0.85 if int(self.overload_level) <= 1 else 0.65
+            tile_width = max(1, int(round(tile_width * overload_scale)))
+            tile_height = max(1, int(round(tile_height * overload_scale)))
+            source_tag = f"{source_tag}-overload"
+
+        return source, tile_width, tile_height, dpr, source_tag
+
+    def _get_scaled_preview_pixmap(
+        self,
+        idx: int,
+        channel: str,
+        frame: np.ndarray,
+        width: int,
+        height: int,
+        *,
+        tile_width: int | None = None,
+        tile_height: int | None = None,
+        dpr: float = 1.0,
+        source_tag: str = "thumb",
+    ) -> QPixmap:
+        logical_w = max(1, int(width))
+        logical_h = max(1, int(height))
+        tile_w = max(1, int(tile_width if tile_width is not None else logical_w))
+        tile_h = max(1, int(tile_height if tile_height is not None else logical_h))
+        dpr_scaled = max(100, int(round(max(1.0, float(dpr)) * 100.0)))
+        key = (int(idx), str(channel), logical_w, logical_h, tile_w, tile_h, f"{dpr_scaled}:{source_tag}")
         cached = self._preview_cache.get(key)
         if cached is not None and not cached.isNull():
             return cached
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        resized = cv2.resize(rgb, (int(width), int(height)), interpolation=cv2.INTER_AREA)
-        qimg = QImage(resized.data, int(width), int(height), resized.strides[0], QImage.Format_RGB888).copy()
+        physical_w = max(1, int(round(logical_w * (dpr_scaled / 100.0))))
+        physical_h = max(1, int(round(logical_h * (dpr_scaled / 100.0))))
+        interpolation = cv2.INTER_CUBIC if "hq" in source_tag or source_tag.startswith("main") else cv2.INTER_AREA
+        resized = cv2.resize(rgb, (physical_w, physical_h), interpolation=interpolation)
+        qimg = QImage(resized.data, physical_w, physical_h, resized.strides[0], QImage.Format_RGB888).copy()
+        qimg.setDevicePixelRatio(dpr_scaled / 100.0)
         pixmap = QPixmap.fromImage(qimg)
         self._preview_cache[key] = pixmap
         return pixmap
@@ -2639,9 +2729,26 @@ QToolButton:focus { outline: none; }
         cam_name = str(self.cameras[idx].get("name", idx)) if 0 <= idx < len(self.cameras) else str(idx)
         stage_stats = self._ui_render_stage_ms_by_camera.setdefault(cam_name, {})
         stage_stats[str(stage)] = float(render_ms)
+        if str(stage) == "grid":
+            grid_hist = self._ui_grid_ms_history_by_camera.setdefault(cam_name, deque(maxlen=90))
+            grid_hist.append(float(render_ms))
+            stage_stats["grid_avg_ms"] = float(sum(grid_hist) / max(1, len(grid_hist)))
+            fps_times = self._ui_grid_frame_times_by_camera.setdefault(cam_name, deque(maxlen=180))
+            now_ts = time.monotonic()
+            fps_times.append(now_ts)
+            if len(fps_times) >= 2:
+                dt = max(1e-6, fps_times[-1] - fps_times[0])
+                stage_stats["grid_fps"] = float((len(fps_times) - 1) / dt)
+            else:
+                stage_stats["grid_fps"] = 0.0
+            stage_stats["grid_target_fps"] = float(self._grid_target_fps())
         stat = self.worker_status.get(cam_name)
         if isinstance(stat, dict):
             stat[f"ui_{stage}_ms"] = float(render_ms)
+            if str(stage) == "grid":
+                stat["ui_grid_avg_ms"] = float(stage_stats.get("grid_avg_ms", render_ms))
+                stat["ui_grid_fps"] = float(stage_stats.get("grid_fps", 0.0))
+                stat["ui_grid_target_fps"] = float(stage_stats.get("grid_target_fps", self._grid_target_fps()))
 
     def _build_camera_hud_lines(self, idx: int) -> list[str]:
         if idx < 0 or idx >= len(self.cameras):
@@ -2666,6 +2773,8 @@ QToolButton:focus { outline: none; }
             f"Infer FPS: {float(stat.get('infer_fps', 0.0)):.1f}",
             f"Preview emit FPS: {float(stat.get('preview_emit_fps', 0.0)):.1f}",
             f"UI render: {float(stat.get('ui_render_ms', 0.0)):.1f} ms",
+            f"UI grid avg: {float(stat.get('ui_grid_avg_ms', 0.0)):.1f} ms",
+            f"UI grid FPS: {float(stat.get('ui_grid_fps', 0.0)):.1f}/{float(stat.get('ui_grid_target_fps', self._grid_target_fps())):.1f}",
             f"Detekcja FPS: {float(stat.get('detect_fps', 0.0)):.1f}",
             f"Zapis FPS: {float(stat.get('writer_fps', 0.0)):.1f}",
             f"Kolejka: {int(stat.get('queue_size', 0))}",
