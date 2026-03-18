@@ -2605,11 +2605,7 @@ QToolButton:focus { outline: none; }
             box_h = (line_h * len(lines)) + (2 * pad_y)
             x, y = self._camera_info_overlay_anchor(image_rect, (box_w, box_h), padding=10)
 
-            overlay_alpha_raw = cam.get("camera_info_overlay_alpha", DEFAULT_CAMERA_INFO_OVERLAY_ALPHA)
-            try:
-                overlay_alpha = int(overlay_alpha_raw)
-            except (TypeError, ValueError):
-                overlay_alpha = int(DEFAULT_CAMERA_INFO_OVERLAY_ALPHA)
+            overlay_alpha = int(cam.get("camera_info_overlay_alpha", DEFAULT_CAMERA_INFO_OVERLAY_ALPHA))
             overlay_alpha = max(0, min(255, overlay_alpha))
             overlay_color = QColor(0, 0, 0, overlay_alpha)
             border_color = QColor(255, 255, 255, 40)
@@ -2621,7 +2617,9 @@ QToolButton:focus { outline: none; }
             text_color = QColor(255, 255, 255, 178)
             for i, line in enumerate(lines):
                 ty = baseline + (i * line_h)
-                painter.setPen(QColor(0, 0, 0, 220))
+                painter.setPen(QColor(0, 0, 0, 230))
+                painter.drawText(x + pad_x + 2, ty + 2, line)
+                painter.setPen(QColor(0, 0, 0, 180))
                 painter.drawText(x + pad_x + 1, ty + 1, line)
                 painter.setPen(text_color)
                 painter.drawText(x + pad_x, ty, line)

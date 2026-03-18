@@ -82,7 +82,7 @@ Najważniejsze pola opcjonalne:
 | `thumbnail_box_thickness` | Grubość ramki na miniaturze alertu (domyślnie `1`, `0` = brak ramki). |
 | `thumbnail_font_scale` | Skala fontu etykiety na miniaturze alertu (domyślnie `0.5`). |
 | `thumbnail_font_thickness` | Grubość fontu etykiety na miniaturze alertu (domyślnie `1`). |
-| `camera_info_overlay_alpha` | Krycie tła HUD informacji na obrazie (`0` = przezroczyste, `255` = nieprzezroczyste; domyślnie `178`, czyli ~30% przezroczystości / ~70% krycia). |
+| `camera_info_overlay_alpha` | Krycie tła HUD informacji na obrazie (`0` = przezroczyste, `255` = nieprzezroczyste; domyślnie `153`, czyli ~60%). |
 
 Przykład „subtelnej” miniatury (cienka etykieta + brak ramki):
 
@@ -496,7 +496,7 @@ Additional notes:
 
 ### 4) Scalony HUD informacji o kamerze na obrazie
 - **Stare zachowanie:** status był rozdzielony między panel pod obrazem i górny overlay tekstowy.
-- **Nowe zachowanie:** informacje są scalone do jednego HUD na obrazie (prawy dolny róg), tekst na półprzezroczystym (30% przezroczystości) czarnym tle.
+- **Nowe zachowanie:** informacje są scalone do jednego HUD na obrazie (prawy dolny róg), biały tekst na półprzezroczystym (60%) czarnym tle.
 - **Efekt praktyczny:** kluczowe dane (status, FPS, kolejka, dropy, flagi REC/DET/ERR/DEG) są w jednym miejscu bez dublowania.
 - **Pliki:** `monitoring/app.py`.
 
@@ -528,7 +528,7 @@ Additional notes:
 ### Overlay informacji kamery bezpośrednio na obrazie
 - HUD kamery (status, FPS, queue/drop i flagi REC/DET/ERR/DEG) jest rysowany bezpośrednio na podglądzie.
 - Pozycjonowanie overlayu liczone jest względem faktycznie widocznego prostokąta obrazu po letterboxie, nie względem całego widgetu.
-- Overlay jest osadzony w prawym-dolnym rogu obrazu (kotwiczony do widocznego obszaru po letterboxie), z półprzezroczystym czarnym tłem ~30% przezroczystości (`camera_info_overlay_alpha`, domyślnie `178`).
+- Overlay jest osadzony w prawym-dolnym rogu obrazu (kotwiczony do widocznego obszaru po letterboxie), z półprzezroczystym czarnym tłem ~60% (`camera_info_overlay_alpha`, domyślnie `153`).
 
 ### Przeglądarka nagrań: kafelki miniatur JPG
 - Pipeline miniatur kafelków został dopięty do końca: worker → sygnał → mapowanie po absolutnej ścieżce → render w głównym wątku.
@@ -587,7 +587,7 @@ Wszystkie powyższe wpisy są publikowane przez istniejący mechanizm logów i s
 - **Język HUD:** etykiety i treści są po polsku (m.in. Kamera, Status, FPS, Kolejka, Pominięte klatki, Tryb, Połączenie, Błąd).
 - **Ustawienia runtime:** po zapisaniu zmian HUD odświeża się natychmiast; ustawienia „live-safe” są stosowane bez restartu, a ustawienia wymagające restartu uruchamiają automatyczny restart tylko tej kamery.
 - **Widoczność HUD:** flaga `show_camera_info_overlay` (domyślnie `true`) działa od razu po zmianie.
-- **Przezroczystość HUD:** opcjonalny parametr `camera_info_overlay_alpha` (0–255, domyślnie `178`) pozwala stroić krycie tła bez zmian w kodzie.
+- **Przezroczystość HUD:** opcjonalny parametr `camera_info_overlay_alpha` (0–255, domyślnie `153`) pozwala stroić krycie tła bez zmian w kodzie.
 
 ### Diagnostyka (panel Logi)
 - Dodano bardziej jednoznaczne logi dla ładowania miniaturek (`source=recordings-browser`) oraz odświeżania HUD i zastosowania ustawień (`source=camera-hud` / `source=settings`).
