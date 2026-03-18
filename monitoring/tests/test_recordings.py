@@ -148,6 +148,7 @@ def test_build_recording_sidecar_metadata_contains_reliability_fields():
     assert payload["duration"] == 4.0
     assert payload["detection_count"] == 12
     assert payload["scene_thumb"] == "/tmp/a.mp4.jpg"
+    assert payload["sensitivity_profile"] == "custom"
 
 
 def test_metadata_duration_fields(tmp_path):

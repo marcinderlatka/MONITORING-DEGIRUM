@@ -41,6 +41,31 @@ DEFAULT_RECORD_START_MODE = "detection_first"
 DEFAULT_REQUIRED_HITS_TO_START_RECORDING = 1
 DEFAULT_REQUIRED_MISSES_TO_END_DETECTION = 1
 DEFAULT_MIN_RECORD_SECONDS = 3
+DEFAULT_SENSITIVITY_PROFILE = "balanced"
+
+SENSITIVITY_PROFILES = {
+    "high_recall": {
+        "confidence_threshold_draw": 0.35,
+        "confidence_threshold_record": 0.40,
+        "required_hits_to_start_recording": 1,
+        "required_misses_to_end_detection": 3,
+        "min_record_seconds": 6,
+    },
+    "balanced": {
+        "confidence_threshold_draw": DEFAULT_CONFIDENCE_THRESHOLD_DRAW,
+        "confidence_threshold_record": DEFAULT_CONFIDENCE_THRESHOLD_RECORD,
+        "required_hits_to_start_recording": DEFAULT_REQUIRED_HITS_TO_START_RECORDING,
+        "required_misses_to_end_detection": DEFAULT_REQUIRED_MISSES_TO_END_DETECTION,
+        "min_record_seconds": DEFAULT_MIN_RECORD_SECONDS,
+    },
+    "high_precision": {
+        "confidence_threshold_draw": 0.60,
+        "confidence_threshold_record": 0.70,
+        "required_hits_to_start_recording": 3,
+        "required_misses_to_end_detection": 1,
+        "min_record_seconds": 2,
+    },
+}
 DEFAULT_PREVIEW_FPS_MAIN = 15
 DEFAULT_PREVIEW_FPS_THUMB = 3
 DEFAULT_PREVIEW_PAUSE_WHEN_HIDDEN = True
@@ -67,6 +92,25 @@ DEFAULT_OVERLOAD_MAX_UI_RENDER_MS = 14.0
 DEFAULT_OVERLOAD_MAX_QUEUE_SIZE = 24
 DEFAULT_OVERLOAD_MAX_PREVIEW_BANDWIDTH_MBPS = 12.0
 
+
+
+
+def apply_sensitivity_profile(camera: MutableMapping[str, object], profile_name: str, *, force: bool = False) -> None:
+    """Apply sensitivity profile values into ``camera`` in-place."""
+    profile = SENSITIVITY_PROFILES.get(str(profile_name))
+    if not profile:
+        return
+    for key, value in profile.items():
+        if force or key not in camera:
+            camera[key] = value
+
+
+def infer_sensitivity_profile(camera: MutableMapping[str, object]) -> str:
+    """Infer profile name based on camera thresholds or return ``custom``."""
+    for profile_name, values in SENSITIVITY_PROFILES.items():
+        if all(camera.get(k) == v for k, v in values.items()):
+            return profile_name
+    return "custom"
 
 def _resolve_path(value: str | os.PathLike[str] | None, *, default: Path) -> Path:
     """Resolve a path coming from configuration."""
@@ -102,6 +146,7 @@ def fill_camera_defaults(camera: MutableMapping[str, object]) -> MutableMapping[
         "required_hits_to_start_recording": DEFAULT_REQUIRED_HITS_TO_START_RECORDING,
         "required_misses_to_end_detection": DEFAULT_REQUIRED_MISSES_TO_END_DETECTION,
         "min_record_seconds": DEFAULT_MIN_RECORD_SECONDS,
+        "sensitivity_profile": DEFAULT_SENSITIVITY_PROFILE,
         "preview_fps_main": DEFAULT_PREVIEW_FPS_MAIN,
         "preview_fps_thumb": DEFAULT_PREVIEW_FPS_THUMB,
         "preview_pause_when_hidden": DEFAULT_PREVIEW_PAUSE_WHEN_HIDDEN,
@@ -118,14 +163,35 @@ def fill_camera_defaults(camera: MutableMapping[str, object]) -> MutableMapping[
         "type": "rtsp",
     }
 
+    had_profile_inputs = any(
+        key in camera
+        for key in (
+            "confidence_threshold",
+            "confidence_threshold_draw",
+            "confidence_threshold_record",
+            "required_hits_to_start_recording",
+            "required_misses_to_end_detection",
+            "min_record_seconds",
+        )
+    )
+
     legacy_confidence = camera.get("confidence_threshold", DEFAULT_CONFIDENCE_THRESHOLD)
     if "confidence_threshold_draw" not in camera:
         camera["confidence_threshold_draw"] = legacy_confidence
     if "confidence_threshold_record" not in camera:
         camera["confidence_threshold_record"] = legacy_confidence
 
+    explicit_profile = camera.get("sensitivity_profile")
     for key, value in defaults.items():
         camera.setdefault(key, value)
+
+    if explicit_profile is None and had_profile_inputs:
+        profile_name = "custom"
+    else:
+        profile_name = str(explicit_profile or DEFAULT_SENSITIVITY_PROFILE)
+    camera["sensitivity_profile"] = profile_name
+    if profile_name != "custom":
+        apply_sensitivity_profile(camera, profile_name, force=True)
 
     # ``record_path`` can be provided as a relative path in the configuration
     # file.  Normalise it so the rest of the application always works with an
@@ -218,6 +284,7 @@ __all__ = [
     "DEFAULT_ENABLE_RECORDING",
     "DEFAULT_FPS",
     "DEFAULT_RTSP_FPS",
+    "DEFAULT_SENSITIVITY_PROFILE",
     "DEFAULT_LOST_SECONDS",
     "DEFAULT_MODEL",
     "DEFAULT_POST_SECONDS",
@@ -257,9 +324,12 @@ __all__ = [
     "LOG_RETENTION_HOURS",
     "MODELS_PATH",
     "RECORDINGS_CATALOG_PATH",
+    "SENSITIVITY_PROFILES",
     "RECORD_CLASSES",
     "VISIBLE_CLASSES",
+    "apply_sensitivity_profile",
     "fill_camera_defaults",
+    "infer_sensitivity_profile",
     "list_usb_cameras",
     "load_config",
     "save_config",

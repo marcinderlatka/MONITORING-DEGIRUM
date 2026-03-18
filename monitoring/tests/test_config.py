@@ -57,6 +57,17 @@ def test_fill_camera_defaults_adds_reliability_defaults():
 
     assert updated["required_misses_to_end_detection"] == 1
     assert updated["min_record_seconds"] == 3
+    assert updated["sensitivity_profile"] == "balanced"
+
+
+def test_fill_camera_defaults_applies_selected_sensitivity_profile():
+    from monitoring import config
+
+    camera = {"name": "Cam", "sensitivity_profile": "high_precision"}
+    updated = config.fill_camera_defaults(camera)
+
+    assert updated["confidence_threshold_record"] == config.SENSITIVITY_PROFILES["high_precision"]["confidence_threshold_record"]
+    assert updated["required_hits_to_start_recording"] == 3
 
 
 def test_preview_role_defaults_and_config_fill():
