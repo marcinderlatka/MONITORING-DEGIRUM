@@ -58,6 +58,18 @@ def test_fill_camera_defaults_adds_reliability_defaults():
     assert updated["required_misses_to_end_detection"] == 1
     assert updated["min_record_seconds"] == 3
     assert updated["sensitivity_profile"] == "balanced"
+    assert updated["recording_backend"] == "current"
+
+
+def test_fill_camera_defaults_normalizes_recording_backend():
+    from monitoring import config
+
+    camera = {"name": "Cam", "recording_backend": "FFMPEG"}
+    updated = config.fill_camera_defaults(camera)
+    assert updated["recording_backend"] == "ffmpeg"
+
+    fallback = config.fill_camera_defaults({"name": "Cam2", "recording_backend": "unknown"})
+    assert fallback["recording_backend"] == "current"
 
 
 def test_fill_camera_defaults_applies_selected_sensitivity_profile():

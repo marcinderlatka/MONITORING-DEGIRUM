@@ -154,6 +154,8 @@ def test_build_recording_sidecar_metadata_contains_reliability_fields():
     assert payload["recorder_enqueue_stride"] == 1
     assert payload["recorder_degradation_level"] == 0
     assert payload["writer_fps_base"] == 0.0
+    assert payload["writer_backend"] == "current"
+    assert payload["ffmpeg_exit_code"] is None
 
 
 def test_metadata_duration_fields(tmp_path):
@@ -279,6 +281,31 @@ def test_metadata_preserves_recorder_efficiency_metrics():
     assert payload["stream_fps_measured"] == 19.2
     assert payload["writer_fps_selected"] == 6.0
     assert payload["writer_fps_reason"] == "measured_stream"
+
+
+def test_metadata_preserves_backend_diagnostics():
+    payload = build_recording_sidecar_metadata(
+        camera="Cam3",
+        label="person",
+        confidence=0.9,
+        event_time="2024-01-01 00:00:00",
+        filepath="/tmp/f.mp4",
+        thumb="/tmp/f.jpg",
+        source_fps=25.0,
+        writer_fps=8.0,
+        detect_fps=5.0,
+        event_start_ts=2.0,
+        thumbnail_ts=2.1,
+        frames_written=10,
+        dropped_frames=0,
+        thumbnail_mode="first_detection",
+        inference_count=12,
+        positive_detection_count=7,
+        writer_backend="ffmpeg",
+        ffmpeg_exit_code=0,
+    )
+    assert payload["writer_backend"] == "ffmpeg"
+    assert payload["ffmpeg_exit_code"] == 0
 
 
 def test_load_recording_entries_uses_catalog_when_available(tmp_path, monkeypatch):

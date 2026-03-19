@@ -13,7 +13,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from queue import Empty, Full, Queue
 from threading import Lock
-from typing import Any
+from typing import Any, Callable
 
 import cv2
 import degirum_tools  # type: ignore
@@ -51,6 +51,7 @@ from .config import (
     DEFAULT_PREVIEW_THUMB_MAX_WIDTH,
     DEFAULT_PRE_SECONDS,
     DEFAULT_RECORD_PATH,
+    DEFAULT_RECORDING_BACKEND,
     DEFAULT_RECORD_START_MODE,
     DEFAULT_REQUIRED_HITS_TO_START_RECORDING,
     DEFAULT_REQUIRED_MISSES_TO_END_DETECTION,
@@ -67,6 +68,7 @@ from .config import (
     apply_sensitivity_profile,
 )
 from .recordings import build_recording_sidecar_metadata
+from .recording_backends import BaseRecordingBackend, DeGirumWriterBackend, FFmpegPipeBackend
 from .log_messages import PERFORMANCE_PARAM_LABELS, format_dict_multiline, msg
 from .runtime_helpers import app_log, compute_effective_writer_fps, compute_effective_writer_fps_details, worker_stop_timeout_details
 from .storage import enqueue_recording_metadata_persist
@@ -229,7 +231,16 @@ def _build_metrics_payload(**kwargs: float | int) -> dict[str, float | int]:
 
 
 class RecordingThread(QThread):
-    def __init__(self, filepath: str, width: int, height: int, fps: float) -> None:
+    def __init__(
+        self,
+        filepath: str,
+        width: int,
+        height: int,
+        fps: float,
+        *,
+        backend: BaseRecordingBackend | None = None,
+        error_callback: Callable[[str], None] | None = None,
+    ) -> None:
         super().__init__()
         self.filepath = filepath
         self.width = width
@@ -237,28 +248,51 @@ class RecordingThread(QThread):
         self.fps = float(max(1.0, fps))
         self.queue: "Queue[np.ndarray]" = Queue(maxsize=120)
         self.running = True
-        self.writer = None
+        self.backend: BaseRecordingBackend = backend or DeGirumWriterBackend(filepath, width, height, fps)
+        self.error_callback = error_callback
         self.dropped_frames = 0
         self.frames_written = 0
         self.started_ts = 0.0
         self.last_write_ts = 0.0
         self.queue_peak = 0
+        self.ffmpeg_exit_code: int | None = None
+        self._backend_failed = False
+
+    @property
+    def backend_name(self) -> str:
+        return getattr(self.backend, "backend_name", "current")
+
+    def _handle_backend_error(self, exc: Exception) -> None:
+        self._backend_failed = True
+        app_log("error", "recording backend failure", source="worker", level="ERROR", details=f"file={self.filepath} backend={self.backend_name} error={exc}")
+        if self.error_callback is not None:
+            with suppress(Exception):
+                self.error_callback(str(exc))
 
     def run(self) -> None:
-        self.writer = degirum_tools.VideoWriter(self.filepath, self.width, self.height, self.fps)
-        self.started_ts = time.monotonic()
-        while self.running or not self.queue.empty():
+        try:
+            self.backend.open()
+            self.started_ts = time.monotonic()
+            while self.running or not self.queue.empty():
+                try:
+                    frame = self.queue.get(timeout=0.1)
+                except Empty:
+                    continue
+                try:
+                    self.backend.write(frame)
+                    self.frames_written += 1
+                    self.last_write_ts = time.monotonic()
+                except Exception as exc:
+                    self._handle_backend_error(exc)
+                    self.running = False
+        except Exception as exc:
+            self._handle_backend_error(exc)
+        finally:
             try:
-                frame = self.queue.get(timeout=0.1)
-                self.writer.write(frame)
-                self.frames_written += 1
-                self.last_write_ts = time.monotonic()
-            except Empty:
-                pass
-        if self.writer:
-            with suppress(AttributeError):
-                self.writer.release()
-            self.writer = None
+                self.backend.close()
+            except Exception as exc:
+                self._handle_backend_error(exc)
+            self.ffmpeg_exit_code = self.backend.ffmpeg_exit_code
 
     def write(self, frame: np.ndarray) -> None:
         if self.running:
@@ -408,6 +442,8 @@ class CameraWorker(QThread):
         self.current_event_detection_count = 0
         self.current_event_confidence_sum = 0.0
         self.current_event_max_confidence = 0.0
+        self.current_recording_backend = str(self.camera.get("recording_backend", DEFAULT_RECORDING_BACKEND))
+        self.current_ffmpeg_exit_code: int | None = None
 
         self.inference_count = 0
         self.positive_detection_count = 0
@@ -851,7 +887,15 @@ class CameraWorker(QThread):
             stream_fps_measured=kwargs.get("stream_fps_measured", self.current_stream_fps_measured),
             writer_fps_selected=kwargs.get("writer_fps_selected", self.current_writer_fps),
             writer_fps_reason=kwargs.get("writer_fps_reason", self.current_writer_fps_reason),
+            writer_backend=kwargs.get("writer_backend", self.current_recording_backend),
+            ffmpeg_exit_code=kwargs.get("ffmpeg_exit_code", self.current_ffmpeg_exit_code),
         )
+
+    def _create_recording_backend(self, filepath: str, width: int, height: int, fps: float) -> BaseRecordingBackend:
+        backend_name = str(self.camera.get("recording_backend", DEFAULT_RECORDING_BACKEND)).lower()
+        if backend_name == "ffmpeg":
+            return FFmpegPipeBackend(filepath, width, height, fps)
+        return DeGirumWriterBackend(filepath, width, height, fps)
 
     def _compute_recorder_degradation_level(self, queue_size: int, dropped_frames: int, queue_peak: int) -> int:
         level = 0
@@ -985,7 +1029,17 @@ class CameraWorker(QThread):
         self._current_writer_fps_base = self.current_writer_fps
         self.writer_fps = self.current_writer_fps
         self._last_session_writer_fps = self.current_writer_fps
-        self.record_thread = RecordingThread(self.output_file, w, h, self.current_writer_fps)
+        backend = self._create_recording_backend(self.output_file, w, h, self.current_writer_fps)
+        self.current_recording_backend = getattr(backend, "backend_name", str(self.camera.get("recording_backend", DEFAULT_RECORDING_BACKEND)))
+        self.current_ffmpeg_exit_code = None
+        self.record_thread = RecordingThread(
+            self.output_file,
+            w,
+            h,
+            self.current_writer_fps,
+            backend=backend,
+            error_callback=lambda msg: self.error_signal.emit(f"Błąd backendu nagrywania: {msg}", self.index),
+        )
         self.record_thread.start()
         self.recording = True
         self.is_recording_active = True
@@ -1027,6 +1081,8 @@ class CameraWorker(QThread):
             stream_fps_measured=self.current_stream_fps_measured,
             writer_fps_selected=self.current_writer_fps,
             writer_fps_reason=self.current_writer_fps_reason,
+            writer_backend=self.current_recording_backend,
+            ffmpeg_exit_code=self.current_ffmpeg_exit_code,
         )
         self._save_recording_metadata(meta)
         self.record_signal.emit("start", self.output_file)
@@ -1045,6 +1101,7 @@ class CameraWorker(QThread):
             frames_written = self.record_thread.frames_written
             dropped_frames = self.record_thread.dropped_frames
             queue_peak = self.record_thread.queue_peak
+            self.current_ffmpeg_exit_code = self.record_thread.ffmpeg_exit_code
             self.record_thread = None
         event_end_ts = time.time(); event_start_ts = self.current_event_start_ts or event_end_ts
         duration = max(0.0, event_end_ts - event_start_ts)
@@ -1076,6 +1133,8 @@ class CameraWorker(QThread):
             stream_fps_measured=self.current_stream_fps_measured,
             writer_fps_selected=self.current_writer_fps,
             writer_fps_reason=self.current_writer_fps_reason,
+            writer_backend=self.current_recording_backend,
+            ffmpeg_exit_code=self.current_ffmpeg_exit_code,
         )
         io_enqueue_started_mono = time.monotonic()
         self._save_recording_metadata(meta)
@@ -1117,6 +1176,8 @@ class CameraWorker(QThread):
         self._current_writer_fps_base = 0.0
         self.current_writer_fps_reason = "fallback_min"
         self.current_stream_fps_measured = 0.0
+        self.current_recording_backend = str(self.camera.get("recording_backend", DEFAULT_RECORDING_BACKEND))
+        self.current_ffmpeg_exit_code = None
         self.recorder_enqueue_stride = 1
         self._recorder_enqueue_counter = 0
         self._recorder_degradation_level = 0
