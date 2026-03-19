@@ -401,13 +401,14 @@ def test_metrics_payload_uses_consistent_keys():
     assert payload["infer_fps"] == 0.0
 
 
-def test_heartbeat_reports_nonzero_cpu_after_metrics_window(monkeypatch):
+def test_heartbeat_reports_nonzero_cpu_after_metrics_window_with_diagnostics_disabled(monkeypatch):
     worker = _worker()
-    worker.performance_diagnostics_enabled = True
+    worker.performance_diagnostics_enabled = False
     worker.state.last_metrics_log_ts = 0.0
     worker.state.metrics_window_started_ts = 100.0
     worker.state.metrics_last_cpu_wall_ts = 100.0
     worker.state.metrics_last_cpu_process_ts = 10.0
+    worker.state.metrics_last_sample_ts = 100.0
 
     monotonic_values = iter([110.0, 110.0, 120.0, 120.0])
     monkeypatch.setattr("monitoring.workers.time.monotonic", lambda: next(monotonic_values))
@@ -428,6 +429,8 @@ def test_heartbeat_reports_nonzero_cpu_after_metrics_window(monkeypatch):
     assert worker.state.last_cpu_percent > 0.0
     status = dict(captured_status.get("status") or {})
     assert float(status.get("cpu_percent", 0.0)) > 0.0
+    assert float(status.get("cpu_sample_age_ms", -1.0)) >= 0.0
+    assert status.get("metrics_fresh") is True
 
 
 def test_thumb_hidden_role_downscales_payload_before_emit():
