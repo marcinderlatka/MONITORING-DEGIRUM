@@ -965,10 +965,16 @@ class SingleCameraDialog(QDialog):
         self.conf_spin = QDoubleSpinBox(); self.conf_spin.setRange(0.0, 1.0); self.conf_spin.setSingleStep(0.05)
         self.conf_draw_spin = QDoubleSpinBox(); self.conf_draw_spin.setRange(0.0, 1.0); self.conf_draw_spin.setSingleStep(0.05)
         self.conf_record_spin = QDoubleSpinBox(); self.conf_record_spin.setRange(0.0, 1.0); self.conf_record_spin.setSingleStep(0.05)
+        self.show_legacy_conf_chk = QCheckBox("Pokaż ustawienia legacy (zaawansowane)")
+        self.show_legacy_conf_chk.setChecked(False)
         self.sensitivity_profile_combo = QComboBox(); self.sensitivity_profile_combo.addItems(["balanced", "high_recall", "high_precision", "custom"])
         self.draw_chk = QCheckBox(); self.detect_chk = QCheckBox(); self.record_chk = QCheckBox()
         self.info_overlay_chk = QCheckBox()
         self.hours_edit = QLineEdit(); self.visible_edit = QLineEdit(); self.record_edit = QLineEdit()
+        self.record_classes_hint = QLabel("")
+        self.record_classes_hint.setWordWrap(True)
+        self.record_classes_hint.setStyleSheet("color:#f7d26a;")
+        self._model_labels_cache: dict[str, set[str] | None] = {}
         self.path_edit = QLineEdit(); self.btn_path = QPushButton("Wybierz")
         self.pre_spin = QSpinBox(); self.pre_spin.setRange(0, 60)
         self.lost_spin = QSpinBox(); self.lost_spin.setRange(0, 60)
@@ -1005,9 +1011,10 @@ class SingleCameraDialog(QDialog):
         self._add_field_row(left_layout, "rtsp_fps", "FPS/S RTSP", self.rtsp_fps_spin)
         self._add_field_row(left_layout, "show_camera_info_overlay", "Pokaż informacje na obrazie", self.info_overlay_chk)
 
-        self._add_field_row(middle_layout, "confidence_threshold", "Próg pewności (legacy)", self.conf_spin)
-        self._add_field_row(middle_layout, "confidence_threshold_draw", "Próg rysowania", self.conf_draw_spin)
-        self._add_field_row(middle_layout, "confidence_threshold_record", "Próg nagrania", self.conf_record_spin)
+        self._add_field_row(middle_layout, "confidence_threshold", "Próg pewności (legacy, kompatybilność)", self.conf_spin)
+        self._add_field_row(middle_layout, "confidence_threshold_draw", "Próg wizualizacji", self.conf_draw_spin)
+        self._add_field_row(middle_layout, "confidence_threshold_record", "Próg uruchomienia zdarzenia/nagrania", self.conf_record_spin)
+        middle_layout.addRow("", self.show_legacy_conf_chk)
         self._add_field_row(middle_layout, "sensitivity_profile", "Profil czułości", self.sensitivity_profile_combo)
         self._add_field_row(middle_layout, "draw_overlays", "Rysuj nakładki", self.draw_chk)
         self._add_field_row(middle_layout, "enable_detection", "Wykrywaj obiekty", self.detect_chk)
@@ -1015,6 +1022,7 @@ class SingleCameraDialog(QDialog):
         self._add_field_row(middle_layout, "detection_hours", "Godziny detekcji", self.hours_edit)
         self._add_field_row(middle_layout, "visible_classes", "Widoczne klasy", self.visible_edit)
         self._add_field_row(middle_layout, "record_classes", "Klasy nagrywane", self.record_edit)
+        middle_layout.addRow("", self.record_classes_hint)
 
         self._add_field_row(right_layout, "record_path", "Folder nagrań", path_layout, input_widget=self.path_edit, focus_widgets=[self.path_edit, self.btn_path])
         self._add_field_row(right_layout, "pre_seconds", "Pre seconds", self.pre_spin)
@@ -1060,6 +1068,9 @@ class SingleCameraDialog(QDialog):
         self.btn_path.clicked.connect(self._choose_path)
         self.test_btn.clicked.connect(self._test_source)
         self.sensitivity_profile_combo.currentTextChanged.connect(self._on_sensitivity_profile_changed)
+        self.show_legacy_conf_chk.toggled.connect(self._set_legacy_conf_visible)
+        self.record_edit.textChanged.connect(self._update_record_classes_hint)
+        self.model_combo.currentTextChanged.connect(self._update_record_classes_hint)
         self.calibration_btn.clicked.connect(self._open_calibration_wizard)
 
         self.result_camera = None
@@ -1072,6 +1083,8 @@ class SingleCameraDialog(QDialog):
             self.preview_pause_chk.setChecked(bool(DEFAULT_PREVIEW_PAUSE_WHEN_HIDDEN))
             self.info_overlay_chk.setChecked(bool(DEFAULT_SHOW_CAMERA_INFO_OVERLAY))
             self.sensitivity_profile_combo.setCurrentText(DEFAULT_SENSITIVITY_PROFILE)
+        self._set_legacy_conf_visible(False)
+        self._update_record_classes_hint()
 
     def _add_field_row(self, form: QFormLayout, field_key: str, label_text: str, widget, input_widget=None, focus_widgets=None):
         label = QLabel(label_text)
@@ -1102,6 +1115,61 @@ class SingleCameraDialog(QDialog):
             return
         self._focus_help_widgets[widget] = key
         widget.installEventFilter(self)
+
+    def _set_legacy_conf_visible(self, visible: bool) -> None:
+        row = self._field_rows.get("confidence_threshold")
+        if not row:
+            return
+        label, input_widget = row
+        label.setVisible(bool(visible))
+        input_widget.setVisible(bool(visible))
+
+    @staticmethod
+    def _csv_to_lower_set(raw_text: str) -> set[str]:
+        return {part.strip().lower() for part in str(raw_text).split(",") if part.strip()}
+
+    def _load_model_labels(self, model_name: str) -> set[str] | None:
+        name = str(model_name or "").strip()
+        if not name:
+            return None
+        if name in self._model_labels_cache:
+            return self._model_labels_cache[name]
+        model_dir = MODELS_PATH / name
+        labels_data = None
+        try:
+            for labels_file in sorted(model_dir.glob("labels*.json")):
+                with labels_file.open("r", encoding="utf-8") as fh:
+                    labels_data = json.load(fh)
+                break
+        except Exception:
+            labels_data = None
+        labels: set[str] = set()
+        if isinstance(labels_data, dict):
+            labels = {str(v).strip().lower() for v in labels_data.values() if str(v).strip()}
+        elif isinstance(labels_data, list):
+            labels = {str(v).strip().lower() for v in labels_data if str(v).strip()}
+        loaded = labels or None
+        self._model_labels_cache[name] = loaded
+        return loaded
+
+    def _update_record_classes_hint(self) -> None:
+        record_classes = self._csv_to_lower_set(self.record_edit.text())
+        model_labels = self._load_model_labels(self.model_combo.currentText())
+        if not record_classes or not model_labels:
+            self.record_classes_hint.clear()
+            return
+        overlap = sorted(record_classes.intersection(model_labels))
+        if overlap:
+            self.record_classes_hint.setText(f"Dopasowane klasy modelu: {', '.join(overlap)}")
+            self.record_classes_hint.setStyleSheet("color:#7fd18c;")
+            return
+        preview = ", ".join(sorted(model_labels)[:8])
+        suffix = " …" if len(model_labels) > 8 else ""
+        self.record_classes_hint.setText(
+            "⚠️ Brak przecięcia record_classes z etykietami modelu. "
+            f"Przykładowe etykiety modelu: {preview}{suffix}"
+        )
+        self.record_classes_hint.setStyleSheet("color:#f7d26a;")
 
     def _set_help_panel_text(self, key: str):
         if not hasattr(self, "help_panel"):
@@ -1241,6 +1309,7 @@ class SingleCameraDialog(QDialog):
             profile_name = "custom"
         self.sensitivity_profile_combo.setCurrentText(profile_name)
         self._on_sensitivity_profile_changed(profile_name)
+        self._update_record_classes_hint()
 
     def accept(self):
         name = self.name_edit.text().strip()
@@ -1289,6 +1358,15 @@ class SingleCameraDialog(QDialog):
         profile_name = str(cam.get("sensitivity_profile", "custom") or "custom")
         if profile_name != "custom":
             apply_sensitivity_profile(cam, profile_name, force=True)
+        model_labels = self._load_model_labels(cam.get("model", ""))
+        record_classes_lower = {str(c).strip().lower() for c in cam.get("record_classes", []) if str(c).strip()}
+        if model_labels and record_classes_lower and not record_classes_lower.intersection(model_labels):
+            QMessageBox.warning(
+                self,
+                "Klasy nagrywania",
+                "Brak przecięcia klas nagrywanych z etykietami modelu.\n"
+                "Nagrywanie zdarzeń może się nie uruchamiać dla tej konfiguracji.",
+            )
         self.result_camera = cam
         super().accept()
 
@@ -1839,7 +1917,7 @@ QToolButton:focus { outline: none; }
         self.diag_panel.setMinimumHeight(90)
         self.diag_panel.setVisible(False)
         self.diag_timer = QTimer(self)
-        self.diag_timer.timeout.connect(self._update_diagnostics_panel)
+        self.diag_timer.timeout.connect(self._refresh_diag_panel)
         self.diag_timer.start(1000)
 
         self.watchdog_timer = QTimer(self)
@@ -2586,7 +2664,7 @@ QToolButton:focus { outline: none; }
         except (TypeError, ValueError):
             return f"--{suffix}"
 
-    def _update_diagnostics_panel(self):
+    def _refresh_diag_panel(self):
         if not self.diag_panel.isVisible():
             return
         idx = self.camera_list.currentRow()
@@ -2600,6 +2678,7 @@ QToolButton:focus { outline: none; }
             return
         stale = self._is_heartbeat_stale(name)
         cpu_text = self._fmt_metric_or_stale(stat.get('cpu_percent', 0.0), stale=stale, fmt='{:.1f}')
+        rejection = dict(stat.get("rejection_counters", {}) or {})
         self.diag_panel.setText(
             "\n".join(
                 [
@@ -2620,9 +2699,19 @@ QToolButton:focus { outline: none; }
                     f"preview role: {stat.get('preview_role', '-')}",
                     f"overload degraded: {bool(stat.get('overload_degraded', False))}",
                     f"last detection seconds: {float(stat.get('last_detection_seconds', -1.0)):.1f}",
+                    (
+                        "rejections: "
+                        f"below_record_threshold={int(rejection.get('below_record_threshold', 0))}, "
+                        f"class_not_in_record_classes={int(rejection.get('class_not_in_record_classes', 0))}, "
+                        f"outside_schedule={int(rejection.get('outside_schedule', 0))}, "
+                        f"detection_disabled={int(rejection.get('detection_disabled', 0))}"
+                    ),
                 ]
             )
         )
+
+    def _update_diagnostics_panel(self):
+        self._refresh_diag_panel()
 
     # --- Zarządzanie kamerami (global) ---
     def add_camera_wizard(self):
