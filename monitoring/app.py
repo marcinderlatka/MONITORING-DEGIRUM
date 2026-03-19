@@ -1933,6 +1933,7 @@ QToolButton:focus { outline: none; }
         self._hud_cache_key: tuple | None = None
         self._letterbox_geometry_cache: dict[tuple[int, int, int, int], tuple[int, int, int, int]] = {}
         self._canvas_bg_cache: dict[tuple[int, int], np.ndarray] = {}
+        self._main_view_geometry_cache: tuple[int, int] | None = None
         self._ui_grid_ms_history_by_camera: dict[str, deque[float]] = {}
         self._ui_grid_frame_times_by_camera: dict[str, deque[float]] = {}
 
@@ -3072,6 +3073,7 @@ QToolButton:focus { outline: none; }
         else:
             self._last_thumb_frame[idx] = frame
 
+        # Main preview rendering path stays isolated from thumb/grid work.
         if quality_mode != "main":
             self._update_thumbnail_view(idx, now_mono)
             self._update_grid_view(idx, now_mono)
@@ -3221,6 +3223,14 @@ QToolButton:focus { outline: none; }
         dpr: float = 1.0,
         source_tag: str = "thumb",
     ) -> QPixmap:
+        if (
+            not isinstance(frame, np.ndarray)
+            or frame.size <= 0
+            or frame.ndim < 2
+            or frame.shape[0] <= 0
+            or frame.shape[1] <= 0
+        ):
+            return QPixmap()
         logical_w = max(1, int(width))
         logical_h = max(1, int(height))
         tile_w = max(1, int(tile_width if tile_width is not None else logical_w))
@@ -3390,6 +3400,11 @@ QToolButton:focus { outline: none; }
     def _compose_letterboxed(self, frame, idx: int):
         w_label = max(1, self.camera_view.width())
         h_label = max(1, self.camera_view.height())
+        current_geometry = (w_label, h_label)
+        if current_geometry != self._main_view_geometry_cache:
+            self._main_view_geometry_cache = current_geometry
+            self._hud_cache_qimg = None
+            self._hud_cache_key = None
         canvas_key = (w_label, h_label)
         canvas_template = self._canvas_bg_cache.get(canvas_key)
         if canvas_template is None:
@@ -3398,25 +3413,28 @@ QToolButton:focus { outline: none; }
         canvas = canvas_template.copy()
 
         image_rect = (0, 0, w_label, h_label)
-        if frame is not None:
+        if (
+            isinstance(frame, np.ndarray)
+            and frame.size > 0
+            and frame.ndim >= 2
+            and frame.shape[0] > 0
+            and frame.shape[1] > 0
+        ):
             fh, fw = frame.shape[:2]
-            if fh > 0 and fw > 0:
-                rect_key = (fw, fh, w_label, h_label)
-                cached_rect = self._letterbox_geometry_cache.get(rect_key)
-                if cached_rect is None:
-                    cached_rect = self._compute_letterboxed_rect(fw, fh, w_label, h_label)
+            rect_key = (fw, fh, w_label, h_label)
+            cached_rect = self._letterbox_geometry_cache.get(rect_key)
+            if cached_rect is None:
+                cached_rect = self._compute_letterboxed_rect(fw, fh, w_label, h_label)
+                self._letterbox_geometry_cache[rect_key] = cached_rect
+                if len(self._letterbox_geometry_cache) > 24:
+                    self._letterbox_geometry_cache.clear()
                     self._letterbox_geometry_cache[rect_key] = cached_rect
-                    if len(self._letterbox_geometry_cache) > 24:
-                        self._letterbox_geometry_cache.clear()
-                        self._letterbox_geometry_cache[rect_key] = cached_rect
-                x0, y0, new_w, new_h = cached_rect
-                image_rect = (x0, y0, new_w, new_h)
-                resize_started = time.perf_counter()
-                resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
-                canvas[y0:y0+new_h, x0:x0+new_w] = resized
-                resize_ms = (time.perf_counter() - resize_started) * 1000.0
-            else:
-                resize_ms = 0.0
+            x0, y0, new_w, new_h = cached_rect
+            image_rect = (x0, y0, new_w, new_h)
+            resize_started = time.perf_counter()
+            resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            canvas[y0:y0+new_h, x0:x0+new_w] = resized
+            resize_ms = (time.perf_counter() - resize_started) * 1000.0
         else:
             resize_ms = 0.0
 
@@ -3428,9 +3446,9 @@ QToolButton:focus { outline: none; }
         qimage_ms = (time.perf_counter() - qimg_started) * 1000.0
 
         return qimg, image_rect, {
-            "resize": float(resize_ms),
-            "cvtcolor": float(cvtcolor_ms),
-            "qimage": float(qimage_ms),
+            "resize_ms": float(resize_ms),
+            "cvtcolor_ms": float(cvtcolor_ms),
+            "qimage_ms": float(qimage_ms),
         }
 
     def _render_current(self):
@@ -3467,17 +3485,12 @@ QToolButton:focus { outline: none; }
         qpixmap_ms = (time.perf_counter() - qpix_started) * 1000.0
         render_ms = (time.perf_counter() - render_started) * 1000.0
         self._record_render_stage(idx, "main", render_ms)
-        self._record_render_stage(idx, "resize", compose_timing.get("resize", 0.0))
-        self._record_render_stage(idx, "cvtcolor", compose_timing.get("cvtcolor", 0.0))
-        self._record_render_stage(idx, "qimage", compose_timing.get("qimage", 0.0))
-        self._record_render_stage(idx, "resize_ms", compose_timing.get("resize", 0.0))
-        self._record_render_stage(idx, "cvtcolor_ms", compose_timing.get("cvtcolor", 0.0))
-        self._record_render_stage(idx, "qimage_ms", compose_timing.get("qimage", 0.0))
+        self._record_render_stage(idx, "resize_ms", compose_timing.get("resize_ms", 0.0))
+        self._record_render_stage(idx, "cvtcolor_ms", compose_timing.get("cvtcolor_ms", 0.0))
+        self._record_render_stage(idx, "qimage_ms", compose_timing.get("qimage_ms", 0.0))
         self._record_render_stage(idx, "qpixmap_ms", qpixmap_ms)
         self._record_render_stage(idx, "hud_ms", hud_ms)
         self._record_render_stage(idx, "total_ui_render_ms", render_ms)
-        self._record_render_stage(idx, "hud", hud_ms)
-        self._record_render_stage(idx, "total_ui_render", render_ms)
         self._ui_render_ms_by_camera[cam_name] = float(render_ms)
         stat = self.worker_status.get(cam_name)
         if isinstance(stat, dict):
