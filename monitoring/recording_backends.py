@@ -83,7 +83,7 @@ class FFmpegPipeBackend(BaseRecordingBackend):
         codec: str = "libx264",
         preset: str = "superfast",
         tune: str = "zerolatency",
-        crf: int | None = 23,
+        crf: int | None = 28,
         movflags: str = "+faststart",
     ) -> None:
         self.filepath = filepath
@@ -107,6 +107,10 @@ class FFmpegPipeBackend(BaseRecordingBackend):
         ffmpeg_bin = which("ffmpeg") or "ffmpeg"
         cmd = [
             ffmpeg_bin,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
             "-y",
             "-f",
             "rawvideo",
@@ -116,6 +120,10 @@ class FFmpegPipeBackend(BaseRecordingBackend):
             f"{self.width}x{self.height}",
             "-r",
             f"{self.fps:g}",
+            "-thread_queue_size",
+            "1024",
+            "-fflags",
+            "nobuffer",
             "-i",
             "-",
             "-an",
@@ -133,6 +141,8 @@ class FFmpegPipeBackend(BaseRecordingBackend):
             self.movflags,
             "-pix_fmt",
             "yuv420p",
+            "-flush_packets",
+            "1",
             self.filepath,
         ])
         self._command_line = " ".join(shlex.quote(part) for part in cmd)
@@ -150,6 +160,7 @@ class FFmpegPipeBackend(BaseRecordingBackend):
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
+            bufsize=self.width * self.height * 3 * 2,
         )
 
     def write(self, frame: np.ndarray) -> None:
@@ -158,7 +169,7 @@ class FFmpegPipeBackend(BaseRecordingBackend):
         if self._process.poll() is not None:
             raise RuntimeError(f"ffmpeg terminated early with code {self._process.returncode}")
         try:
-            self._process.stdin.write(frame.tobytes())
+            self._process.stdin.write(memoryview(np.ascontiguousarray(frame)).cast("B"))
         except (BrokenPipeError, OSError) as exc:
             self._broken_pipe = True
             raise RuntimeError(f"ffmpeg pipe write failed: {exc}") from exc

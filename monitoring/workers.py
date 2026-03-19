@@ -130,6 +130,38 @@ METRIC_KEYS = (
 )
 
 
+@dataclass
+class RecordingQueueManager:
+    """Adaptive policy for recorder queue pressure mitigation."""
+
+    warn_threshold: int
+    critical_threshold: int
+    peak_warn_threshold: int
+    peak_critical_threshold: int
+    dropped_warn_threshold: int
+    dropped_critical_threshold: int
+
+    def degradation_level(self, queue_size: int, dropped_frames: int, queue_peak: int) -> int:
+        level = 0
+        if queue_size >= self.warn_threshold or dropped_frames >= self.dropped_warn_threshold or queue_peak >= self.peak_warn_threshold:
+            level = 1
+        if queue_size >= self.critical_threshold or dropped_frames >= self.dropped_critical_threshold or queue_peak >= self.peak_critical_threshold:
+            level = 2
+        if queue_size >= int(self.critical_threshold * 1.15) or dropped_frames >= int(self.dropped_critical_threshold * 1.5) or queue_peak >= int(self.peak_critical_threshold * 1.1):
+            level = 3
+        return int(max(0, min(3, level)))
+
+    @staticmethod
+    def enqueue_stride(level: int) -> int:
+        return {0: 1, 1: 2, 2: 3, 3: 4}.get(int(max(0, min(3, level))), 4)
+
+    @staticmethod
+    def detect_fps_factor(level: int, queue_size: int, queue_throttle_threshold: int = 30) -> float:
+        if queue_size < queue_throttle_threshold:
+            return 1.0
+        return {0: 1.0, 1: 0.9, 2: 0.75, 3: 0.6}.get(int(max(0, min(3, level))), 0.6)
+
+
 def _label_color(label: str) -> tuple[int, int, int]:
     key = (label or "").lower()
     if key in LABEL_COLORS:
@@ -399,6 +431,8 @@ class CameraWorker(QThread):
         self._inference_ms_total = 0.0
         self.preview_processing_ms = 0.0
         self.recording_enqueue_ms = 0.0
+        self._preview_resize_cache_key: tuple[int, int, int, int, int] | None = None
+        self._preview_resize_cache_frame: np.ndarray | None = None
         self.last_input_size: tuple[int, int] | None = None
         self.is_recording_active = False
 
@@ -471,6 +505,14 @@ class CameraWorker(QThread):
         self.recorder_queue_peak_critical_threshold = int(self.camera.get("recorder_queue_peak_critical_threshold", DEFAULT_RECORDER_QUEUE_PEAK_CRITICAL_THRESHOLD))
         self.recorder_degrade_warn_window_s = float(self.camera.get("recorder_degrade_warn_window_s", DEFAULT_RECORDER_DEGRADE_WARN_WINDOW_S))
         self.recorder_min_dynamic_writer_fps = float(self.camera.get("recorder_min_dynamic_writer_fps", DEFAULT_RECORDER_MIN_DYNAMIC_WRITER_FPS))
+        self.recording_queue_manager = RecordingQueueManager(
+            warn_threshold=self.recorder_queue_warn_threshold,
+            critical_threshold=self.recorder_queue_critical_threshold,
+            peak_warn_threshold=self.recorder_queue_peak_warn_threshold,
+            peak_critical_threshold=self.recorder_queue_peak_critical_threshold,
+            dropped_warn_threshold=self.recorder_dropped_warn_threshold,
+            dropped_critical_threshold=self.recorder_dropped_critical_threshold,
+        )
         self.recorder_enqueue_stride = 1
         self._recorder_enqueue_counter = 0
         self._recorder_degradation_level = 0
@@ -752,6 +794,14 @@ class CameraWorker(QThread):
         self.camera["recorder_queue_peak_critical_threshold"] = self.recorder_queue_peak_critical_threshold
         self.camera["recorder_degrade_warn_window_s"] = self.recorder_degrade_warn_window_s
         self.camera["recorder_min_dynamic_writer_fps"] = self.recorder_min_dynamic_writer_fps
+        self.recording_queue_manager = RecordingQueueManager(
+            warn_threshold=self.recorder_queue_warn_threshold,
+            critical_threshold=self.recorder_queue_critical_threshold,
+            peak_warn_threshold=self.recorder_queue_peak_warn_threshold,
+            peak_critical_threshold=self.recorder_queue_peak_critical_threshold,
+            dropped_warn_threshold=self.recorder_dropped_warn_threshold,
+            dropped_critical_threshold=self.recorder_dropped_critical_threshold,
+        )
 
         self.camera["pre_seconds"] = self.pre_seconds
         self.camera["lost_seconds"] = self.lost_seconds
@@ -853,8 +903,8 @@ class CameraWorker(QThread):
             reason = "force" if force else ("basis_changed" if basis_changed else "maxlen_changed")
             app_log("worker", "prerecord buffer synchronized", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO", details=f"basis={basis:.2f} old_maxlen={old_maxlen} new_maxlen={maxlen} reason={reason}")
 
-    def _make_detection_overlay_frame(self, frame: np.ndarray, bbox: tuple[int, int, int, int] | None, label: str, confidence: float) -> np.ndarray:
-        canvas = frame.copy()
+    def _make_detection_overlay_frame(self, frame: np.ndarray, bbox: tuple[int, int, int, int] | None, label: str, confidence: float, *, copy_frame: bool = True) -> np.ndarray:
+        canvas = frame.copy() if copy_frame else frame
         if bbox and self.thumbnail_overlay_enabled:
             x1, y1, x2, y2 = bbox
             color = _label_color(label)
@@ -913,38 +963,34 @@ class CameraWorker(QThread):
         )
 
     def _create_recording_backend(self, filepath: str, width: int, height: int, fps: float) -> BaseRecordingBackend:
-        backend_name = str(self.camera.get("recording_backend", DEFAULT_RECORDING_BACKEND)).lower()
-        if backend_name == "ffmpeg":
-            ffmpeg_codec = str(self.camera.get("ffmpeg_codec", "libx264"))
-            ffmpeg_preset_profile = str(self.camera.get("ffmpeg_preset_profile", "balanced")).lower()
-            preset_default = "ultrafast" if ffmpeg_preset_profile == "ultrafast_test" else "superfast"
-            ffmpeg_preset = str(self.camera.get("ffmpeg_preset", preset_default))
-            ffmpeg_tune = str(self.camera.get("ffmpeg_tune", "zerolatency"))
-            ffmpeg_movflags = str(self.camera.get("ffmpeg_movflags", "+faststart"))
-            ffmpeg_crf_raw = self.camera.get("ffmpeg_crf", 23)
-            ffmpeg_crf = None if ffmpeg_crf_raw in {None, "", "none"} else int(ffmpeg_crf_raw)
-            return FFmpegPipeBackend(
-                filepath,
-                width,
-                height,
-                fps,
-                codec=ffmpeg_codec,
-                preset=ffmpeg_preset,
-                tune=ffmpeg_tune,
-                crf=ffmpeg_crf,
-                movflags=ffmpeg_movflags,
-            )
-        return DeGirumWriterBackend(filepath, width, height, fps)
+        ffmpeg_codec = str(self.camera.get("ffmpeg_codec", "libx264"))
+        ffmpeg_preset = str(self.camera.get("ffmpeg_preset", "veryfast"))
+        ffmpeg_tune = str(self.camera.get("ffmpeg_tune", "zerolatency"))
+        ffmpeg_movflags = str(self.camera.get("ffmpeg_movflags", "+faststart"))
+        ffmpeg_crf_raw = self.camera.get("ffmpeg_crf", 28)
+        ffmpeg_crf = None if ffmpeg_crf_raw in {None, "", "none"} else int(ffmpeg_crf_raw)
+        return FFmpegPipeBackend(
+            filepath,
+            width,
+            height,
+            fps,
+            codec=ffmpeg_codec,
+            preset=ffmpeg_preset,
+            tune=ffmpeg_tune,
+            crf=ffmpeg_crf,
+            movflags=ffmpeg_movflags,
+        )
 
     def _compute_recorder_degradation_level(self, queue_size: int, dropped_frames: int, queue_peak: int) -> int:
-        level = 0
-        if queue_size >= self.recorder_queue_warn_threshold or dropped_frames >= self.recorder_dropped_warn_threshold or queue_peak >= self.recorder_queue_peak_warn_threshold:
-            level = 1
-        if queue_size >= self.recorder_queue_critical_threshold or dropped_frames >= self.recorder_dropped_critical_threshold or queue_peak >= self.recorder_queue_peak_critical_threshold:
-            level = 2
-        if queue_size >= int(self.recorder_queue_critical_threshold * 1.15) or dropped_frames >= int(self.recorder_dropped_critical_threshold * 1.5) or queue_peak >= int(self.recorder_queue_peak_critical_threshold * 1.1):
-            level = 3
-        return int(max(0, min(3, level)))
+        manager = RecordingQueueManager(
+            warn_threshold=self.recorder_queue_warn_threshold,
+            critical_threshold=self.recorder_queue_critical_threshold,
+            peak_warn_threshold=self.recorder_queue_peak_warn_threshold,
+            peak_critical_threshold=self.recorder_queue_peak_critical_threshold,
+            dropped_warn_threshold=self.recorder_dropped_warn_threshold,
+            dropped_critical_threshold=self.recorder_dropped_critical_threshold,
+        )
+        return manager.degradation_level(queue_size, dropped_frames, queue_peak)
 
     def _warn_recorder_overload_once_per_window(self, now_mono: float, details: str) -> None:
         if now_mono - self._recorder_last_overload_warn_ts < max(1.0, self.recorder_degrade_warn_window_s):
@@ -964,8 +1010,14 @@ class CameraWorker(QThread):
         elif desired_level < self._recorder_degradation_level:
             self._recorder_degradation_level = max(0, self._recorder_degradation_level - 1)
 
-        stride_by_level = {0: 1, 1: 2, 2: 3, 3: 4}
-        self.recorder_enqueue_stride = int(stride_by_level.get(self._recorder_degradation_level, 4))
+        self.recorder_enqueue_stride = int(self.recording_queue_manager.enqueue_stride(self._recorder_degradation_level))
+        queue_detect_factor = self.recording_queue_manager.detect_fps_factor(self._recorder_degradation_level, queue_size, queue_throttle_threshold=30)
+        if self.recording and self.detect_fps_factor > queue_detect_factor:
+            self.detect_fps_factor = max(0.45, queue_detect_factor)
+        if self.recording and self._current_writer_fps_base > 0:
+            writer_factor = max(0.45, 1.0 - 0.15 * self._recorder_degradation_level)
+            target_writer = max(self.recorder_min_dynamic_writer_fps, self._current_writer_fps_base * writer_factor)
+            self.current_writer_fps = min(self.current_writer_fps or target_writer, target_writer)
 
         if self._recorder_degradation_level > 0:
             self._warn_recorder_overload_once_per_window(
@@ -1367,7 +1419,27 @@ class CameraWorker(QThread):
             return frame
         new_w = max(1, int(round(w * scale)))
         new_h = max(1, int(round(h * scale)))
-        return cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        interp = getattr(cv2, "INTER_NEAREST", cv2.INTER_AREA)
+        return cv2.resize(frame, (new_w, new_h), interpolation=interp)
+
+    def _resize_for_preview_cached(self, frame: np.ndarray, max_width: int, max_height: int) -> np.ndarray:
+        if frame is None or getattr(frame, "size", 0) == 0:
+            return frame
+        h, w = frame.shape[:2]
+        checksum = 0
+        try:
+            arr = np.asarray(frame)
+            if arr.size > 0:
+                checksum = int(arr.reshape(-1)[0])
+        except Exception:
+            checksum = int(id(frame) & 0xFFFF)
+        key = (int(h), int(w), int(max_width), int(max_height), checksum)
+        if self._preview_resize_cache_key == key and self._preview_resize_cache_frame is not None:
+            return self._preview_resize_cache_frame
+        resized = self._resize_for_preview(frame, max_width, max_height)
+        self._preview_resize_cache_key = key
+        self._preview_resize_cache_frame = resized
+        return resized
 
     def _effective_preview_target_fps(self) -> float:
         role = str(self.preview_role or "thumb").lower()
@@ -1421,7 +1493,8 @@ class CameraWorker(QThread):
         if is_thumb_like_role and not should_draw:
             emit_w = target_grid_w if self.preview_role == "grid" else target_thumb_w
             emit_h = target_grid_h if self.preview_role == "grid" else target_thumb_h
-            thumb_emit_frame = self._resize_for_preview(preview_frame, emit_w, emit_h)
+            thumb_emit_frame = self._resize_for_preview_cached(preview_frame, emit_w, emit_h)
+            self.main_preview_signal.emit(thumb_emit_frame, self.index)
             self.thumb_preview_signal.emit(thumb_emit_frame, self.index)
             self.state.last_preview_emit_ts = now_mono
             self.state.frames_emitted += 1
@@ -1435,10 +1508,13 @@ class CameraWorker(QThread):
                 cv2.rectangle(main_source_frame, (x1, y1), (x2, y2), color, 2)
                 cv2.putText(main_source_frame, f"{label}: {confidence * 100:.1f}%", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
-        main_emit_frame = self._resize_for_preview(main_source_frame, target_main_w, target_main_h)
+        main_emit_frame = self._resize_for_preview_cached(main_source_frame, target_main_w, target_main_h)
         thumb_emit_w = target_grid_w if self.preview_role == "grid" else target_thumb_w
         thumb_emit_h = target_grid_h if self.preview_role == "grid" else target_thumb_h
-        thumb_emit_frame = self._resize_for_preview(main_source_frame, thumb_emit_w, thumb_emit_h)
+        if self.preview_role != "main" and main_emit_frame.shape[1] <= thumb_emit_w and main_emit_frame.shape[0] <= thumb_emit_h:
+            thumb_emit_frame = main_emit_frame
+        else:
+            thumb_emit_frame = self._resize_for_preview_cached(main_source_frame, thumb_emit_w, thumb_emit_h)
         if self.preview_role == "main":
             self.main_preview_signal.emit(main_emit_frame, self.index)
         emit_thumb_for_main = self.preview_role != "main" or self.recording or ((self.state.frames_emitted % 3) == 0)
