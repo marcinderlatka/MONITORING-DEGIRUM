@@ -471,6 +471,8 @@ class CameraWorker(QThread):
     worker_status_signal = pyqtSignal(str, object)
     _active_workers_lock = Lock()
     _active_workers_by_camera: dict[str, int] = {}
+    _active_recordings_lock = Lock()
+    _active_recording_workers: set[int] = set()
 
     def __init__(self, camera: dict, model: Any, index: int = 0) -> None:
         super().__init__()
@@ -1086,10 +1088,30 @@ class CameraWorker(QThread):
         )
 
     def _create_recording_backend(self, filepath: str, width: int, height: int, fps: float) -> BaseRecordingBackend:
-        ffmpeg_codec = str(self.camera.get("ffmpeg_codec", "libx264"))
+        requested_codec = str(self.camera.get("ffmpeg_codec", "libx264")).strip().lower()
+        ffmpeg_cpu_limit = float(self.camera.get("ffmpeg_x265_cpu_limit", 60.0))
+        ffmpeg_x265_max_recorders = int(max(1, int(self.camera.get("ffmpeg_x265_max_recorders", 2))))
+        with self._active_recordings_lock:
+            active_recorders = len(self._active_recording_workers)
+        cpu_percent = float(self.state.last_cpu_percent)
+        allow_x265 = cpu_percent < ffmpeg_cpu_limit and active_recorders <= ffmpeg_x265_max_recorders
+        ffmpeg_codec = "libx265" if requested_codec == "libx265" and allow_x265 else "libx264"
+        if requested_codec == "libx265" and ffmpeg_codec != "libx265":
+            logger.info(
+                "ffmpeg codec fallback to libx264 (cpu_percent=%.1f limit=%.1f active_recorders=%s max_recorders=%s)",
+                cpu_percent,
+                ffmpeg_cpu_limit,
+                active_recorders,
+                ffmpeg_x265_max_recorders,
+            )
         ffmpeg_preset = str(self.camera.get("ffmpeg_preset", "veryfast"))
         ffmpeg_tune = str(self.camera.get("ffmpeg_tune", "zerolatency"))
         ffmpeg_movflags = str(self.camera.get("ffmpeg_movflags", "+faststart"))
+        ffmpeg_profile = str(self.camera.get("ffmpeg_profile", "")).strip().lower()
+        if ffmpeg_profile not in {"latency", "throughput"}:
+            with self._active_workers_lock:
+                worker_count = len(self._active_workers_by_camera)
+            ffmpeg_profile = "throughput" if worker_count > 1 else "latency"
         ffmpeg_crf_raw = self.camera.get("ffmpeg_crf", 28)
         ffmpeg_crf = None if ffmpeg_crf_raw in {None, "", "none"} else int(ffmpeg_crf_raw)
         return FFmpegPipeBackend(
@@ -1102,6 +1124,7 @@ class CameraWorker(QThread):
             tune=ffmpeg_tune,
             crf=ffmpeg_crf,
             movflags=ffmpeg_movflags,
+            profile=ffmpeg_profile,
         )
 
     def _compute_recorder_degradation_level(self, queue_size: int, dropped_frames: int, queue_peak: int) -> int:
@@ -1259,6 +1282,8 @@ class CameraWorker(QThread):
         self.record_thread.start()
         self.recording = True
         self.is_recording_active = True
+        with self._active_recordings_lock:
+            self._active_recording_workers.add(self.index)
         self.telemetry_trigger_count += 1
         self.telemetry_trigger_timestamps.append(time.monotonic())
         self._false_positive_candidate_active = False
@@ -1392,6 +1417,8 @@ class CameraWorker(QThread):
             self._false_positive_candidate_expires_ts = time.monotonic() + 30.0
         self.recording = False
         self.is_recording_active = False
+        with self._active_recordings_lock:
+            self._active_recording_workers.discard(self.index)
         self.output_file = None
         self.recording_started_ts = 0.0
         self.pending_positive_hits = 0
