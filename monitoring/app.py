@@ -52,6 +52,8 @@ from PyQt5.QtWidgets import (
     QFormLayout,
     QFrame,
     QGridLayout,
+    QGroupBox,
+    QHeaderView,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -69,6 +71,8 @@ from PyQt5.QtWidgets import (
     QSizePolicy,
     QTextEdit,
     QToolButton,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
     QWidgetAction,
@@ -176,6 +180,7 @@ from .widgets.camera_grid import CameraGridWidget
 from .widgets.camera_list import CameraListWidget
 from .widgets.logs import LogSettingsDialog, LogWindow
 from .widgets.recordings_browser import RecordingsBrowserDialog
+from .system_metrics import SystemMetricsSampler
 
 # Qt platform plugin path (Linux)
 os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = "/usr/lib/x86_64-linux-gnu/qt5/plugins/platforms"
@@ -3470,8 +3475,17 @@ class SystemLoadBalancerDialog(QDialog):
     def __init__(self, parent: MainWindow):
         super().__init__(parent)
         self.setWindowTitle("Auto-balans obciążenia systemu")
-        self.resize(520, 380)
         self.parent_window = parent
+        screen = parent.screen() if parent else None
+        if screen is None:
+            screen = QApplication.primaryScreen()
+        available = screen.availableGeometry() if screen else QRect(0, 0, 1280, 800)
+        self.resize(int(available.width() * 0.92), int(available.height() * 0.92))
+        self.setMinimumSize(640, 520)
+        self._metrics_sampler = SystemMetricsSampler()
+        self._telemetry_timer = QTimer(self)
+        self._telemetry_timer.setInterval(1000)
+        self._telemetry_timer.timeout.connect(self._refresh_system_telemetry)
 
         layout = QVBoxLayout(self)
         intro = QLabel(
@@ -3545,6 +3559,23 @@ class SystemLoadBalancerDialog(QDialog):
         form.addRow(self.disable_overlay_chk)
         layout.addLayout(form)
 
+        telemetry_group = QGroupBox("Live system telemetry")
+        telemetry_layout = QVBoxLayout(telemetry_group)
+        self.telemetry_table = QTableWidget(0, 3, telemetry_group)
+        self.telemetry_table.setHorizontalHeaderLabels(["Metric", "Value", "Status"])
+        header = self.telemetry_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.telemetry_table.verticalHeader().setVisible(False)
+        self.telemetry_table.setEditTriggers(self.telemetry_table.NoEditTriggers)
+        self.telemetry_table.setSelectionMode(self.telemetry_table.NoSelection)
+        telemetry_layout.addWidget(self.telemetry_table)
+        self.telemetry_hint = QLabel("Odświeżanie metryk co 1 sekundę.")
+        self.telemetry_hint.setStyleSheet("color: #888;")
+        telemetry_layout.addWidget(self.telemetry_hint)
+        layout.addWidget(telemetry_group)
+
         buttons = QHBoxLayout()
         btn_cancel = QPushButton("Anuluj")
         btn_apply = QPushButton("Zastosuj")
@@ -3554,6 +3585,79 @@ class SystemLoadBalancerDialog(QDialog):
         layout.addLayout(buttons)
         btn_cancel.clicked.connect(self.reject)
         btn_apply.clicked.connect(self._apply)
+        self._refresh_system_telemetry()
+        self._telemetry_timer.start()
+
+    def closeEvent(self, event):
+        if self._telemetry_timer.isActive():
+            self._telemetry_timer.stop()
+        super().closeEvent(event)
+
+    def _status_from_percent(self, value):
+        if value is None:
+            return "N/A", QColor("#8d99ae")
+        if value < 65.0:
+            return "OK", QColor("#2a9d8f")
+        if value < 85.0:
+            return "Warning", QColor("#f4a261")
+        return "Critical", QColor("#e63946")
+
+    def _format_mb_pair(self, used, other):
+        if used is None or other is None:
+            return "N/A"
+        return f"{used:.1f} / {other:.1f} MB"
+
+    def _refresh_system_telemetry(self):
+        data = self._metrics_sampler.collect()
+        rows = []
+
+        cpu_total = data.get("cpu_total_percent")
+        cpu_status, cpu_color = self._status_from_percent(cpu_total)
+        cpu_total_value = "N/A" if cpu_total is None else f"{cpu_total:.1f}%"
+        rows.append(("CPU total", cpu_total_value, cpu_status, cpu_color))
+
+        cores = data.get("cpu_per_core_percent") or []
+        if cores:
+            core_parts = []
+            for idx, value in enumerate(cores, start=1):
+                if value is None:
+                    core_parts.append(f"C{idx}: N/A")
+                else:
+                    core_parts.append(f"C{idx}: {value:.0f}%")
+            rows.append(("CPU per-core", ", ".join(core_parts), cpu_status, cpu_color))
+        else:
+            rows.append(("CPU per-core", "N/A", "N/A", QColor("#8d99ae")))
+
+        mem_used = data.get("memory_used_mb")
+        mem_avail = data.get("memory_available_mb")
+        mem_used_pct = data.get("memory_used_percent")
+        mem_status, mem_color = self._status_from_percent(mem_used_pct)
+        rows.append(("RAM used/available", self._format_mb_pair(mem_used, mem_avail), mem_status, mem_color))
+
+        swap_used = data.get("swap_used_mb")
+        swap_total = data.get("swap_total_mb")
+        swap_pct = data.get("swap_used_percent")
+        swap_status, swap_color = self._status_from_percent(swap_pct)
+        rows.append(("Swap used/total", self._format_mb_pair(swap_used, swap_total), swap_status, swap_color))
+
+        load_avg = data.get("load_average")
+        if load_avg:
+            rows.append(("Load average (1/5/15m)", f"{load_avg[0]:.2f} / {load_avg[1]:.2f} / {load_avg[2]:.2f}", "Info", QColor("#457b9d")))
+
+        io_read = data.get("io_read_mbps")
+        io_write = data.get("io_write_mbps")
+        if io_read is not None and io_write is not None:
+            rows.append(("Disk I/O (read/write)", f"{io_read:.2f} / {io_write:.2f} MB/s", "Info", QColor("#457b9d")))
+
+        self.telemetry_table.setRowCount(len(rows))
+        for row_idx, (metric, value, status, color) in enumerate(rows):
+            metric_item = QTableWidgetItem(metric)
+            value_item = QTableWidgetItem(value)
+            status_item = QTableWidgetItem(status)
+            status_item.setForeground(color)
+            self.telemetry_table.setItem(row_idx, 0, metric_item)
+            self.telemetry_table.setItem(row_idx, 1, value_item)
+            self.telemetry_table.setItem(row_idx, 2, status_item)
 
     def _apply(self):
         self.parent_window.apply_system_load_balancer_settings(
