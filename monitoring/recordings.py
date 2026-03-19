@@ -225,6 +225,9 @@ def build_recording_sidecar_metadata(
     recorder_enqueue_stride: int = 1,
     recorder_degradation_level: int = 0,
     writer_fps_base: float = 0.0,
+    stream_fps_measured: float = 0.0,
+    writer_fps_selected: float = 0.0,
+    writer_fps_reason: str = "",
     alert_thumb: str = "",
     scene_thumb: str = "",
 ) -> Dict[str, object]:
@@ -275,6 +278,9 @@ def build_recording_sidecar_metadata(
         "recorder_enqueue_stride": int(recorder_enqueue_stride),
         "recorder_degradation_level": int(recorder_degradation_level),
         "writer_fps_base": float(writer_fps_base),
+        "stream_fps_measured": float(stream_fps_measured),
+        "writer_fps_selected": float(writer_fps_selected),
+        "writer_fps_reason": str(writer_fps_reason),
     }
 
 

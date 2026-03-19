@@ -68,6 +68,7 @@ Najważniejsze pola opcjonalne:
 | --- | --- |
 | `model` | Nazwa katalogu z modelem DeGirum (ładowana przez `degirum.load_model`). |
 | `fps` | Docelowa liczba klatek analizowanych na sekundę. |
+| `rtsp_fps` | Limit pobierania klatek ze strumienia RTSP (`0` = auto/brak sztucznego limitu). |
 | `confidence_threshold` | Minimalne prawdopodobieństwo, aby alert/nagranie zostały wyzwolone. |
 | `draw_overlays` | Czy rysować ramki i opisy na podglądzie. |
 | `enable_detection` | Czy wykonywać inferencję i generować alerty. |
@@ -102,6 +103,22 @@ Przykład „subtelnej” miniatury (cienka etykieta + brak ramki):
 ```
 
 Zmiany w konfiguracji można wprowadzać z poziomu UI (przycisk „Ustawienia” → dialog kamery) lub ręcznie edytując plik i ponownie uruchamiając aplikację.
+
+### Semantyka `writer_fps` (tempo odtwarzania nagrania)
+
+`writer_fps` to FPS używany przez enkoder MP4. To on decyduje o tempie odtwarzania pliku (czy klip jest „w czasie rzeczywistym”, czy przyspieszony/spowolniony).
+
+Aktualna kolejność wyboru `writer_fps`:
+
+1. **Stabilny pomiar `stream_fps`** (okno czasowe z runtime) – preferowane źródło.
+2. **`rtsp_fps`** – fallback, gdy brak stabilnego pomiaru streamu.
+3. **`fps` (detect FPS)** – ostatni fallback, gdy brak pomiaru i brak limitu RTSP.
+
+Praktycznie:
+
+- wysokie `stream_fps` + niskie `fps` **nie powinny** spowalniać czasu w nagraniu (writer opiera się najpierw o realny stream),
+- ustawienie niskiego `rtsp_fps` może ograniczyć `writer_fps` tylko wtedy, gdy brak wiarygodnego pomiaru streamu,
+- `fps` wpływa na częstotliwość inferencji, ale nie musi być równe `writer_fps`.
 
 ### Polityka degradacji nagrywarki (dynamiczna)
 Podczas aktywnego nagrywania worker monitoruje trzy sygnały przeciążenia:
