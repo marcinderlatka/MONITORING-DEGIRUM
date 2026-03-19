@@ -90,6 +90,7 @@ from .config import (
     DEFAULT_ENABLE_DETECTION,
     DEFAULT_ENABLE_RECORDING,
     DEFAULT_FPS,
+    DEFAULT_DETECTION_FPS_LIMIT,
     DEFAULT_LOST_SECONDS,
     DEFAULT_MODEL,
     DEFAULT_POST_SECONDS,
@@ -187,7 +188,7 @@ os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = "/usr/lib/x86_64-linux-gnu/qt5/plugi
 
 CAMERA_RESTART_REQUIRED_FIELDS = {"rtsp", "type", "model"}
 CAMERA_RUNTIME_APPLY_FIELDS = {
-    "fps", "rtsp_fps", "confidence_threshold", "confidence_threshold_draw", "confidence_threshold_record",
+    "fps", "detection_fps_limit", "rtsp_fps", "confidence_threshold", "confidence_threshold_draw", "confidence_threshold_record",
     "draw_overlays", "enable_detection", "enable_recording", "visible_classes", "record_classes",
     "detection_hours", "record_path", "pre_seconds", "lost_seconds", "post_seconds",
     "required_hits_to_start_recording", "required_misses_to_end_detection", "min_record_seconds", "sensitivity_profile",
@@ -239,6 +240,11 @@ CAMERA_SETTING_TOOLTIPS = {
         "ale też większe obciążenie CPU/GPU.\n"
         "Niższa wartość zmniejsza obciążenie, ale może powodować pomijanie krótkich pojawień się obiektu.\n\n"
         "To ustawienie wpływa głównie na detekcję, a nie bezpośrednio na sam podgląd."
+    ),
+    "detection_fps_limit": (
+        "Maksymalna liczba inferencji AI na sekundę dla tej kamery.\n\n"
+        "Gdy brak tego pola w starszej konfiguracji, aplikacja używa wartości z pola FPS detekcji.\n"
+        "Niższa wartość zmniejsza obciążenie, wyższa poprawia responsywność wykrywania."
     ),
     "rtsp_fps": (
         "Ograniczenie liczby klatek pobieranych ze strumienia RTSP do przetwarzania.\n\n"
@@ -965,6 +971,7 @@ class SingleCameraDialog(QDialog):
         self.model_combo.addItems(models)
 
         self.fps_spin = QSpinBox(); self.fps_spin.setRange(1, 60)
+        self.detection_fps_limit_spin = QSpinBox(); self.detection_fps_limit_spin.setRange(1, 60)
         self.priority_combo = QComboBox(); self.priority_combo.addItems(list(CAMERA_PRIORITIES))
         self.rtsp_fps_spin = QSpinBox(); self.rtsp_fps_spin.setRange(0, 60); self.rtsp_fps_spin.setSpecialValueText("Auto")
         self.conf_spin = QDoubleSpinBox(); self.conf_spin.setRange(0.0, 1.0); self.conf_spin.setSingleStep(0.05)
@@ -1012,6 +1019,7 @@ class SingleCameraDialog(QDialog):
         self._add_field_row(left_layout, "rtsp", "Adres/Urządzenie", self.source_stack, input_widget=self.rtsp_edit, focus_widgets=[self.rtsp_edit, self.device_combo, self.source_stack])
         self._add_field_row(left_layout, "model", "Model detekcji", self.model_combo)
         self._add_field_row(left_layout, "fps", "FPS/S DETECT", self.fps_spin)
+        self._add_field_row(left_layout, "detection_fps_limit", "FPS/S DETECT LIMIT", self.detection_fps_limit_spin)
         self._add_field_row(left_layout, "camera_priority", "Priorytet kamery", self.priority_combo)
         self._add_field_row(left_layout, "rtsp_fps", "FPS/S RTSP", self.rtsp_fps_spin)
         self._add_field_row(left_layout, "show_camera_info_overlay", "Pokaż informacje na obrazie", self.info_overlay_chk)
@@ -1283,6 +1291,7 @@ class SingleCameraDialog(QDialog):
             self.source_stack.setCurrentWidget(self.rtsp_edit)
         self.model_combo.setCurrentText(cam.get("model", DEFAULT_MODEL))
         self.fps_spin.setValue(int(cam.get("fps", DEFAULT_FPS)))
+        self.detection_fps_limit_spin.setValue(int(cam.get("detection_fps_limit", cam.get("fps", DEFAULT_DETECTION_FPS_LIMIT))))
         self.priority_combo.setCurrentText(str(cam.get("camera_priority", "normal")))
         self.rtsp_fps_spin.setValue(int(cam.get("rtsp_fps", DEFAULT_RTSP_FPS)))
         legacy_conf = float(cam.get("confidence_threshold", DEFAULT_CONFIDENCE_THRESHOLD))
@@ -1334,6 +1343,7 @@ class SingleCameraDialog(QDialog):
             "type": self.type_combo.currentText(),
             "model": self.model_combo.currentText(),
             "fps": int(self.fps_spin.value()),
+            "detection_fps_limit": int(self.detection_fps_limit_spin.value()),
             "camera_priority": self.priority_combo.currentText(),
             "confidence_threshold": float(self.conf_spin.value()),
             "confidence_threshold_draw": float(self.conf_draw_spin.value()),
