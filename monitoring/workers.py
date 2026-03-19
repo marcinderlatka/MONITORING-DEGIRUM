@@ -424,6 +424,8 @@ class CameraWorker(QThread):
         self._record_queue_full_warn_ts = 0.0
         self._current_writer_fps_base = 0.0
         self._worker_slot_key: str | None = None
+        self._preview_resize_cache_key: tuple[tuple[int, int, int], int, int, tuple[int, int, int], tuple[int, int, int]] | None = None
+        self._preview_resize_cache_frame: np.ndarray | None = None
         now_mono = time.monotonic()
         self.state.metrics_window_started_ts = now_mono
         self.state.metrics_last_cpu_wall_ts = now_mono
@@ -1094,6 +1096,34 @@ class CameraWorker(QThread):
         new_h = max(1, int(round(h * scale)))
         return cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
+    @staticmethod
+    def _frame_resize_signature(frame: np.ndarray) -> tuple[tuple[int, int, int], tuple[int, int, int], tuple[int, int, int]]:
+        h, w = frame.shape[:2]
+        c = frame.shape[2] if frame.ndim > 2 else 1
+        def _pixel3(px: np.ndarray) -> tuple[int, int, int]:
+            vals = [int(v) for v in np.ravel(px)[:3]]
+            while len(vals) < 3:
+                vals.append(0)
+            return vals[0], vals[1], vals[2]
+
+        first = _pixel3(frame[0, 0]) if h > 0 and w > 0 else (0, 0, 0)
+        middle = _pixel3(frame[h // 2, w // 2]) if h > 0 and w > 0 else (0, 0, 0)
+        return (h, w, c), first, middle
+
+    def _resize_for_preview_cached(self, frame: np.ndarray, max_width: int, max_height: int) -> np.ndarray:
+        if frame is None or getattr(frame, "size", 0) == 0:
+            return frame
+        if not isinstance(frame, np.ndarray):
+            return self._resize_for_preview(frame, max_width, max_height)
+        shape_sig, first_px, middle_px = self._frame_resize_signature(frame)
+        cache_key = (shape_sig, int(max_width), int(max_height), first_px, middle_px)
+        if self._preview_resize_cache_key == cache_key and self._preview_resize_cache_frame is not None:
+            return self._preview_resize_cache_frame
+        resized = self._resize_for_preview(frame, max_width, max_height)
+        self._preview_resize_cache_key = cache_key
+        self._preview_resize_cache_frame = resized
+        return resized
+
     def _maybe_emit_preview(self, preview_frame: np.ndarray, overlays: list[tuple[int, int, int, int, str, float, tuple[int, int, int]]], now_mono: float) -> None:
         interval = _preview_interval_for_role(self.preview_role, self.preview_fps_main, self.preview_fps_thumb, self.preview_pause_when_hidden)
         if interval == float("inf"):
@@ -1109,7 +1139,6 @@ class CameraWorker(QThread):
             self.state.preview_frames_dropped_total += 1
             return
         self.state.preview_frame_skip_counter = 0
-        main_emit_frame = preview_frame
         should_draw = (
             bool(overlays)
             and self.draw_overlays
@@ -1117,19 +1146,30 @@ class CameraWorker(QThread):
             and not (self.app_overload_mode and self.overload_disable_nonessential_overlays and not self.recording)
             and ((self.state.frames_emitted % max(1, self.overlay_stride)) == 0)
         )
-        if should_draw:
-            main_emit_frame = preview_frame.copy()
-            for x1, y1, x2, y2, label, confidence, color in overlays:
-                cv2.rectangle(main_emit_frame, (x1, y1), (x2, y2), color, 2)
-                cv2.putText(main_emit_frame, f"{label}: {confidence * 100:.1f}%", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-
+        is_thumb_like_role = self.preview_role in {"thumb", "hidden"}
         target_main_w = int(max(1, round(self.preview_main_max_width * self.preview_resolution_factor)))
         target_main_h = int(max(1, round(self.preview_main_max_height * self.preview_resolution_factor)))
         target_thumb_w = int(max(1, round(self.preview_thumb_max_width * self.preview_resolution_factor)))
         target_thumb_h = int(max(1, round(self.preview_thumb_max_height * self.preview_resolution_factor)))
-        main_emit_frame = self._resize_for_preview(main_emit_frame, target_main_w, target_main_h)
-        thumb_emit_frame = self._resize_for_preview(main_emit_frame, target_thumb_w, target_thumb_h)
-        if self.preview_role in {"thumb", "hidden"}:
+
+        if is_thumb_like_role and not should_draw:
+            thumb_emit_frame = self._resize_for_preview_cached(preview_frame, target_thumb_w, target_thumb_h)
+            self.main_preview_signal.emit(thumb_emit_frame, self.index)
+            self.thumb_preview_signal.emit(thumb_emit_frame, self.index)
+            self.state.last_preview_emit_ts = now_mono
+            self.state.frames_emitted += 1
+            return
+
+        main_source_frame = preview_frame
+        if should_draw:
+            main_source_frame = preview_frame.copy()
+            for x1, y1, x2, y2, label, confidence, color in overlays:
+                cv2.rectangle(main_source_frame, (x1, y1), (x2, y2), color, 2)
+                cv2.putText(main_source_frame, f"{label}: {confidence * 100:.1f}%", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+
+        main_emit_frame = self._resize_for_preview_cached(main_source_frame, target_main_w, target_main_h)
+        thumb_emit_frame = self._resize_for_preview_cached(main_source_frame, target_thumb_w, target_thumb_h)
+        if is_thumb_like_role:
             main_emit_frame = thumb_emit_frame
 
         self.main_preview_signal.emit(main_emit_frame, self.index)
