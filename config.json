@@ -42,7 +42,15 @@
             "record_classes": ["person", "car"],
             "record_path": "./nagrania",
             "pre_seconds": 5,
-            "post_seconds": 5
+            "post_seconds": 5,
+            "recorder_queue_warn_threshold": 48,
+            "recorder_queue_critical_threshold": 84,
+            "recorder_dropped_warn_threshold": 2,
+            "recorder_dropped_critical_threshold": 8,
+            "recorder_queue_peak_warn_threshold": 60,
+            "recorder_queue_peak_critical_threshold": 100,
+            "recorder_degrade_warn_window_s": 30,
+            "recorder_min_dynamic_writer_fps": 1.0
         }
     ]
 }

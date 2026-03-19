@@ -481,3 +481,42 @@ def test_worker_slot_release_allows_new_worker_after_cleanup():
     first._release_worker_slot()
     assert second._acquire_worker_slot() is True
     second._release_worker_slot()
+
+
+def test_recorder_degradation_level_responds_to_queue_and_drops():
+    worker = _worker()
+    worker.recorder_queue_warn_threshold = 10
+    worker.recorder_queue_critical_threshold = 20
+    worker.recorder_dropped_warn_threshold = 2
+    worker.recorder_dropped_critical_threshold = 4
+    worker.recorder_queue_peak_warn_threshold = 12
+    worker.recorder_queue_peak_critical_threshold = 24
+
+    assert worker._compute_recorder_degradation_level(queue_size=5, dropped_frames=0, queue_peak=5) == 0
+    assert worker._compute_recorder_degradation_level(queue_size=11, dropped_frames=0, queue_peak=5) >= 1
+    assert worker._compute_recorder_degradation_level(queue_size=21, dropped_frames=0, queue_peak=5) >= 2
+
+
+def test_dynamic_recorder_degradation_updates_stride_and_writer_fps():
+    worker = _worker()
+    worker.recording = True
+    worker.current_writer_fps = 8.0
+    worker._current_writer_fps_base = 8.0
+    worker.recorder_min_dynamic_writer_fps = 1.0
+    worker.recorder_queue_warn_threshold = 2
+    worker.recorder_queue_critical_threshold = 4
+    worker.recorder_dropped_warn_threshold = 1
+    worker.recorder_dropped_critical_threshold = 3
+    worker.recorder_queue_peak_warn_threshold = 3
+    worker.recorder_queue_peak_critical_threshold = 5
+
+    class _Queue:
+        def qsize(self):
+            return 5
+
+    worker.record_thread = types.SimpleNamespace(queue=_Queue(), dropped_frames=3, queue_peak=6)
+    worker._apply_dynamic_recorder_degradation(now_mono=100.0)
+
+    assert worker._recorder_degradation_level >= 2
+    assert worker.recorder_enqueue_stride >= 3
+    assert worker.current_writer_fps < 8.0
