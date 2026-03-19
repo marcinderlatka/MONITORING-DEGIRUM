@@ -152,6 +152,7 @@ from .storage import (
     update_recordings_catalog,
 )
 from .workers import CameraWorker
+from .log_messages import msg
 from .runtime_helpers import (
     app_log,
     camera_overlay_anchor,
@@ -2334,7 +2335,7 @@ QToolButton:focus { outline: none; }
             overload = "on" if bool(payload.get("overload_degraded", False) or self.overload_mode_active) else "off"
             self._log_info(
                 "performance",
-                "ui+worker metrics summary",
+                msg("ui_worker_metrics_summary_action"),
                 source="ui",
                 camera=cam_name,
                 details=(
