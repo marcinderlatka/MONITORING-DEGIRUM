@@ -73,6 +73,22 @@ def compute_effective_writer_fps_details(rtsp_fps: int, detect_fps: float, strea
     return 1.0, "fallback_min"
 
 
+def stabilized_stream_fps(samples: list[float] | tuple[float, ...], fallback: float = 0.0) -> float:
+    """Return a robust stream FPS estimate based on trimmed median."""
+    values = [float(v) for v in samples if float(v) > 0.0]
+    if len(values) < 5:
+        return float(max(0.0, fallback))
+    values.sort()
+    trim = max(0, int(len(values) * 0.1))
+    core = values[trim: len(values) - trim] if (len(values) - (2 * trim)) >= 3 else values
+    mid = len(core) // 2
+    if len(core) % 2:
+        median = core[mid]
+    else:
+        median = (core[mid - 1] + core[mid]) / 2.0
+    return float(max(0.0, median))
+
+
 def compute_letterboxed_rect(frame_width: int, frame_height: int, canvas_width: int, canvas_height: int) -> tuple[int, int, int, int]:
     """Compute visible image rectangle for a frame letterboxed into a canvas."""
     if frame_width <= 0 or frame_height <= 0 or canvas_width <= 0 or canvas_height <= 0:
@@ -256,3 +272,27 @@ def overload_level_profile(level: int) -> OverloadLevelProfile:
 def worker_stop_timeout_details(camera_name: str, timeout_ms: int) -> str:
     """Consistent worker stop timeout detail string for logs/tests."""
     return f"camera={camera_name} timeout_ms={int(timeout_ms)}"
+
+
+def build_root_cause_summary(
+    *,
+    ui_render_ms: float,
+    ui_render_limit_ms: float,
+    queue_size: int,
+    queue_limit: int,
+    infer_fps: float,
+    detect_fps_target: float,
+    stream_fps: float,
+    writer_fps: float,
+) -> str:
+    """Summarize likely bottleneck category for faster diagnostics."""
+    reasons: list[str] = []
+    if ui_render_ms > max(1.0, ui_render_limit_ms):
+        reasons.append("gui_render_overload")
+    if queue_size > max(1, queue_limit):
+        reasons.append("recording_pipeline_overload")
+    if detect_fps_target > 0 and infer_fps < (0.7 * detect_fps_target):
+        reasons.append("inference_overload")
+    if stream_fps > 0 and writer_fps > 0 and stream_fps < (0.75 * writer_fps):
+        reasons.append("stream_bottleneck")
+    return ",".join(reasons) if reasons else "healthy"

@@ -168,6 +168,7 @@ from .workers import CameraWorker
 from .log_messages import PERFORMANCE_PARAM_LABELS, format_dict_multiline, msg
 from .runtime_helpers import (
     app_log,
+    build_root_cause_summary,
     camera_overlay_anchor,
     classify_camera_setting_changes,
     compute_letterboxed_rect,
@@ -1923,6 +1924,15 @@ QToolButton:focus { outline: none; }
         self._preview_cache: dict[tuple[int, str, int, int, int, int, str], QPixmap] = {}
         self._last_thumb_update_ts: dict[int, float] = {}
         self._thumb_update_interval_s = 1.0 / max(0.5, float(self.preview_fps_thumb))
+        self._last_grid_update_ts: dict[int, float] = {}
+        self._grid_update_interval_s = 1.0 / max(0.5, float(self.preview_fps_grid))
+        self._recordings_browser_open = False
+        self._hud_interval_s = 0.35
+        self._last_hud_render_ts = 0.0
+        self._hud_cache_qimg: QImage | None = None
+        self._hud_cache_key: tuple[int, int, int, int] | None = None
+        self._letterbox_geometry_cache: dict[tuple[int, int, int, int], tuple[int, int, int, int]] = {}
+        self._canvas_bg_cache: dict[tuple[int, int], np.ndarray] = {}
         self._ui_grid_ms_history_by_camera: dict[str, deque[float]] = {}
         self._ui_grid_frame_times_by_camera: dict[str, deque[float]] = {}
 
@@ -3059,37 +3069,9 @@ QToolButton:focus { outline: none; }
         else:
             self._last_thumb_frame[idx] = frame
 
-        stage_started = time.perf_counter()
-        thumb_source = self._last_thumb_frame.get(idx)
-        if thumb_source is None:
-            thumb_source = self._last_main_frame.get(idx)
-        if thumb_source is not None and now_mono - float(self._last_thumb_update_ts.get(idx, 0.0)) >= self._thumb_update_interval_s:
-            thumb_pm = self._get_scaled_preview_pixmap(idx, "thumb", thumb_source, 192, 108)
-            if hasattr(self.camera_list, "update_thumbnail_pixmap"):
-                self.camera_list.update_thumbnail_pixmap(idx, thumb_pm)
-            self._last_thumb_update_ts[idx] = now_mono
-            self._record_render_stage(idx, "thumb", (time.perf_counter() - stage_started) * 1000.0)
-
-        grid_started = time.perf_counter()
-        if self.camera_grid.isVisible():
-            grid_source, grid_w, grid_h, grid_dpr, source_tag = self._resolve_grid_render_params(idx)
-            if grid_source is not None:
-                grid_pm = self._get_scaled_preview_pixmap(
-                    idx,
-                    "grid",
-                    grid_source,
-                    grid_w,
-                    grid_h,
-                    tile_width=grid_w,
-                    tile_height=grid_h,
-                    dpr=grid_dpr,
-                    source_tag=source_tag,
-                )
-            else:
-                grid_pm = None
-            if hasattr(self.camera_grid, "update_pixmap"):
-                self.camera_grid.update_pixmap(idx, grid_pm)
-            self._record_render_stage(idx, "grid", (time.perf_counter() - grid_started) * 1000.0)
+        if quality_mode != "main":
+            self._update_thumbnail_view(idx, now_mono)
+            self._update_grid_view(idx, now_mono)
 
         from time import perf_counter
         t = perf_counter()
@@ -3110,6 +3092,46 @@ QToolButton:focus { outline: none; }
 
         if quality_mode == "main" and idx == self.camera_list.currentRow():
             self._render_current()
+
+    def _update_thumbnail_view(self, idx: int, now_mono: float) -> None:
+        stage_started = time.perf_counter()
+        thumb_source = self._last_thumb_frame.get(idx) or self._last_main_frame.get(idx)
+        if thumb_source is None:
+            return
+        if now_mono - float(self._last_thumb_update_ts.get(idx, 0.0)) < self._thumb_update_interval_s:
+            return
+        thumb_pm = self._get_scaled_preview_pixmap(idx, "thumb", thumb_source, 192, 108)
+        if hasattr(self.camera_list, "update_thumbnail_pixmap"):
+            self.camera_list.update_thumbnail_pixmap(idx, thumb_pm)
+        self._last_thumb_update_ts[idx] = now_mono
+        self._record_render_stage(idx, "thumb", (time.perf_counter() - stage_started) * 1000.0)
+
+    def _update_grid_view(self, idx: int, now_mono: float) -> None:
+        if not self.camera_grid.isVisible():
+            return
+        interval = self._grid_update_interval_s * (2.0 if self._recordings_browser_open else 1.0)
+        if now_mono - float(self._last_grid_update_ts.get(idx, 0.0)) < interval:
+            return
+        grid_started = time.perf_counter()
+        grid_source, grid_w, grid_h, grid_dpr, source_tag = self._resolve_grid_render_params(idx)
+        if grid_source is not None:
+            grid_pm = self._get_scaled_preview_pixmap(
+                idx,
+                "grid",
+                grid_source,
+                grid_w,
+                grid_h,
+                tile_width=grid_w,
+                tile_height=grid_h,
+                dpr=grid_dpr,
+                source_tag=source_tag,
+            )
+        else:
+            grid_pm = None
+        if hasattr(self.camera_grid, "update_pixmap"):
+            self.camera_grid.update_pixmap(idx, grid_pm)
+        self._last_grid_update_ts[idx] = now_mono
+        self._record_render_stage(idx, "grid", (time.perf_counter() - grid_started) * 1000.0)
     def _invalidate_preview_cache(self, idx: int | None = None) -> None:
         if idx is None:
             self._preview_cache.clear()
@@ -3243,6 +3265,16 @@ QToolButton:focus { outline: none; }
         err = self._last_error.get(idx, "")
         stat = self.worker_status.get(name, {})
         preview_fps = self._last_fps_text.get(idx, "")
+        root_cause = build_root_cause_summary(
+            ui_render_ms=float(stat.get("ui_render_ms", 0.0)),
+            ui_render_limit_ms=float(self.overload_max_ui_render_ms),
+            queue_size=int(stat.get("queue_size", 0)),
+            queue_limit=int(self.overload_max_queue_size),
+            infer_fps=float(stat.get("infer_fps", 0.0)),
+            detect_fps_target=float(stat.get("detect_fps", 0.0)),
+            stream_fps=float(stat.get("stream_fps", 0.0)),
+            writer_fps=float(stat.get("writer_fps", 0.0)),
+        )
 
         status_text = err if err else (status or "brak danych")
         tryb = "nagrywanie" if bool(stat.get("recording_active", False)) else "podgląd"
@@ -3269,6 +3301,7 @@ QToolButton:focus { outline: none; }
             f"Tryb: {tryb}",
             f"Połączenie: {polaczenie}",
             f"Błąd: {err or 'brak'}",
+            f"Wąskie gardło: {root_cause}",
         ]
 
 
@@ -3334,13 +3367,26 @@ QToolButton:focus { outline: none; }
     def _compose_letterboxed(self, frame, idx: int):
         w_label = max(1, self.camera_view.width())
         h_label = max(1, self.camera_view.height())
-        canvas = np.zeros((h_label, w_label, 3), dtype=np.uint8)
+        canvas_key = (w_label, h_label)
+        canvas_template = self._canvas_bg_cache.get(canvas_key)
+        if canvas_template is None:
+            canvas_template = np.zeros((h_label, w_label, 3), dtype=np.uint8)
+            self._canvas_bg_cache = {canvas_key: canvas_template}
+        canvas = canvas_template.copy()
 
         image_rect = (0, 0, w_label, h_label)
         if frame is not None:
             fh, fw = frame.shape[:2]
             if fh > 0 and fw > 0:
-                x0, y0, new_w, new_h = self._compute_letterboxed_rect(fw, fh, w_label, h_label)
+                rect_key = (fw, fh, w_label, h_label)
+                cached_rect = self._letterbox_geometry_cache.get(rect_key)
+                if cached_rect is None:
+                    cached_rect = self._compute_letterboxed_rect(fw, fh, w_label, h_label)
+                    self._letterbox_geometry_cache[rect_key] = cached_rect
+                    if len(self._letterbox_geometry_cache) > 24:
+                        self._letterbox_geometry_cache.clear()
+                        self._letterbox_geometry_cache[rect_key] = cached_rect
+                x0, y0, new_w, new_h = cached_rect
                 image_rect = (x0, y0, new_w, new_h)
                 resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
                 canvas[y0:y0+new_h, x0:x0+new_w] = resized
@@ -3348,10 +3394,10 @@ QToolButton:focus { outline: none; }
         rgb = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
         qimg = QImage(rgb.data, w_label, h_label, rgb.strides[0], QImage.Format_RGB888).copy()
 
-        return self._draw_camera_info_overlay(qimg, idx, image_rect)
+        return qimg
 
     def _render_current(self):
-        now = time.time()
+        now = time.monotonic()
         if now - self.last_render_time < self._render_interval_s:
             return
         self.last_render_time = now
@@ -3362,10 +3408,16 @@ QToolButton:focus { outline: none; }
         cam_name = str(self.cameras[idx].get("name", idx)) if 0 <= idx < len(self.cameras) else str(idx)
         render_started = time.perf_counter()
         frame = self._last_main_frame.get(idx)
-        composed_qimg = self._compose_letterboxed(
-            frame if frame is not None else np.zeros((720, 1280, 3), dtype=np.uint8),
-            idx,
-        )
+        render_frame = frame if frame is not None else np.zeros((720, 1280, 3), dtype=np.uint8)
+        composed_qimg = self._compose_letterboxed(render_frame, idx)
+        hud_key = (idx, composed_qimg.width(), composed_qimg.height(), int(now / max(1e-3, self._hud_interval_s)))
+        if now - self._last_hud_render_ts >= self._hud_interval_s or self._hud_cache_qimg is None or self._hud_cache_key != hud_key:
+            composed_qimg = self._draw_camera_info_overlay(composed_qimg, idx, (0, 0, composed_qimg.width(), composed_qimg.height()))
+            self._hud_cache_qimg = composed_qimg.copy()
+            self._hud_cache_key = hud_key
+            self._last_hud_render_ts = now
+        elif self._hud_cache_qimg is not None:
+            composed_qimg = self._hud_cache_qimg
         self.camera_view.setPixmap(QPixmap.fromImage(composed_qimg))
         render_ms = (time.perf_counter() - render_started) * 1000.0
         self._record_render_stage(idx, "main", render_ms)
@@ -3382,6 +3434,10 @@ QToolButton:focus { outline: none; }
 
     def open_recordings_browser(self):
         self._log_info("browser", "otwarto przeglądarkę nagrań", source="ui")
+        self._recordings_browser_open = True
+        self._thumb_update_interval_s = max(self._thumb_update_interval_s, 1.0 / 2.0)
+        self._grid_update_interval_s = max(self._grid_update_interval_s, 1.0 / 1.0)
+        self._apply_worker_preview_roles()
         camera_dirs = []
         for cam in self.cameras:
             name = cam.get("name") or "camera"
@@ -3397,6 +3453,10 @@ QToolButton:focus { outline: none; }
         )
         dlg.open_video.connect(self.open_video_file)
         dlg.exec_()
+        self._recordings_browser_open = False
+        self._thumb_update_interval_s = 1.0 / max(0.5, float(self.preview_fps_thumb))
+        self._grid_update_interval_s = 1.0 / max(0.5, float(self.preview_fps_grid))
+        self._apply_worker_preview_roles()
 
     def open_camera_list_dialog(self):
         self.log_window.add_entry("application", "otwarto listę kamer")
