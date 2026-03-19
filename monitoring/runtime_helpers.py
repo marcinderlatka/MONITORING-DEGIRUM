@@ -158,20 +158,49 @@ def evaluate_overload_transition(
     bandwidth_ratio = float(max(0.0, preview_bandwidth_mbps)) / max(1e-6, float(max_preview_bandwidth_mbps))
     peak_ratio = max(load_ratio, ui_ratio, queue_ratio, bandwidth_ratio)
 
-    desired_level = 0
-    if peak_ratio >= 1.65:
-        desired_level = 3
-    elif peak_ratio >= 1.25:
-        desired_level = 2
-    elif peak_ratio >= 1.0:
-        desired_level = 1
+    def _ratio_level(ratio: float, *, for_enter: bool) -> int:
+        # Hysteresis: entering overload requires higher pressure than exiting it.
+        if for_enter:
+            if ratio >= 1.65:
+                return 3
+            if ratio >= 1.25:
+                return 2
+            if ratio >= 1.0:
+                return 1
+            return 0
+        if ratio >= 1.45:
+            return 3
+        if ratio >= 1.10:
+            return 2
+        if ratio >= 0.85:
+            return 1
+        return 0
 
-    if active_camera_count >= max(1, int(camera_threshold)) + 4:
-        desired_level = max(desired_level, 3)
-    elif active_camera_count >= max(1, int(camera_threshold)) + 2:
-        desired_level = max(desired_level, 2)
-    elif active_camera_count >= max(1, int(camera_threshold)):
-        desired_level = max(desired_level, 1)
+    def _camera_level(count: int, *, for_enter: bool) -> int:
+        threshold = max(1, int(camera_threshold))
+        if for_enter:
+            if count >= threshold + 4:
+                return 3
+            if count >= threshold + 2:
+                return 2
+            if count >= threshold:
+                return 1
+            return 0
+        if count >= threshold + 4:
+            return 3
+        if count >= threshold + 2:
+            return 2
+        if count >= threshold:
+            return 1
+        return 0
+
+    desired_level_up = max(_ratio_level(peak_ratio, for_enter=True), _camera_level(active_camera_count, for_enter=True))
+    desired_level_down = max(_ratio_level(peak_ratio, for_enter=False), _camera_level(active_camera_count, for_enter=False))
+    desired_level = level_now
+    if desired_level_up > level_now:
+        desired_level = desired_level_up
+    elif desired_level_down < level_now:
+        desired_level = desired_level_down
 
     if recording_count > 0 and active_camera_count <= camera_threshold and peak_ratio < 1.1:
         desired_level = 0
@@ -201,9 +230,12 @@ def overload_level_profile(level: int) -> OverloadLevelProfile:
     level_n = max(0, min(3, int(level)))
     profiles = {
         0: OverloadLevelProfile(1.0, 1.0, 1, 10.0, 1.0, False),
-        1: OverloadLevelProfile(0.85, 0.7, 2, 14.0, 0.85, False),
-        2: OverloadLevelProfile(0.70, 0.5, 3, 18.0, 0.7, True),
-        3: OverloadLevelProfile(0.55, 0.34, 4, 24.0, 0.5, True),
+        # L1: light mode -> thin logs/metrics only.
+        1: OverloadLevelProfile(1.0, 1.0, 1, 14.0, 1.0, False),
+        # L2: UI/preview reductions.
+        2: OverloadLevelProfile(1.0, 0.62, 2, 18.0, 0.75, True),
+        # L3: aggressive mode -> includes detect FPS reduction for non-priority cameras.
+        3: OverloadLevelProfile(0.6, 0.42, 3, 24.0, 0.55, True),
     }
     return profiles[level_n]
 
