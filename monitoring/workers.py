@@ -8,11 +8,11 @@ import os
 import resource
 import time
 import traceback
+from concurrent.futures import Future, ThreadPoolExecutor
 from collections import deque
 from contextlib import suppress
 from dataclasses import dataclass, field
-from queue import Empty, Full, Queue
-from threading import Lock
+from threading import Event, Lock, RLock
 from typing import Any, Callable
 
 import cv2
@@ -263,7 +263,139 @@ def _build_metrics_payload(**kwargs: float | int) -> dict[str, float | int]:
     return payload
 
 
-class RecordingThread(QThread):
+@dataclass
+class _QueueStats:
+    warn: int = 80
+    critical: int = 120
+    hard_drop: int = 180
+
+
+class _QueueView:
+    def __init__(self, session: "RecordingSession") -> None:
+        self._session = session
+
+    def qsize(self) -> int:
+        with self._session.lock:
+            return int(len(self._session.pending))
+
+
+class RecordingSession:
+    def __init__(self, camera_id: str, filepath: str, backend: BaseRecordingBackend, soft_stats: _QueueStats) -> None:
+        self.camera_id = camera_id
+        self.filepath = filepath
+        self.backend = backend
+        self.soft_stats = soft_stats
+        self.pending: deque[np.ndarray] = deque()
+        self.queue = _QueueView(self)
+        self.lock = Lock()
+        self.wakeup = Event()
+        self.running = False
+        self.writer_task: Future[None] | None = None
+        self.started_ts = 0.0
+        self.last_write_ts = 0.0
+        self.frames_written = 0
+        self.dropped_frames = 0
+        self.queue_peak = 0
+        self.ffmpeg_exit_code: int | None = None
+        self.backend_stderr_summary: str = ""
+        self._backend_failed = False
+
+    @property
+    def backend_name(self) -> str:
+        return getattr(self.backend, "backend_name", "current")
+
+
+class RecordingDispatcher:
+    """Global recording dispatcher backed by a small IO worker pool."""
+
+    def __init__(self, max_workers: int = 3) -> None:
+        self._executor = ThreadPoolExecutor(max_workers=max(2, min(4, int(max_workers))), thread_name_prefix="record-io")
+        self._sessions: dict[str, RecordingSession] = {}
+        self._lock = RLock()
+
+    def register(self, camera_id: str, filepath: str, backend: BaseRecordingBackend) -> RecordingSession:
+        session = RecordingSession(camera_id, filepath, backend, soft_stats=_QueueStats())
+        with self._lock:
+            old = self._sessions.pop(camera_id, None)
+        if old is not None:
+            self.stop(camera_id)
+        session.running = True
+        session.writer_task = self._executor.submit(self._write_loop, session)
+        with self._lock:
+            self._sessions[camera_id] = session
+        return session
+
+    def enqueue(self, camera_id: str, frame_ref: np.ndarray, ts: float | None = None) -> bool:
+        del ts
+        with self._lock:
+            session = self._sessions.get(camera_id)
+        if session is None or not session.running:
+            return False
+        with session.lock:
+            pending_size = len(session.pending)
+            if pending_size >= session.soft_stats.hard_drop:
+                session.dropped_frames += 1
+                session.queue_peak = max(session.queue_peak, pending_size)
+                return False
+            session.pending.append(frame_ref)
+            session.queue_peak = max(session.queue_peak, len(session.pending))
+        session.wakeup.set()
+        return True
+
+    def stop(self, camera_id: str, timeout_s: float = 2.0) -> tuple[bool, RecordingSession | None]:
+        with self._lock:
+            session = self._sessions.pop(camera_id, None)
+        if session is None:
+            return True, None
+        session.running = False
+        session.wakeup.set()
+        stopped = True
+        if session.writer_task is not None:
+            try:
+                session.writer_task.result(timeout=max(0.1, timeout_s))
+            except Exception:
+                stopped = False
+        return stopped, session
+
+    def _write_loop(self, session: RecordingSession) -> None:
+        try:
+            session.backend.open()
+            session.started_ts = time.monotonic()
+            while session.running or session.pending:
+                frame = None
+                with session.lock:
+                    if session.pending:
+                        frame = session.pending.popleft()
+                if frame is None:
+                    session.wakeup.wait(0.1)
+                    session.wakeup.clear()
+                    continue
+                try:
+                    session.backend.write(frame)
+                    session.frames_written += 1
+                    session.last_write_ts = time.monotonic()
+                except Exception as exc:
+                    session._backend_failed = True
+                    app_log("error", "recording backend failure", source="worker", level="ERROR", details=f"file={session.filepath} backend={session.backend_name} error={exc}")
+                    session.running = False
+        finally:
+            with suppress(Exception):
+                session.backend.close()
+            session.ffmpeg_exit_code = session.backend.ffmpeg_exit_code
+            session.backend_stderr_summary = str(getattr(session.backend, "stderr_summary", "") or "")
+
+
+_RECORDING_DISPATCHER: RecordingDispatcher | None = None
+
+
+def _global_recording_dispatcher() -> RecordingDispatcher:
+    global _RECORDING_DISPATCHER
+    if _RECORDING_DISPATCHER is None:
+        _RECORDING_DISPATCHER = RecordingDispatcher(max_workers=3)
+    return _RECORDING_DISPATCHER
+
+
+class RecordingThread:
     def __init__(
         self,
         filepath: str,
@@ -274,13 +406,12 @@ class RecordingThread(QThread):
         backend: BaseRecordingBackend | None = None,
         error_callback: Callable[[str], None] | None = None,
     ) -> None:
-        super().__init__()
         self.filepath = filepath
         self.width = width
         self.height = height
         self.fps = float(max(1.0, fps))
-        self.queue: "Queue[np.ndarray]" = Queue(maxsize=120)
-        self.running = True
+        self.queue: _QueueView | Any = None
+        self.running = False
         self.backend: BaseRecordingBackend = backend or DeGirumWriterBackend(filepath, width, height, fps)
         self.error_callback = error_callback
         self.dropped_frames = 0
@@ -290,56 +421,58 @@ class RecordingThread(QThread):
         self.queue_peak = 0
         self.ffmpeg_exit_code: int | None = None
         self.backend_stderr_summary: str = ""
-        self._backend_failed = False
+        self._session: RecordingSession | None = None
+        self._camera_id = os.path.basename(filepath)
+        self._queue_warn_threshold = 80
+        self._queue_critical_threshold = 120
+        self._queue_hard_drop_threshold = 180
 
     @property
     def backend_name(self) -> str:
         return getattr(self.backend, "backend_name", "current")
 
-    def _handle_backend_error(self, exc: Exception) -> None:
-        self._backend_failed = True
-        app_log("error", "recording backend failure", source="worker", level="ERROR", details=f"file={self.filepath} backend={self.backend_name} error={exc}")
-        if self.error_callback is not None:
-            with suppress(Exception):
-                self.error_callback(str(exc))
+    def set_camera_id(self, camera_id: str) -> None:
+        self._camera_id = str(camera_id)
 
-    def run(self) -> None:
-        try:
-            self.backend.open()
-            self.started_ts = time.monotonic()
-            while self.running or not self.queue.empty():
-                try:
-                    frame = self.queue.get(timeout=0.1)
-                except Empty:
-                    continue
-                try:
-                    self.backend.write(frame)
-                    self.frames_written += 1
-                    self.last_write_ts = time.monotonic()
-                except Exception as exc:
-                    self._handle_backend_error(exc)
-                    self.running = False
-        except Exception as exc:
-            self._handle_backend_error(exc)
-        finally:
-            try:
-                self.backend.close()
-            except Exception as exc:
-                self._handle_backend_error(exc)
-            self.ffmpeg_exit_code = self.backend.ffmpeg_exit_code
-            self.backend_stderr_summary = str(getattr(self.backend, "stderr_summary", "") or "")
+    def set_queue_watermarks(self, warn: int, critical: int, hard_drop: int) -> None:
+        self._queue_warn_threshold = int(max(1, warn))
+        self._queue_critical_threshold = int(max(self._queue_warn_threshold + 1, critical))
+        self._queue_hard_drop_threshold = int(max(self._queue_critical_threshold + 1, hard_drop))
+
+    def _sync_stats(self) -> None:
+        if self._session is None:
+            return
+        self.dropped_frames = int(self._session.dropped_frames)
+        self.frames_written = int(self._session.frames_written)
+        self.queue_peak = int(self._session.queue_peak)
+        self.ffmpeg_exit_code = self._session.ffmpeg_exit_code
+        self.backend_stderr_summary = self._session.backend_stderr_summary
 
     def write(self, frame: np.ndarray) -> None:
         if self.running:
-            try:
-                self.queue.put_nowait(frame)
-                self.queue_peak = max(self.queue_peak, self.queue.qsize())
-            except Full:
-                self.dropped_frames += 1
+            _global_recording_dispatcher().enqueue(self._camera_id, frame, time.monotonic())
+            self._sync_stats()
+
+    def start(self) -> None:
+        self._session = _global_recording_dispatcher().register(self._camera_id, self.filepath, self.backend)
+        self._session.soft_stats = _QueueStats(
+            warn=self._queue_warn_threshold,
+            critical=self._queue_critical_threshold,
+            hard_drop=self._queue_hard_drop_threshold,
+        )
+        self.queue = self._session.queue
+        self.running = True
+        self.started_ts = time.monotonic()
 
     def stop(self, timeout_ms: int = 2000) -> bool:
         self.running = False
-        stopped = self.wait(timeout_ms)
+        stopped, session = _global_recording_dispatcher().stop(self._camera_id, timeout_s=max(0.1, timeout_ms / 1000.0))
+        if session is not None:
+            self._session = session
+            self._sync_stats()
+        if session is not None and self.error_callback is not None and session._backend_failed:
+            with suppress(Exception):
+                self.error_callback("backend write-loop failed")
         if not stopped:
             app_log("warning", "recording thread stop timeout", source="worker", level="WARNING", details=f"file={self.filepath} timeout_ms={timeout_ms}")
         return bool(stopped)
@@ -1125,6 +1258,14 @@ class CameraWorker(QThread):
             backend=backend,
             error_callback=lambda msg: self.error_signal.emit(f"Błąd backendu nagrywania: {msg}", self.index),
         )
+        if hasattr(self.record_thread, "set_camera_id"):
+            self.record_thread.set_camera_id(str(self.camera.get("name", self.index)))
+        if hasattr(self.record_thread, "set_queue_watermarks"):
+            self.record_thread.set_queue_watermarks(
+                warn=self.recorder_queue_warn_threshold,
+                critical=self.recorder_queue_critical_threshold,
+                hard_drop=max(self.recorder_queue_critical_threshold + 1, int(self.recorder_queue_critical_threshold * 1.5)),
+            )
         self.record_thread.start()
         self.recording = True
         self.is_recording_active = True
@@ -1149,8 +1290,12 @@ class CameraWorker(QThread):
             for buffer_frame in list(self.prerecord_buffer):
                 self.record_thread.write(buffer_frame)
             self.record_thread.write(raw_frame)
+            if hasattr(self.record_thread, "_sync_stats"):
+                self.record_thread._sync_stats()
         else:
             self.record_thread.write(raw_frame)
+            if hasattr(self.record_thread, "_sync_stats"):
+                self.record_thread._sync_stats()
         self._update_event_thumbnail(preview_frame, best_bbox, self.current_event_label, best_score)
         scene_thumb_path = self.current_event_scene_thumbnail_path or self.current_event_thumbnail_path
         self.current_event_scene_thumbnail_path = scene_thumb_path
@@ -1534,9 +1679,10 @@ class CameraWorker(QThread):
                     self._finalize_recording_session()
                 self.recording_enqueue_ms = max(0.0, (time.monotonic() - enqueue_start) * 1000.0)
                 return
-            prev_drop = int(self.record_thread.dropped_frames)
-            self.record_thread.write(raw_frame)
-            if self.record_thread.dropped_frames > prev_drop and now_mono - self._record_queue_full_warn_ts >= max(1.0, self.recorder_degrade_warn_window_s):
+            enqueued = _global_recording_dispatcher().enqueue(str(self.camera.get("name", self.index)), raw_frame, now_mono)
+            if hasattr(self.record_thread, "_sync_stats"):
+                self.record_thread._sync_stats()
+            if (not enqueued) and now_mono - self._record_queue_full_warn_ts >= max(1.0, self.recorder_degrade_warn_window_s):
                 self._record_queue_full_warn_ts = now_mono
                 app_log("warning", "recorder queue full", camera=str(self.camera.get("name", self.index)), source="worker", level="WARNING", details=f"queue_peak={self.record_thread.queue_peak}")
             if self._should_end_detection_now(now_mono):
