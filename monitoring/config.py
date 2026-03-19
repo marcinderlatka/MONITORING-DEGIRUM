@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from glob import glob
 from pathlib import Path
 from typing import Dict, List, MutableMapping
@@ -388,8 +389,13 @@ def load_config(path: Path | None = None) -> Dict[str, object]:
             ],
         }
     else:
-        with cfg_path.open("r", encoding="utf-8") as handle:
-            cfg = json.load(handle)
+        raw_content = cfg_path.read_text(encoding="utf-8")
+        try:
+            cfg = json.loads(raw_content)
+        except json.JSONDecodeError:
+            sanitized = re.sub(r",(\s*[}\]])", r"\1", raw_content)
+            cfg = json.loads(sanitized)
+            cfg_path.write_text(json.dumps(cfg, indent=4), encoding="utf-8")
 
     LOG_HISTORY_PATH = _resolve_path(cfg.get("log_history_path"), default=LOG_HISTORY_PATH)
     LOG_RETENTION_HOURS = int(cfg.get("log_retention_hours", LOG_RETENTION_HOURS))
