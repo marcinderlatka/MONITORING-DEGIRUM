@@ -230,6 +230,7 @@ def build_recording_sidecar_metadata(
     writer_fps_reason: str = "",
     writer_backend: str = "current",
     ffmpeg_exit_code: int | None = None,
+    ffmpeg_stderr_summary: str = "",
     alert_thumb: str = "",
     scene_thumb: str = "",
 ) -> Dict[str, object]:
@@ -285,6 +286,7 @@ def build_recording_sidecar_metadata(
         "writer_fps_reason": str(writer_fps_reason),
         "writer_backend": str(writer_backend),
         "ffmpeg_exit_code": ffmpeg_exit_code if ffmpeg_exit_code is None else int(ffmpeg_exit_code),
+        "ffmpeg_stderr_summary": str(ffmpeg_stderr_summary),
     }
 
 

@@ -259,6 +259,8 @@ class RecordingsBrowserDialog(QDialog):
         self._thumbnail_generation = 0
         self._thumbnail_buffer_items = 8
         self._mp4_fallback_requested: set[str] = set()
+        self._mp4_fallback_inflight: set[str] = set()
+        self._mp4_fallback_limit = 1
         self._tile_items: Dict[str, QListWidgetItem] = {}
         self._tile_cards: Dict[str, RecordingCardWidget] = {}
         self._table_rows: Dict[str, int] = {}
@@ -708,6 +710,7 @@ class RecordingsBrowserDialog(QDialog):
             return
         self._pending_thumbnails.discard(key)
         self._thumbnail_tasks.pop(key, None)
+        self._mp4_fallback_inflight.discard(key)
         if isinstance(image, QImage) and not image.isNull():
             pixmap = QPixmap.fromImage(image).scaled(self._thumb_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             self._apply_thumbnail_to_card(filepath, pixmap)
@@ -726,11 +729,13 @@ class RecordingsBrowserDialog(QDialog):
             return
         self._pending_thumbnails.discard(key)
         self._thumbnail_tasks.pop(key, None)
+        self._mp4_fallback_inflight.discard(key)
         if reason == "jpg-missing":
             app_log("warning", "brak pliku miniatury JPG", source="recordings-browser", level="WARNING", details=filepath)
             self._apply_thumbnail_failed(filepath, reason, level="WARNING", group="warning")
-            if self._is_tile_visible(filepath) and key not in self._mp4_fallback_requested:
+            if self._is_tile_visible(filepath) and key not in self._mp4_fallback_requested and len(self._mp4_fallback_inflight) < self._mp4_fallback_limit:
                 self._mp4_fallback_requested.add(key)
+                self._mp4_fallback_inflight.add(key)
                 entry = self._thumbnail_entries.get(key)
                 if entry is not None:
                     self._start_thumbnail_request(entry, allow_mp4_fallback=True)

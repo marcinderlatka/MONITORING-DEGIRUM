@@ -70,7 +70,7 @@ from .config import (
 from .recordings import build_recording_sidecar_metadata
 from .recording_backends import BaseRecordingBackend, DeGirumWriterBackend, FFmpegPipeBackend
 from .log_messages import PERFORMANCE_PARAM_LABELS, format_dict_multiline, msg
-from .runtime_helpers import app_log, compute_effective_writer_fps, compute_effective_writer_fps_details, worker_stop_timeout_details
+from .runtime_helpers import app_log, compute_effective_writer_fps, compute_effective_writer_fps_details, stabilized_stream_fps, worker_stop_timeout_details
 from .storage import enqueue_recording_metadata_persist
 
 LABEL_COLORS = {
@@ -257,6 +257,7 @@ class RecordingThread(QThread):
         self.last_write_ts = 0.0
         self.queue_peak = 0
         self.ffmpeg_exit_code: int | None = None
+        self.backend_stderr_summary: str = ""
         self._backend_failed = False
 
     @property
@@ -294,6 +295,7 @@ class RecordingThread(QThread):
             except Exception as exc:
                 self._handle_backend_error(exc)
             self.ffmpeg_exit_code = self.backend.ffmpeg_exit_code
+            self.backend_stderr_summary = str(getattr(self.backend, "stderr_summary", "") or "")
 
     def write(self, frame: np.ndarray) -> None:
         if self.running:
@@ -410,7 +412,7 @@ class CameraWorker(QThread):
         self.stop_signal = False
         self._current_stream = None
         self.record_lock = Lock()
-        self.prerecord_buffer = deque(maxlen=max(1, int(self.pre_seconds * max(1, self.fps))))
+        self.prerecord_buffer = deque(maxlen=max(30, int(max(1, self.pre_seconds) * 5)))
 
         self.stream_fps = 0.0
         self.source_fps = 0.0
@@ -447,6 +449,7 @@ class CameraWorker(QThread):
         self.current_event_max_confidence = 0.0
         self.current_recording_backend = str(self.camera.get("recording_backend", DEFAULT_RECORDING_BACKEND))
         self.current_ffmpeg_exit_code: int | None = None
+        self.current_ffmpeg_stderr_summary: str = ""
 
         self.inference_count = 0
         self.positive_detection_count = 0
@@ -478,8 +481,7 @@ class CameraWorker(QThread):
         self.current_writer_fps_reason = "fallback_min"
         self.current_stream_fps_measured = 0.0
         self._worker_slot_key: str | None = None
-        self._preview_resize_cache_key: tuple[tuple[int, int, int], int, int, tuple[int, int, int], tuple[int, int, int]] | None = None
-        self._preview_resize_cache_frame: np.ndarray | None = None
+        self._prerecord_buffer_basis_fps = 0.0
         now_mono = time.monotonic()
         self.state.metrics_window_started_ts = now_mono
         self.state.metrics_last_cpu_wall_ts = now_mono
@@ -767,8 +769,7 @@ class CameraWorker(QThread):
         self.output_dir = str(os.path.join(str(record_base), camera_config.get("name", self.camera.get("name", "camera"))))
         os.makedirs(self.output_dir, exist_ok=True)
 
-        buffer_fps = self._get_prerecord_buffer_fps_basis()
-        self.prerecord_buffer = deque(self.prerecord_buffer, maxlen=max(1, int(self.pre_seconds * max(1.0, buffer_fps))))
+        self._sync_prerecord_buffer(force=True)
         self.camera.update(camera_config)
 
     def _is_within_schedule(self) -> bool:
@@ -802,7 +803,9 @@ class CameraWorker(QThread):
         elapsed = float(self._stream_fps_window[-1] - self._stream_fps_window[0]) if len(self._stream_fps_window) >= 2 else 0.0
         if elapsed < 2.0:
             return 0.0
-        return float(max(0.0, self._get_effective_stream_fps()))
+        fps_samples = [1.0 / max(1e-6, (self._stream_fps_window[i] - self._stream_fps_window[i - 1])) for i in range(1, len(self._stream_fps_window))]
+        measured = float(max(0.0, self._get_effective_stream_fps()))
+        return float(max(0.0, stabilized_stream_fps(fps_samples, fallback=measured)))
 
     def _select_session_writer_fps(self, measured_stream_fps: float, detect_fps: float) -> tuple[float, str]:
         target_fps, reason = compute_effective_writer_fps_details(self.rtsp_fps, detect_fps, measured_stream_fps)
@@ -823,18 +826,22 @@ class CameraWorker(QThread):
         return clamped, reason
 
     def _get_prerecord_buffer_fps_basis(self) -> float:
+        measured = self.current_stream_fps_measured or self.stream_fps or self.loop_fps
+        if measured and measured > 0:
+            return float(min(60.0, max(1.0, measured)))
         if self.rtsp_fps > 0:
             return float(max(1.0, self.rtsp_fps))
-        measured = self.stream_fps or self.loop_fps or self.fps
-        return float(min(60.0, max(1.0, measured)))
+        return float(min(60.0, max(1.0, self.fps)))
 
-    def _sync_prerecord_buffer(self) -> None:
+    def _sync_prerecord_buffer(self, force: bool = False) -> None:
         basis = self._get_prerecord_buffer_fps_basis()
         maxlen = max(1, int(self.pre_seconds * basis))
-        if self.prerecord_buffer.maxlen != maxlen:
+        basis_changed = abs(float(self._prerecord_buffer_basis_fps) - float(basis)) >= 0.5
+        if force or self.prerecord_buffer.maxlen != maxlen or basis_changed:
             self.prerecord_buffer = deque(self.prerecord_buffer, maxlen=maxlen)
+            self._prerecord_buffer_basis_fps = float(basis)
             logger.info("prerecord buffer updated camera=%s pre_seconds=%s basis=%.2f maxlen=%s", self.camera.get("name", self.index), self.pre_seconds, basis, maxlen)
-            app_log("worker", "prerecord buffer updated", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO", details=f"basis={basis:.2f} maxlen={maxlen}")
+            app_log("worker", "prerecord buffer synchronized", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO", details=f"basis={basis:.2f} maxlen={maxlen} force={force}")
 
     def _make_detection_overlay_frame(self, frame: np.ndarray, bbox: tuple[int, int, int, int] | None, label: str, confidence: float) -> np.ndarray:
         canvas = frame.copy()
@@ -892,12 +899,29 @@ class CameraWorker(QThread):
             writer_fps_reason=kwargs.get("writer_fps_reason", self.current_writer_fps_reason),
             writer_backend=kwargs.get("writer_backend", self.current_recording_backend),
             ffmpeg_exit_code=kwargs.get("ffmpeg_exit_code", self.current_ffmpeg_exit_code),
+            ffmpeg_stderr_summary=kwargs.get("ffmpeg_stderr_summary", self.current_ffmpeg_stderr_summary),
         )
 
     def _create_recording_backend(self, filepath: str, width: int, height: int, fps: float) -> BaseRecordingBackend:
         backend_name = str(self.camera.get("recording_backend", DEFAULT_RECORDING_BACKEND)).lower()
         if backend_name == "ffmpeg":
-            return FFmpegPipeBackend(filepath, width, height, fps)
+            ffmpeg_codec = str(self.camera.get("ffmpeg_codec", "libx264"))
+            ffmpeg_preset = str(self.camera.get("ffmpeg_preset", "veryfast"))
+            ffmpeg_tune = str(self.camera.get("ffmpeg_tune", "zerolatency"))
+            ffmpeg_movflags = str(self.camera.get("ffmpeg_movflags", "+faststart"))
+            ffmpeg_crf_raw = self.camera.get("ffmpeg_crf", 23)
+            ffmpeg_crf = None if ffmpeg_crf_raw in {None, "", "none"} else int(ffmpeg_crf_raw)
+            return FFmpegPipeBackend(
+                filepath,
+                width,
+                height,
+                fps,
+                codec=ffmpeg_codec,
+                preset=ffmpeg_preset,
+                tune=ffmpeg_tune,
+                crf=ffmpeg_crf,
+                movflags=ffmpeg_movflags,
+            )
         return DeGirumWriterBackend(filepath, width, height, fps)
 
     def _compute_recorder_degradation_level(self, queue_size: int, dropped_frames: int, queue_peak: int) -> int:
@@ -929,20 +953,14 @@ class CameraWorker(QThread):
             self._recorder_degradation_level = max(0, self._recorder_degradation_level - 1)
 
         stride_by_level = {0: 1, 1: 2, 2: 3, 3: 4}
-        fps_factor_by_level = {0: 1.0, 1: 0.85, 2: 0.65, 3: 0.5}
         self.recorder_enqueue_stride = int(stride_by_level.get(self._recorder_degradation_level, 4))
-        if self._current_writer_fps_base > 0:
-            safe_min_fps = float(max(1.0, min(self._current_writer_fps_base, self.recorder_min_dynamic_writer_fps)))
-            degraded_fps = float(max(safe_min_fps, self._current_writer_fps_base * fps_factor_by_level.get(self._recorder_degradation_level, 0.5)))
-            self.current_writer_fps = degraded_fps
-            self.writer_fps = degraded_fps
 
         if self._recorder_degradation_level > 0:
             self._warn_recorder_overload_once_per_window(
                 now_mono,
                 details=(
                     f"level={self._recorder_degradation_level} queue_size={queue_size} queue_peak={queue_peak} dropped_frames={dropped} "
-                    f"writer_fps={self.current_writer_fps:.2f} enqueue_stride={self.recorder_enqueue_stride}"
+                    f"writer_fps_locked={self.current_writer_fps:.2f} enqueue_stride={self.recorder_enqueue_stride}"
                 ),
             )
 
@@ -1035,6 +1053,7 @@ class CameraWorker(QThread):
         backend = self._create_recording_backend(self.output_file, w, h, self.current_writer_fps)
         self.current_recording_backend = getattr(backend, "backend_name", str(self.camera.get("recording_backend", DEFAULT_RECORDING_BACKEND)))
         self.current_ffmpeg_exit_code = None
+        self.current_ffmpeg_stderr_summary = ""
         self.record_thread = RecordingThread(
             self.output_file,
             w,
@@ -1086,6 +1105,7 @@ class CameraWorker(QThread):
             writer_fps_reason=self.current_writer_fps_reason,
             writer_backend=self.current_recording_backend,
             ffmpeg_exit_code=self.current_ffmpeg_exit_code,
+            ffmpeg_stderr_summary=self.current_ffmpeg_stderr_summary,
         )
         self._save_recording_metadata(meta)
         self.record_signal.emit("start", self.output_file)
@@ -1105,6 +1125,7 @@ class CameraWorker(QThread):
             dropped_frames = self.record_thread.dropped_frames
             queue_peak = self.record_thread.queue_peak
             self.current_ffmpeg_exit_code = self.record_thread.ffmpeg_exit_code
+            self.current_ffmpeg_stderr_summary = self.record_thread.backend_stderr_summary
             self.record_thread = None
         event_end_ts = time.time(); event_start_ts = self.current_event_start_ts or event_end_ts
         duration = max(0.0, event_end_ts - event_start_ts)
@@ -1138,6 +1159,7 @@ class CameraWorker(QThread):
             writer_fps_reason=self.current_writer_fps_reason,
             writer_backend=self.current_recording_backend,
             ffmpeg_exit_code=self.current_ffmpeg_exit_code,
+            ffmpeg_stderr_summary=self.current_ffmpeg_stderr_summary,
         )
         io_enqueue_started_mono = time.monotonic()
         self._save_recording_metadata(meta)
@@ -1146,6 +1168,15 @@ class CameraWorker(QThread):
         self.record_signal.emit("stop", self.output_file)
         finalize_elapsed_ms = (time.monotonic() - finalize_started_mono) * 1000.0
         app_log("recording", "recording session finalized", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO", details=f"frames_written={frames_written} dropped_frames={dropped_frames} queue_peak={queue_peak}")
+        if self.current_ffmpeg_exit_code not in {None, 0}:
+            app_log(
+                "warning",
+                "ffmpeg backend exited with error",
+                camera=str(self.camera.get("name", self.index)),
+                source="worker",
+                level="WARNING",
+                details=f"exit_code={self.current_ffmpeg_exit_code} stderr={self.current_ffmpeg_stderr_summary[:400]}",
+            )
         app_log(
             "worker",
             "czas finalizacji zdarzenia",
@@ -1181,6 +1212,7 @@ class CameraWorker(QThread):
         self.current_stream_fps_measured = 0.0
         self.current_recording_backend = str(self.camera.get("recording_backend", DEFAULT_RECORDING_BACKEND))
         self.current_ffmpeg_exit_code = None
+        self.current_ffmpeg_stderr_summary = ""
         self.recorder_enqueue_stride = 1
         self._recorder_enqueue_counter = 0
         self._recorder_degradation_level = 0
@@ -1326,34 +1358,6 @@ class CameraWorker(QThread):
         new_h = max(1, int(round(h * scale)))
         return cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
-    @staticmethod
-    def _frame_resize_signature(frame: np.ndarray) -> tuple[tuple[int, int, int], tuple[int, int, int], tuple[int, int, int]]:
-        h, w = frame.shape[:2]
-        c = frame.shape[2] if frame.ndim > 2 else 1
-        def _pixel3(px: np.ndarray) -> tuple[int, int, int]:
-            vals = [int(v) for v in np.ravel(px)[:3]]
-            while len(vals) < 3:
-                vals.append(0)
-            return vals[0], vals[1], vals[2]
-
-        first = _pixel3(frame[0, 0]) if h > 0 and w > 0 else (0, 0, 0)
-        middle = _pixel3(frame[h // 2, w // 2]) if h > 0 and w > 0 else (0, 0, 0)
-        return (h, w, c), first, middle
-
-    def _resize_for_preview_cached(self, frame: np.ndarray, max_width: int, max_height: int) -> np.ndarray:
-        if frame is None or getattr(frame, "size", 0) == 0:
-            return frame
-        if not isinstance(frame, np.ndarray):
-            return self._resize_for_preview(frame, max_width, max_height)
-        shape_sig, first_px, middle_px = self._frame_resize_signature(frame)
-        cache_key = (shape_sig, int(max_width), int(max_height), first_px, middle_px)
-        if self._preview_resize_cache_key == cache_key and self._preview_resize_cache_frame is not None:
-            return self._preview_resize_cache_frame
-        resized = self._resize_for_preview(frame, max_width, max_height)
-        self._preview_resize_cache_key = cache_key
-        self._preview_resize_cache_frame = resized
-        return resized
-
     def _effective_preview_target_fps(self) -> float:
         role = str(self.preview_role or "thumb").lower()
         if role == "main":
@@ -1403,8 +1407,7 @@ class CameraWorker(QThread):
         if is_thumb_like_role and not should_draw:
             emit_w = target_grid_w if self.preview_role == "grid" else target_thumb_w
             emit_h = target_grid_h if self.preview_role == "grid" else target_thumb_h
-            thumb_emit_frame = self._resize_for_preview_cached(preview_frame, emit_w, emit_h)
-            self.main_preview_signal.emit(thumb_emit_frame, self.index)
+            thumb_emit_frame = self._resize_for_preview(preview_frame, emit_w, emit_h)
             self.thumb_preview_signal.emit(thumb_emit_frame, self.index)
             self.state.last_preview_emit_ts = now_mono
             self.state.frames_emitted += 1
@@ -1418,14 +1421,12 @@ class CameraWorker(QThread):
                 cv2.rectangle(main_source_frame, (x1, y1), (x2, y2), color, 2)
                 cv2.putText(main_source_frame, f"{label}: {confidence * 100:.1f}%", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
-        main_emit_frame = self._resize_for_preview_cached(main_source_frame, target_main_w, target_main_h)
+        main_emit_frame = self._resize_for_preview(main_source_frame, target_main_w, target_main_h)
         thumb_emit_w = target_grid_w if self.preview_role == "grid" else target_thumb_w
         thumb_emit_h = target_grid_h if self.preview_role == "grid" else target_thumb_h
-        thumb_emit_frame = self._resize_for_preview_cached(main_source_frame, thumb_emit_w, thumb_emit_h)
-        if is_thumb_like_role:
-            main_emit_frame = thumb_emit_frame
-
-        self.main_preview_signal.emit(main_emit_frame, self.index)
+        thumb_emit_frame = self._resize_for_preview(main_source_frame, thumb_emit_w, thumb_emit_h)
+        if self.preview_role == "main":
+            self.main_preview_signal.emit(main_emit_frame, self.index)
         self.thumb_preview_signal.emit(thumb_emit_frame, self.index)
         self.state.last_preview_emit_ts = now_mono
         self.state.frames_emitted += 1
