@@ -109,6 +109,8 @@ def test_preview_role_defaults_and_config_fill():
     assert updated["preview_grid_max_height"] == 360
     assert updated["preview_thumb_max_width"] == 320
     assert updated["preview_thumb_max_height"] == 180
+    assert updated["overlay_text_enabled"] is True
+    assert updated["overlay_draw_every_n"] == 2
     assert updated["camera_priority"] == "normal"
     assert "preview_channel_policies" in updated
     assert updated["preview_channel_policies"]["grid"]["fps"] == 3.0

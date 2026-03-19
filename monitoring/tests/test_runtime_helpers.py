@@ -5,7 +5,7 @@ import sys
 
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
-from monitoring.runtime_helpers import build_root_cause_summary, stabilized_stream_fps
+from monitoring.runtime_helpers import build_root_cause_summary, scale_bbox, stabilized_stream_fps
 
 
 def test_stabilized_stream_fps_limits_aggressive_jump_against_fallback():
@@ -36,3 +36,9 @@ def test_build_root_cause_summary_prefers_new_bottleneck_labels():
     assert "recording_bottleneck" in summary
     assert "inference_bottleneck" in summary
     assert "stream_bottleneck" in summary
+
+
+def test_scale_bbox_handles_source_size_scaling():
+    bbox = [64, 128, 320, 512]
+    scaled = scale_bbox(bbox, frame_shape=(1080, 1920, 3), source_size=(640, 640))
+    assert scaled == (192, 216, 960, 864)

@@ -687,6 +687,61 @@ def test_thumb_hidden_fast_path_uses_single_resize_call(monkeypatch):
     assert calls == [(expected_w, expected_h)]
 
 
+def test_preview_overlay_text_disabled_for_overload_level_ge_2(monkeypatch):
+    worker = _worker()
+    worker.set_preview_role("main")
+    worker.draw_overlays = True
+    worker.overlay_text_enabled = True
+    worker.overload_level = 2
+
+    rect_calls = {"count": 0}
+    text_calls = {"count": 0}
+
+    def _rectangle(*_args, **_kwargs):
+        rect_calls["count"] += 1
+        return None
+
+    def _put_text(*_args, **_kwargs):
+        text_calls["count"] += 1
+        return None
+
+    monkeypatch.setattr("monitoring.workers.cv2.rectangle", _rectangle)
+    monkeypatch.setattr("monitoring.workers.cv2.putText", _put_text)
+
+    frame = np.zeros((64, 64, 3), dtype=np.uint8)
+    overlays = [(1, 1, 30, 30, "person", 0.95, (0, 255, 0))]
+    worker._maybe_emit_preview(frame, overlays=overlays, now_mono=1.0)
+
+    assert rect_calls["count"] == 1
+    assert text_calls["count"] == 0
+
+
+def test_preview_overlay_draw_stride_applies_when_overload_level_ge_2():
+    worker = _worker()
+    worker.set_preview_role("main")
+    worker.draw_overlays = True
+    worker.overload_level = 2
+    worker.overlay_draw_every_n = 3
+
+    class _SignalRecorder:
+        def emit(self, _frame, _index):
+            return None
+
+    worker.main_preview_signal = _SignalRecorder()
+    worker.thumb_preview_signal = _SignalRecorder()
+    frame = np.zeros((64, 64, 3), dtype=np.uint8)
+    overlays = [(1, 1, 30, 30, "person", 0.95, (0, 255, 0))]
+
+    worker._maybe_emit_preview(frame, overlays=overlays, now_mono=1.0)
+    assert worker.frame_copies_total == 1
+    worker._maybe_emit_preview(frame, overlays=overlays, now_mono=2.0)
+    assert worker.frame_copies_total == 1
+    worker._maybe_emit_preview(frame, overlays=overlays, now_mono=3.0)
+    assert worker.frame_copies_total == 1
+    worker._maybe_emit_preview(frame, overlays=overlays, now_mono=4.0)
+    assert worker.frame_copies_total == 2
+
+
 def test_rejection_counter_below_record_threshold():
     model = _ModelWithResults([{"label": "person", "confidence": 0.2, "bbox": [0.1, 0.1, 0.2, 0.2]}])
     worker = CameraWorker(camera={"name": "Cam", "rtsp": "rtsp://x"}, model=model, index=0)
