@@ -115,6 +115,7 @@ class PipelineState:
     last_cpu_percent: float = 0.0
     last_rss_mb: float = 0.0
     cpu_percent_samples: deque[float] = field(default_factory=lambda: deque(maxlen=3))
+    inference_ms_samples: deque[float] = field(default_factory=lambda: deque(maxlen=30))
 
 
 METRIC_KEYS = (
@@ -394,6 +395,8 @@ class CameraWorker(QThread):
         self.last_inference_ms = 0.0
         self.average_inference_ms = 0.0
         self._inference_ms_total = 0.0
+        self.preview_processing_ms = 0.0
+        self.recording_enqueue_ms = 0.0
         self.last_input_size: tuple[int, int] | None = None
         self.is_recording_active = False
 
@@ -1233,11 +1236,16 @@ class CameraWorker(QThread):
         inference_ms = max(0.0, (infer_end - infer_start) * 1000.0)
         self.last_inference_ms = inference_ms
         self._inference_ms_total += inference_ms
+        self.state.inference_ms_samples.append(inference_ms)
 
         self.state.last_inference_ts = now_mono
         self.state.inferences_run += 1
         self.inference_count += 1
-        self.average_inference_ms = self._inference_ms_total / float(max(1, self.state.inferences_run))
+        sample_count = len(self.state.inference_ms_samples)
+        if sample_count > 0:
+            self.average_inference_ms = float(sum(self.state.inference_ms_samples) / sample_count)
+        else:
+            self.average_inference_ms = 0.0
         self.state.next_inference_due_ts = max(next_due + interval, now_mono + interval * 0.1)
 
         source_size = _extract_image_size(result)
@@ -1359,18 +1367,22 @@ class CameraWorker(QThread):
         return float(max(0.5, self.preview_fps_thumb))
 
     def _maybe_emit_preview(self, preview_frame: np.ndarray, overlays: list[tuple[int, int, int, int, str, float, tuple[int, int, int]]], now_mono: float) -> None:
+        preview_start = time.monotonic()
         interval = _preview_interval_for_role(self.preview_role, self.preview_fps_main, self.preview_fps_grid, self.preview_fps_thumb, self.preview_pause_when_hidden)
         if interval == float("inf"):
             self.state.preview_frames_dropped_total += 1
+            self.preview_processing_ms = max(0.0, (time.monotonic() - preview_start) * 1000.0)
             return
         if self.state.last_preview_emit_ts and now_mono - self.state.last_preview_emit_ts < interval:
             self.state.dropped_preview_frames += 1
             self.state.preview_frame_skip_counter += 1
             self.state.preview_frames_dropped_total += 1
+            self.preview_processing_ms = max(0.0, (time.monotonic() - preview_start) * 1000.0)
             return
         if self.preview_role in {"grid", "thumb", "hidden"} and self.state.preview_frame_skip_counter < (2 if self.app_overload_mode else 1):
             self.state.preview_frame_skip_counter += 1
             self.state.preview_frames_dropped_total += 1
+            self.preview_processing_ms = max(0.0, (time.monotonic() - preview_start) * 1000.0)
             return
         self.state.preview_frame_skip_counter = 0
         should_draw = (
@@ -1396,6 +1408,7 @@ class CameraWorker(QThread):
             self.thumb_preview_signal.emit(thumb_emit_frame, self.index)
             self.state.last_preview_emit_ts = now_mono
             self.state.frames_emitted += 1
+            self.preview_processing_ms = max(0.0, (time.monotonic() - preview_start) * 1000.0)
             return
 
         main_source_frame = preview_frame
@@ -1416,14 +1429,17 @@ class CameraWorker(QThread):
         self.thumb_preview_signal.emit(thumb_emit_frame, self.index)
         self.state.last_preview_emit_ts = now_mono
         self.state.frames_emitted += 1
+        self.preview_processing_ms = max(0.0, (time.monotonic() - preview_start) * 1000.0)
 
     def _maybe_enqueue_record_frame(self, raw_frame: np.ndarray, now_mono: float) -> None:
+        enqueue_start = time.monotonic()
         if self.recording and self.record_thread:
             self._apply_dynamic_recorder_degradation(now_mono)
             self._recorder_enqueue_counter += 1
             if (self._recorder_enqueue_counter % max(1, self.recorder_enqueue_stride)) != 0:
                 if self._should_end_detection_now(now_mono):
                     self._finalize_recording_session()
+                self.recording_enqueue_ms = max(0.0, (time.monotonic() - enqueue_start) * 1000.0)
                 return
             prev_drop = int(self.record_thread.dropped_frames)
             self.record_thread.write(raw_frame)
@@ -1436,6 +1452,7 @@ class CameraWorker(QThread):
             self.detection_active = False
             self.pending_positive_hits = 0
             app_log("worker", "detection ended", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO")
+        self.recording_enqueue_ms = max(0.0, (time.monotonic() - enqueue_start) * 1000.0)
 
     def _maybe_log_metrics(self, detection_interval: float) -> None:
         now = time.monotonic()
@@ -1448,6 +1465,8 @@ class CameraWorker(QThread):
         elapsed = max(1e-6, now - (self.state.metrics_window_started_ts or now))
         queue_size = self.record_thread.queue.qsize() if self.record_thread else 0
         dropped_total = self.record_thread.dropped_frames if self.record_thread else 0
+        queue_peak = self.record_thread.queue_peak if self.record_thread else 0
+        frames_written = self.record_thread.frames_written if self.record_thread else 0
         dropped_delta = _dropped_frames_delta(dropped_total, self.state.metrics_dropped_frames)
 
         metrics = _build_metrics_payload(
@@ -1463,10 +1482,11 @@ class CameraWorker(QThread):
         telemetry = self._telemetry_payload(now)
 
         logger.info(
-            "performance camera=%s mode=%s overload=%s preview_target_fps=%.2f capture_fps=%.2f infer_fps=%.2f preview_emit_fps=%.2f ui_render_ms=%.2f queue_size=%s dropped_frames=%s cpu_percent=%.1f rss_mb=%.1f detection_interval=%.3f dropped_delta=%s camera_fps_config=%.2f detection_fps_limit=%.2f",
+            "performance camera=%s mode=%s overload=%s overload_level=%s preview_target_fps=%.2f capture_fps=%.2f infer_fps=%.2f preview_emit_fps=%.2f ui_render_ms=%.2f queue_size=%s dropped_frames=%s cpu_percent=%.1f rss_mb=%.1f detection_interval=%.3f dropped_delta=%s camera_fps_config=%.2f detection_fps_limit=%.2f metrics_snapshot=%s",
             self.camera.get("name", self.index),
             self.preview_role,
             "on" if self.app_overload_mode else "off",
+            int(self.overload_level),
             self._effective_preview_target_fps(),
             metrics["capture_fps"],
             metrics["infer_fps"],
@@ -1480,6 +1500,21 @@ class CameraWorker(QThread):
             dropped_delta,
             float(self.fps),
             float(self.detection_fps_limit),
+            {
+                "inference_ms": float(self.last_inference_ms),
+                "average_inference_ms": float(self.average_inference_ms),
+                "preview_processing_ms": float(self.preview_processing_ms),
+                "recording_enqueue_ms": float(self.recording_enqueue_ms),
+                "recording_frames_written": int(frames_written),
+                "recording_queue_size": int(queue_size),
+                "recording_queue_peak": int(queue_peak),
+                "dropped_frames": int(dropped_total),
+                "capture_fps": float(metrics["capture_fps"]),
+                "infer_fps": float(metrics["infer_fps"]),
+                "preview_emit_fps": float(metrics["preview_emit_fps"]),
+                "cpu_percent": float(metrics["cpu_percent"]),
+                "rss_mb": float(metrics["rss_mb"]),
+            },
         )
         app_log(
             "performance",
@@ -1491,12 +1526,20 @@ class CameraWorker(QThread):
                 {
                     "mode": self.preview_role,
                     "overload": "on" if self.app_overload_mode else "off",
+                    "overload_level": int(self.overload_level),
                     "capture_fps": f"{float(metrics['capture_fps']):.2f}",
                     "infer_fps": f"{float(metrics['infer_fps']):.2f}",
                     "preview_emit_fps": f"{float(metrics['preview_emit_fps']):.2f}",
                     "preview_target_fps": f"{float(self._effective_preview_target_fps()):.2f}",
                     "ui_render_ms": f"{float(metrics['ui_render_ms']):.2f}",
+                    "inference_ms": f"{float(self.last_inference_ms):.2f}",
+                    "average_inference_ms": f"{float(self.average_inference_ms):.2f}",
+                    "preview_processing_ms": f"{float(self.preview_processing_ms):.2f}",
+                    "recording_enqueue_ms": f"{float(self.recording_enqueue_ms):.2f}",
                     "queue_size": int(metrics["queue_size"]),
+                    "recording_queue_size": int(queue_size),
+                    "recording_queue_peak": int(queue_peak),
+                    "recording_frames_written": int(frames_written),
                     "dropped_frames": int(metrics["dropped_frames"]),
                     "cpu_percent": f"{float(metrics['cpu_percent']):.1f}",
                     "rss_mb": f"{float(metrics['rss_mb']):.1f}",
@@ -1524,6 +1567,8 @@ class CameraWorker(QThread):
         cpu_percent, rss_mb = self._sample_process_metrics(now)
         queue_size = self.record_thread.queue.qsize() if self.record_thread else 0
         dropped = self.record_thread.dropped_frames if self.record_thread else 0
+        queue_peak = self.record_thread.queue_peak if self.record_thread else 0
+        frames_written = self.record_thread.frames_written if self.record_thread else 0
         since_detect = (now - self.detection_last_seen_ts) if self.detection_last_seen_ts > 0 else -1.0
         elapsed = max(1e-6, now - (self.state.metrics_window_started_ts or now))
         cpu_sample_age_ms = max(0.0, (now - self.state.metrics_last_sample_ts) * 1000.0)
@@ -1539,8 +1584,15 @@ class CameraWorker(QThread):
             "preview_emit_fps": _aggregate_fps(self.state.frames_emitted - self.state.metrics_frames_emitted, elapsed),
             "preview_target_fps": float(self._effective_preview_target_fps()),
             "ui_render_ms": 0.0,
+            "inference_ms": float(self.last_inference_ms),
+            "average_inference_ms": float(self.average_inference_ms),
+            "preview_processing_ms": float(self.preview_processing_ms),
+            "recording_enqueue_ms": float(self.recording_enqueue_ms),
             "queue_size": int(queue_size),
             "dropped_frames": int(dropped),
+            "recording_frames_written": int(frames_written),
+            "recording_queue_size": int(queue_size),
+            "recording_queue_peak": int(queue_peak),
             "cpu_percent": float(cpu_percent),
             "rss_mb": float(rss_mb),
             "cpu_sample_age_ms": float(cpu_sample_age_ms),
@@ -1548,6 +1600,8 @@ class CameraWorker(QThread):
             "recording_active": bool(self.recording),
             "preview_role": self.preview_role,
             "overload_degraded": bool(self.is_overload_degraded),
+            "overload_mode_active": bool(self.app_overload_mode),
+            "overload_level": int(self.overload_level),
             "last_detection_seconds": float(since_detect),
             "preview_frames_dropped": int(self.state.preview_frames_dropped_total),
             "skipped_inference_cycles": int(self.state.skipped_inference_cycles),
