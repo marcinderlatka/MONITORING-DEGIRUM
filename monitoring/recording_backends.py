@@ -169,7 +169,11 @@ class FFmpegPipeBackend(BaseRecordingBackend):
         if self._process.poll() is not None:
             raise RuntimeError(f"ffmpeg terminated early with code {self._process.returncode}")
         try:
-            self._process.stdin.write(memoryview(np.ascontiguousarray(frame)).cast("B"))
+            if bool(frame.flags["C_CONTIGUOUS"]):
+                payload = memoryview(frame).cast("B")
+            else:
+                payload = memoryview(np.ascontiguousarray(frame)).cast("B")
+            self._process.stdin.write(payload)
         except (BrokenPipeError, OSError) as exc:
             self._broken_pipe = True
             raise RuntimeError(f"ffmpeg pipe write failed: {exc}") from exc
