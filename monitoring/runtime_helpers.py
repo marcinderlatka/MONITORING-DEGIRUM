@@ -73,9 +73,18 @@ def compute_effective_writer_fps_details(rtsp_fps: int, detect_fps: float, strea
     return 1.0, "fallback_min"
 
 
-def stabilized_stream_fps(samples: list[float] | tuple[float, ...], fallback: float = 0.0) -> float:
+def stabilized_stream_fps(
+    samples: list[float] | tuple[float, ...],
+    fallback: float = 0.0,
+    *,
+    min_samples: int = 5,
+    min_window_seconds: float = 0.0,
+) -> float:
     """Return a robust stream FPS estimate based on trimmed median."""
     values = [float(v) for v in samples if float(v) > 0.0]
+    if len(values) < max(1, int(min_samples)):
+        return float(max(0.0, fallback))
+    _ = float(min_window_seconds)
     if len(values) < 5:
         return float(max(0.0, fallback))
     values.sort()
@@ -287,12 +296,19 @@ def build_root_cause_summary(
 ) -> str:
     """Summarize likely bottleneck category for faster diagnostics."""
     reasons: list[str] = []
-    if ui_render_ms > max(1.0, ui_render_limit_ms):
+    ui_over = ui_render_ms > max(1.0, ui_render_limit_ms)
+    rec_over = queue_size > max(1, queue_limit)
+    inf_over = detect_fps_target > 0 and infer_fps < (0.7 * detect_fps_target)
+    stream_over = stream_fps > 0 and writer_fps > 0 and stream_fps < (0.75 * writer_fps)
+
+    if ui_over:
         reasons.append("gui_render_overload")
-    if queue_size > max(1, queue_limit):
+    if rec_over:
         reasons.append("recording_pipeline_overload")
-    if detect_fps_target > 0 and infer_fps < (0.7 * detect_fps_target):
+    if inf_over:
         reasons.append("inference_overload")
-    if stream_fps > 0 and writer_fps > 0 and stream_fps < (0.75 * writer_fps):
+    if stream_over:
         reasons.append("stream_bottleneck")
+    if len(reasons) > 1:
+        reasons.append("mixed")
     return ",".join(reasons) if reasons else "healthy"
