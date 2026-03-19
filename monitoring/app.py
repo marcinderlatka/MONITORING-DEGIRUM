@@ -2319,21 +2319,27 @@ QToolButton:focus { outline: none; }
     def _apply_worker_preview_roles(self) -> None:
         selected_idx = self.camera_list.currentRow()
         grid_visible = bool(self.camera_grid.isVisible())
+        list_visible = bool(self.camera_list.isVisible()) if hasattr(self.camera_list, "isVisible") else True
         for idx, worker in enumerate(self.workers):
             if not isinstance(worker, CameraWorker):
                 continue
-            if idx == selected_idx and not grid_visible:
+            if grid_visible:
+                role = "grid"
+            elif idx == selected_idx:
                 role = "main"
-            elif grid_visible:
+            elif list_visible:
                 role = "thumb"
             else:
                 role = "hidden"
             worker.preview_fps_main = self.preview_fps_main
+            worker.preview_fps_grid = self.preview_fps_grid
             worker.preview_fps_thumb = self.preview_fps_thumb
             worker.preview_pause_when_hidden = self.preview_pause_when_hidden
             worker.preview_main_max_width = self.preview_main_max_width
             worker.preview_main_max_height = self.preview_main_max_height
+            worker.preview_grid_max_width = self.preview_grid_max_width
             worker.preview_thumb_max_width = self.preview_thumb_max_width
+            worker.preview_grid_max_height = self.preview_grid_max_height
             worker.preview_thumb_max_height = self.preview_thumb_max_height
             worker.set_preview_role(role)
 
@@ -2352,9 +2358,13 @@ QToolButton:focus { outline: none; }
             stream_fps = max(1.0, float(stat.get("stream_fps", 1.0)))
             width = int(self.preview_thumb_max_width)
             height = int(self.preview_thumb_max_height)
-            if str(stat.get("preview_role", "thumb")) == "main":
+            role = str(stat.get("preview_role", "thumb")).lower()
+            if role == "main":
                 width = int(self.preview_main_max_width)
                 height = int(self.preview_main_max_height)
+            elif role == "grid":
+                width = int(self.preview_grid_max_width)
+                height = int(self.preview_grid_max_height)
             compression_ratio = 0.15
             preview_bandwidth_mbps += (emit_fps / stream_fps) * width * height * 3.0 * compression_ratio * 8.0 / 1_000_000.0
 
@@ -2406,11 +2416,10 @@ QToolButton:focus { outline: none; }
         profile = overload_level_profile(self.overload_level)
         self._performance_log_interval_s = max(self._base_performance_log_interval_s, float(profile.performance_log_interval_s))
 
-        selected_idx = self.camera_list.currentRow()
         for idx, worker in enumerate(self.workers):
             if not isinstance(worker, CameraWorker) or not worker.isRunning():
                 continue
-            is_main = idx == selected_idx
+            is_main = str(getattr(worker, "preview_role", "thumb")) == "main"
             camera_cfg = self.cameras[idx] if idx < len(self.cameras) else {}
             camera_priority = str(camera_cfg.get("camera_priority", "normal")).lower()
             priority_detect_scale = 1.0
@@ -2425,21 +2434,32 @@ QToolButton:focus { outline: none; }
                 priority_detect_scale = extra
                 priority_thumb_scale = extra
                 priority_resolution_floor = 0.45
-            thumb_fps = max(0.5, self.preview_fps_thumb * profile.thumb_preview_fps_factor * priority_thumb_scale)
+            role_level = int(self.overload_level)
+            main_fps_factor = profile.main_preview_fps_factor if role_level >= 2 else 1.0
+            thumb_fps_factor = profile.thumb_preview_fps_factor if role_level >= 1 else 1.0
+            grid_fps_factor = profile.grid_preview_fps_factor if role_level >= 1 else 1.0
+
+            worker.preview_fps_main = max(1.0, self.preview_fps_main * main_fps_factor)
+            thumb_fps = max(0.5, self.preview_fps_thumb * thumb_fps_factor * priority_thumb_scale)
+            grid_fps = max(0.5, self.preview_fps_grid * grid_fps_factor * priority_thumb_scale)
+
             preview_resolution_factor = profile.preview_resolution_factor
             if camera_priority == "high":
                 preview_resolution_factor = max(0.9, preview_resolution_factor)
             else:
                 preview_resolution_factor = max(priority_resolution_floor, preview_resolution_factor)
+
             detect_factor = 1.0
-            if self.overload_level >= 3 and not is_main and not worker.recording and camera_priority != "high":
+            if role_level >= 3 and not is_main and not worker.recording and camera_priority != "high":
                 detect_factor = max(0.2, profile.detect_fps_factor * priority_detect_scale)
+
             worker.set_overload_state(
-                overload_level=(self.overload_level if not is_main else 0),
+                overload_level=role_level,
                 detect_fps_factor=detect_factor,
                 thumb_preview_fps=thumb_fps,
-                disable_overlays=(self.overload_level >= 2 and (self.overload_disable_nonessential_overlays or profile.disable_nonessential_overlays)),
-                overlay_stride=profile.overlay_stride,
+                grid_preview_fps=grid_fps,
+                disable_overlays=(role_level >= 2 and (self.overload_disable_nonessential_overlays or profile.disable_nonessential_overlays)),
+                overlay_stride=(profile.overlay_stride if role_level >= 2 else 1),
                 preview_resolution_factor=preview_resolution_factor,
             )
 
@@ -2484,11 +2504,14 @@ QToolButton:focus { outline: none; }
         cam_runtime["performance_diagnostics_enabled"] = bool(self.performance_diagnostics_enabled)
         w = CameraWorker(camera=cam_runtime, model=model, index=idx)
         w.preview_fps_main = self.preview_fps_main
+        w.preview_fps_grid = self.preview_fps_grid
         w.preview_fps_thumb = self.preview_fps_thumb
         w.preview_pause_when_hidden = self.preview_pause_when_hidden
         w.preview_main_max_width = self.preview_main_max_width
         w.preview_main_max_height = self.preview_main_max_height
+        w.preview_grid_max_width = self.preview_grid_max_width
         w.preview_thumb_max_width = self.preview_thumb_max_width
+        w.preview_grid_max_height = self.preview_grid_max_height
         w.preview_thumb_max_height = self.preview_thumb_max_height
         w.main_preview_signal.connect(lambda frame, cam_idx: self.update_frame(frame, cam_idx, "main"))
         w.thumb_preview_signal.connect(lambda frame, cam_idx: self.update_frame(frame, cam_idx, "thumb"))
@@ -2625,6 +2648,7 @@ QToolButton:focus { outline: none; }
                         "capture_fps": f"{float(payload.get('capture_fps', 0.0)):.2f}",
                         "infer_fps": f"{float(payload.get('infer_fps', 0.0)):.2f}",
                         "preview_emit_fps": f"{float(payload.get('preview_emit_fps', 0.0)):.2f}",
+                        "preview_target_fps": f"{float(payload.get('preview_target_fps', 0.0)):.2f}",
                         "ui_render_ms": f"{float(payload.get('ui_render_ms', 0.0)):.2f}",
                         "thumb_ms": f"{float(payload.get('ui_thumb_ms', 0.0)):.2f}",
                         "grid_ms": f"{float(payload.get('ui_grid_ms', 0.0)):.2f}",

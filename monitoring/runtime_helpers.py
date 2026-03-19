@@ -230,6 +230,8 @@ def evaluate_overload_transition(
 @dataclass(frozen=True)
 class OverloadLevelProfile:
     detect_fps_factor: float
+    main_preview_fps_factor: float
+    grid_preview_fps_factor: float
     thumb_preview_fps_factor: float
     overlay_stride: int
     performance_log_interval_s: float
@@ -240,13 +242,13 @@ class OverloadLevelProfile:
 def overload_level_profile(level: int) -> OverloadLevelProfile:
     level_n = max(0, min(3, int(level)))
     profiles = {
-        0: OverloadLevelProfile(1.0, 1.0, 1, 10.0, 1.0, False),
-        # L1: light mode -> thin logs/metrics only.
-        1: OverloadLevelProfile(1.0, 1.0, 1, 14.0, 1.0, False),
-        # L2: UI/preview reductions.
-        2: OverloadLevelProfile(1.0, 0.62, 2, 18.0, 0.75, True),
-        # L3: aggressive mode -> includes detect FPS reduction for non-priority cameras.
-        3: OverloadLevelProfile(0.6, 0.42, 3, 24.0, 0.55, True),
+        0: OverloadLevelProfile(1.0, 1.0, 1.0, 1.0, 1, 10.0, 1.0, False),
+        # L1: first reduce grid/thumb FPS while keeping main/detection untouched.
+        1: OverloadLevelProfile(1.0, 1.0, 0.82, 0.82, 1, 14.0, 1.0, False),
+        # L2: additionally reduce main preview FPS and overlay frequency.
+        2: OverloadLevelProfile(1.0, 0.82, 0.62, 0.62, 2, 18.0, 0.75, True),
+        # L3: aggressive mode -> detection cuts for non-priority cameras + extra UI reductions.
+        3: OverloadLevelProfile(0.6, 0.70, 0.42, 0.42, 3, 24.0, 0.55, True),
     }
     return profiles[level_n]
 
