@@ -23,6 +23,7 @@ from PyQt5.QtCore import QThread, pyqtSignal
 from .config import (
     DEFAULT_CONFIDENCE_THRESHOLD,
     DEFAULT_DETECTION_HOURS,
+    DEFAULT_DETECTION_DEBUG_ENABLED,
     DEFAULT_DRAW_OVERLAYS,
     DEFAULT_ENABLE_DETECTION,
     DEFAULT_ENABLE_RECORDING,
@@ -350,7 +351,14 @@ class CameraWorker(QThread):
         self.performance_diagnostics_enabled = bool(
             self.camera.get("performance_diagnostics_enabled", DEFAULT_PERFORMANCE_DIAGNOSTICS_ENABLED)
         )
+        self.detection_debug_enabled = bool(self.camera.get("detection_debug_enabled", DEFAULT_DETECTION_DEBUG_ENABLED))
         self._base_performance_log_interval_s = self.performance_log_interval_s
+        self._detection_debug_log_interval_s = max(4.0, float(self.performance_log_interval_s))
+        self._last_detection_debug_log_ts = 0.0
+        self.last_inference_ms = 0.0
+        self.average_inference_ms = 0.0
+        self._inference_ms_total = 0.0
+        self.last_input_size: tuple[int, int] | None = None
         self.is_recording_active = False
 
         rec_path = str(self.camera.get("record_path", DEFAULT_RECORD_PATH))
@@ -530,6 +538,7 @@ class CameraWorker(QThread):
         if preview_resolution_factor is not None:
             self.preview_resolution_factor = float(max(0.3, min(1.0, preview_resolution_factor)))
         self.performance_log_interval_s = self._base_performance_log_interval_s + float(self.overload_level * 6.0)
+        self._detection_debug_log_interval_s = max(4.0, float(self.performance_log_interval_s))
         if previous_level != self.overload_level:
             app_log("worker", "overload state updated", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO", details=f"level=L{self.overload_level} active={self.app_overload_mode} detect_fps_factor={self.detect_fps_factor:.2f} overlay_stride={self.overlay_stride} preview_res_factor={self.preview_resolution_factor:.2f} preview_role={self.preview_role}")
 
@@ -665,6 +674,8 @@ class CameraWorker(QThread):
         self.preview_thumb_max_width = int(camera_config.get("preview_thumb_max_width", self.preview_thumb_max_width))
         self.preview_thumb_max_height = int(camera_config.get("preview_thumb_max_height", self.preview_thumb_max_height))
         self.camera_priority = str(camera_config.get("camera_priority", getattr(self, "camera_priority", "normal")))
+        self.detection_debug_enabled = bool(camera_config.get("detection_debug_enabled", self.detection_debug_enabled))
+        self._detection_debug_log_interval_s = max(4.0, float(camera_config.get("performance_log_interval_s", self.performance_log_interval_s)))
         self.camera["preview_fps_main"] = self.preview_fps_main
         self.camera["preview_fps_grid"] = self.preview_fps_grid
         self.camera["preview_fps_thumb"] = self.preview_fps_thumb
@@ -676,6 +687,7 @@ class CameraWorker(QThread):
         self.camera["preview_thumb_max_width"] = self.preview_thumb_max_width
         self.camera["preview_thumb_max_height"] = self.preview_thumb_max_height
         self.camera["camera_priority"] = self.camera_priority
+        self.camera["detection_debug_enabled"] = self.detection_debug_enabled
         self.recorder_queue_warn_threshold = int(camera_config.get("recorder_queue_warn_threshold", self.recorder_queue_warn_threshold))
         self.recorder_queue_critical_threshold = int(camera_config.get("recorder_queue_critical_threshold", self.recorder_queue_critical_threshold))
         self.recorder_dropped_warn_threshold = int(camera_config.get("recorder_dropped_warn_threshold", self.recorder_dropped_warn_threshold))
@@ -1144,20 +1156,36 @@ class CameraWorker(QThread):
         next_due, skipped = _advance_next_due(now_mono, self.state.next_inference_due_ts, interval)
         self.state.skipped_inference_cycles += skipped
 
+        infer_start = time.monotonic()
         try:
             result = self.model.predict(raw_frame)
         except Exception as exc:
             app_log("error", "model prediction failure", camera=str(self.camera.get("name", self.index)), source="worker", level="ERROR", details=f"{exc}\n\n{traceback.format_exc()}")
             self.error_signal.emit("Błąd predykcji modelu", self.index)
             return None, detected, best_label, best_score, best_bbox, overlays
+        infer_end = time.monotonic()
+        inference_ms = max(0.0, (infer_end - infer_start) * 1000.0)
+        self.last_inference_ms = inference_ms
+        self._inference_ms_total += inference_ms
+
         self.state.last_inference_ts = now_mono
         self.state.inferences_run += 1
         self.inference_count += 1
+        self.average_inference_ms = self._inference_ms_total / float(max(1, self.state.inferences_run))
         self.state.next_inference_due_ts = max(next_due + interval, now_mono + interval * 0.1)
 
         source_size = _extract_image_size(result)
+        raw_h, raw_w = raw_frame.shape[:2]
+        raw_size = (int(raw_w), int(raw_h))
+        self.last_input_size = source_size or raw_size
         schedule_ok = self._is_within_schedule()
+        result_count = 0
+        accepted_count = 0
+        rejected_by_threshold = 0
+        rejected_by_class = 0
+        rejected_by_schedule = 0
         for obj in result.results:
+            result_count += 1
             label = obj.get("label", "").lower(); confidence = float(obj.get("confidence", obj.get("score", 1.0))); bbox = obj.get("bbox")
             if not label or bbox is None:
                 continue
@@ -1169,16 +1197,43 @@ class CameraWorker(QThread):
                 continue
             if not schedule_ok:
                 self.rejection_counters["outside_schedule"] += 1
+                rejected_by_schedule += 1
                 continue
             if label not in self.record_classes_lower:
                 self.rejection_counters["class_not_in_record_classes"] += 1
+                rejected_by_class += 1
                 continue
             if confidence < self.confidence_threshold_record:
                 self.rejection_counters["below_record_threshold"] += 1
+                rejected_by_threshold += 1
                 continue
+            accepted_count += 1
             detected = True
             if confidence > best_score:
                 best_score, best_label, best_bbox = confidence, label, scaled
+        if self.detection_debug_enabled:
+            debug_now = time.monotonic()
+            if debug_now - self._last_detection_debug_log_ts >= self._detection_debug_log_interval_s:
+                self._last_detection_debug_log_ts = debug_now
+                input_size_text = "unknown"
+                if self.last_input_size:
+                    input_size_text = f"{self.last_input_size[0]}x{self.last_input_size[1]}"
+                result_input_size = source_size or raw_size
+                result_input_size_text = f"{result_input_size[0]}x{result_input_size[1]}"
+                app_log(
+                    "worker",
+                    "detection inference debug",
+                    camera=str(self.camera.get("name", self.index)),
+                    source="worker",
+                    level="INFO",
+                    details=(
+                        f"inference_ms={self.last_inference_ms:.2f} avg_inference_ms={self.average_inference_ms:.2f} "
+                        f"result_count={result_count} accepted_count={accepted_count} "
+                        f"rejected_by_threshold={rejected_by_threshold} rejected_by_class={rejected_by_class} "
+                        f"rejected_by_schedule={rejected_by_schedule} model_input={result_input_size_text} raw_frame={raw_size[0]}x{raw_size[1]} "
+                        f"last_input_size={input_size_text}"
+                    ),
+                )
         return result, detected, best_label, best_score, best_bbox, overlays
 
     @staticmethod
@@ -1417,6 +1472,13 @@ class CameraWorker(QThread):
             "calibration_duration_hours": float(telemetry["calibration_duration_hours"]),
             "suggested_record_threshold": telemetry["suggested_record_threshold"],
             "rejection_counters": dict(self.rejection_counters),
+            "average_inference_ms": float(self.average_inference_ms),
+            "last_inference_ms": float(self.last_inference_ms),
+            "last_input_size": (
+                {"width": int(self.last_input_size[0]), "height": int(self.last_input_size[1])}
+                if self.last_input_size
+                else None
+            ),
         }
         status["heartbeat_ts"] = float(time.monotonic())
         self.worker_status_signal.emit(str(self.camera.get("name", self.index)), status)
