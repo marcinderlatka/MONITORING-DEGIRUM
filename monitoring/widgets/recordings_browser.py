@@ -736,6 +736,13 @@ class RecordingsBrowserDialog(QDialog):
             if self._is_tile_visible(filepath) and key not in self._mp4_fallback_requested and len(self._mp4_fallback_inflight) < self._mp4_fallback_limit:
                 self._mp4_fallback_requested.add(key)
                 self._mp4_fallback_inflight.add(key)
+                app_log(
+                    "browser",
+                    "thumbnail mp4 fallback queued",
+                    source="recordings-browser",
+                    level="INFO",
+                    details=f"active_fallbacks={len(self._mp4_fallback_inflight)} limit={self._mp4_fallback_limit}",
+                )
                 entry = self._thumbnail_entries.get(key)
                 if entry is not None:
                     self._start_thumbnail_request(entry, allow_mp4_fallback=True)
@@ -976,5 +983,9 @@ class RecordingsBrowserDialog(QDialog):
         self._thumbnail_generation += 1
         self._pending_thumbnails.clear()
         self._thumbnail_tasks.clear()
+        self._thumbnail_entries.clear()
+        self._thumbnail_request_tokens.clear()
+        self._mp4_fallback_requested.clear()
+        self._mp4_fallback_inflight.clear()
         self.thumbnail_pool.clear()
         super().closeEvent(event)

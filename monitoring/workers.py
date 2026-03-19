@@ -482,6 +482,7 @@ class CameraWorker(QThread):
         self.current_stream_fps_measured = 0.0
         self._worker_slot_key: str | None = None
         self._prerecord_buffer_basis_fps = 0.0
+        self._prerecord_force_synced_for_stream = False
         now_mono = time.monotonic()
         self.state.metrics_window_started_ts = now_mono
         self.state.metrics_last_cpu_wall_ts = now_mono
@@ -790,22 +791,24 @@ class CameraWorker(QThread):
     def _target_detection_fps(self) -> float:
         detect_base = float(max(1.0, self.detection_fps_limit))
         scaled_detect_fps = float(max(1e-3, detect_base * self.detect_fps_factor))
+        if self.preview_role == "main" or self.camera_priority == "high":
+            scaled_detect_fps = float(max(detect_base, scaled_detect_fps))
         if self.recording:
-            return float(max(3.0, scaled_detect_fps))
+            return float(max(4.0, scaled_detect_fps))
         return scaled_detect_fps
 
     def _compute_effective_writer_fps(self, stream_fps: float) -> float:
         return float(max(1.0, compute_effective_writer_fps(self.rtsp_fps, float(self.fps), stream_fps)))
 
     def _stable_stream_fps_measurement(self) -> float:
-        if len(self._stream_fps_window) < 15:
+        if len(self._stream_fps_window) < 20:
             return 0.0
         elapsed = float(self._stream_fps_window[-1] - self._stream_fps_window[0]) if len(self._stream_fps_window) >= 2 else 0.0
-        if elapsed < 2.0:
+        if elapsed < 2.5:
             return 0.0
         fps_samples = [1.0 / max(1e-6, (self._stream_fps_window[i] - self._stream_fps_window[i - 1])) for i in range(1, len(self._stream_fps_window))]
         measured = float(max(0.0, self._get_effective_stream_fps()))
-        return float(max(0.0, stabilized_stream_fps(fps_samples, fallback=measured)))
+        return float(max(0.0, stabilized_stream_fps(fps_samples, fallback=measured, min_samples=20, min_window_seconds=2.5)))
 
     def _select_session_writer_fps(self, measured_stream_fps: float, detect_fps: float) -> tuple[float, str]:
         target_fps, reason = compute_effective_writer_fps_details(self.rtsp_fps, detect_fps, measured_stream_fps)
@@ -836,12 +839,14 @@ class CameraWorker(QThread):
     def _sync_prerecord_buffer(self, force: bool = False) -> None:
         basis = self._get_prerecord_buffer_fps_basis()
         maxlen = max(1, int(self.pre_seconds * basis))
+        old_maxlen = int(self.prerecord_buffer.maxlen or 0)
         basis_changed = abs(float(self._prerecord_buffer_basis_fps) - float(basis)) >= 0.5
         if force or self.prerecord_buffer.maxlen != maxlen or basis_changed:
             self.prerecord_buffer = deque(self.prerecord_buffer, maxlen=maxlen)
             self._prerecord_buffer_basis_fps = float(basis)
             logger.info("prerecord buffer updated camera=%s pre_seconds=%s basis=%.2f maxlen=%s", self.camera.get("name", self.index), self.pre_seconds, basis, maxlen)
-            app_log("worker", "prerecord buffer synchronized", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO", details=f"basis={basis:.2f} maxlen={maxlen} force={force}")
+            reason = "force" if force else ("basis_changed" if basis_changed else "maxlen_changed")
+            app_log("worker", "prerecord buffer synchronized", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO", details=f"basis={basis:.2f} old_maxlen={old_maxlen} new_maxlen={maxlen} reason={reason}")
 
     def _make_detection_overlay_frame(self, frame: np.ndarray, bbox: tuple[int, int, int, int] | None, label: str, confidence: float) -> np.ndarray:
         canvas = frame.copy()
@@ -1048,7 +1053,6 @@ class CameraWorker(QThread):
         self.current_stream_fps_measured = measured_stream_fps
         self.current_writer_fps, self.current_writer_fps_reason = self._select_session_writer_fps(measured_stream_fps, detect_fps)
         self._current_writer_fps_base = self.current_writer_fps
-        self.writer_fps = self.current_writer_fps
         self._last_session_writer_fps = self.current_writer_fps
         backend = self._create_recording_backend(self.output_file, w, h, self.current_writer_fps)
         self.current_recording_backend = getattr(backend, "backend_name", str(self.camera.get("recording_backend", DEFAULT_RECORDING_BACKEND)))
@@ -1579,7 +1583,8 @@ class CameraWorker(QThread):
             "detect_fps": float(max(0.0, self._target_detection_fps())),
             "camera_fps_config": float(self.fps),
             "detection_fps_limit": float(self.detection_fps_limit),
-            "writer_fps": float(self.current_writer_fps or self.writer_fps),
+            "writer_fps": float(self.current_writer_fps),
+            "detect_fps_target": float(max(0.0, self._target_detection_fps())),
             "capture_fps": _aggregate_fps(self.state.frames_captured - self.state.metrics_frames_captured, elapsed),
             "infer_fps": _aggregate_fps(self.state.inferences_run - self.state.metrics_inferences_run, elapsed),
             "preview_emit_fps": _aggregate_fps(self.state.frames_emitted - self.state.metrics_frames_emitted, elapsed),
@@ -1660,6 +1665,7 @@ class CameraWorker(QThread):
                     self.status_signal.emit("Łączenie…", self.index)
                     app_log("worker", "stream connect attempt", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO", details=str(src))
                     self.state.stream_start_ts = time.monotonic()
+                    self._prerecord_force_synced_for_stream = False
                     with degirum_tools.open_video_stream(src) as stream:
                         self._current_stream = stream
                         stream_fps = float(stream.get(cv2.CAP_PROP_FPS) or 0.0)
@@ -1710,6 +1716,9 @@ class CameraWorker(QThread):
                             frame_retry_count = 0
                             iterator_restart_count = 0
                             now_mono = time.monotonic()
+                            if not self._prerecord_force_synced_for_stream and (now_mono - self.state.stream_start_ts) >= 2.5:
+                                self._sync_prerecord_buffer(force=True)
+                                self._prerecord_force_synced_for_stream = True
                             if now_mono - self.last_frame_ts > self.stream_stall_seconds and self.last_frame_ts > 0:
                                 self.last_stream_reset_ts = now_mono
                                 self.error_counter += 1

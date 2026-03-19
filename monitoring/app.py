@@ -1930,7 +1930,7 @@ QToolButton:focus { outline: none; }
         self._hud_interval_s = 0.35
         self._last_hud_render_ts = 0.0
         self._hud_cache_qimg: QImage | None = None
-        self._hud_cache_key: tuple[int, int, int, int] | None = None
+        self._hud_cache_key: tuple | None = None
         self._letterbox_geometry_cache: dict[tuple[int, int, int, int], tuple[int, int, int, int]] = {}
         self._canvas_bg_cache: dict[tuple[int, int], np.ndarray] = {}
         self._ui_grid_ms_history_by_camera: dict[str, deque[float]] = {}
@@ -3095,7 +3095,9 @@ QToolButton:focus { outline: none; }
 
     def _update_thumbnail_view(self, idx: int, now_mono: float) -> None:
         stage_started = time.perf_counter()
-        thumb_source = self._last_thumb_frame.get(idx) or self._last_main_frame.get(idx)
+        thumb_source = self._last_thumb_frame.get(idx)
+        if thumb_source is None:
+            thumb_source = self._last_main_frame.get(idx)
         if thumb_source is None:
             return
         if now_mono - float(self._last_thumb_update_ts.get(idx, 0.0)) < self._thumb_update_interval_s:
@@ -3364,6 +3366,19 @@ QToolButton:focus { outline: none; }
 
         return qimg
 
+    def _hud_signature(self, idx: int) -> tuple:
+        cam_name = str(self.cameras[idx].get("name", idx)) if 0 <= idx < len(self.cameras) else str(idx)
+        stat = self.worker_status.get(cam_name, {}) if isinstance(self.worker_status, dict) else {}
+        return (
+            str(self._last_status.get(idx, "") or ""),
+            str(self._last_error.get(idx, "") or ""),
+            str(self._last_fps_text.get(idx, "") or ""),
+            int(stat.get("queue_size", 0) or 0),
+            int(stat.get("dropped_frames", 0) or 0),
+            bool(stat.get("recording_active", False)),
+            int(stat.get("overload_level", self.overload_level) or 0),
+        )
+
     def _compose_letterboxed(self, frame, idx: int):
         w_label = max(1, self.camera_view.width())
         h_label = max(1, self.camera_view.height())
@@ -3388,13 +3403,27 @@ QToolButton:focus { outline: none; }
                         self._letterbox_geometry_cache[rect_key] = cached_rect
                 x0, y0, new_w, new_h = cached_rect
                 image_rect = (x0, y0, new_w, new_h)
+                resize_started = time.perf_counter()
                 resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
                 canvas[y0:y0+new_h, x0:x0+new_w] = resized
+                resize_ms = (time.perf_counter() - resize_started) * 1000.0
+            else:
+                resize_ms = 0.0
+        else:
+            resize_ms = 0.0
 
+        cvt_started = time.perf_counter()
         rgb = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
+        cvtcolor_ms = (time.perf_counter() - cvt_started) * 1000.0
+        qimg_started = time.perf_counter()
         qimg = QImage(rgb.data, w_label, h_label, rgb.strides[0], QImage.Format_RGB888).copy()
+        qimage_ms = (time.perf_counter() - qimg_started) * 1000.0
 
-        return qimg
+        return qimg, image_rect, {
+            "resize": float(resize_ms),
+            "cvtcolor": float(cvtcolor_ms),
+            "qimage": float(qimage_ms),
+        }
 
     def _render_current(self):
         now = time.monotonic()
@@ -3409,18 +3438,34 @@ QToolButton:focus { outline: none; }
         render_started = time.perf_counter()
         frame = self._last_main_frame.get(idx)
         render_frame = frame if frame is not None else np.zeros((720, 1280, 3), dtype=np.uint8)
-        composed_qimg = self._compose_letterboxed(render_frame, idx)
-        hud_key = (idx, composed_qimg.width(), composed_qimg.height(), int(now / max(1e-3, self._hud_interval_s)))
+        composed_qimg, image_rect, compose_timing = self._compose_letterboxed(render_frame, idx)
+        hud_key = (
+            idx,
+            composed_qimg.width(),
+            composed_qimg.height(),
+            int(now / max(1e-3, self._hud_interval_s)),
+            self._hud_signature(idx),
+        )
+        hud_started = time.perf_counter()
         if now - self._last_hud_render_ts >= self._hud_interval_s or self._hud_cache_qimg is None or self._hud_cache_key != hud_key:
-            composed_qimg = self._draw_camera_info_overlay(composed_qimg, idx, (0, 0, composed_qimg.width(), composed_qimg.height()))
+            composed_qimg = self._draw_camera_info_overlay(composed_qimg, idx, image_rect)
             self._hud_cache_qimg = composed_qimg.copy()
             self._hud_cache_key = hud_key
             self._last_hud_render_ts = now
         elif self._hud_cache_qimg is not None:
             composed_qimg = self._hud_cache_qimg
+        hud_ms = (time.perf_counter() - hud_started) * 1000.0
+        qpix_started = time.perf_counter()
         self.camera_view.setPixmap(QPixmap.fromImage(composed_qimg))
+        qpixmap_ms = (time.perf_counter() - qpix_started) * 1000.0
         render_ms = (time.perf_counter() - render_started) * 1000.0
         self._record_render_stage(idx, "main", render_ms)
+        self._record_render_stage(idx, "resize", compose_timing.get("resize", 0.0))
+        self._record_render_stage(idx, "cvtcolor", compose_timing.get("cvtcolor", 0.0))
+        self._record_render_stage(idx, "qimage", compose_timing.get("qimage", 0.0))
+        self._record_render_stage(idx, "qimage_qpixmap", qpixmap_ms)
+        self._record_render_stage(idx, "hud", hud_ms)
+        self._record_render_stage(idx, "total_ui_render", render_ms)
         self._ui_render_ms_by_camera[cam_name] = float(render_ms)
         stat = self.worker_status.get(cam_name)
         if isinstance(stat, dict):

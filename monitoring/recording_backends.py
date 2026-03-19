@@ -99,6 +99,8 @@ class FFmpegPipeBackend(BaseRecordingBackend):
         self._ffmpeg_exit_code: int | None = None
         self._stderr_summary = ""
         self._command_line = ""
+        self._broken_pipe = False
+        self._close_timeout = False
 
     def open(self) -> None:
         ffmpeg_bin = which("ffmpeg") or "ffmpeg"
@@ -133,7 +135,15 @@ class FFmpegPipeBackend(BaseRecordingBackend):
             self.filepath,
         ])
         self._command_line = " ".join(shlex.quote(part) for part in cmd)
-        logger.info("starting ffmpeg backend: %s", self._command_line)
+        logger.info(
+            "starting ffmpeg backend: %s (codec=%s preset=%s tune=%s crf=%s movflags=%s)",
+            self._command_line,
+            self.codec,
+            self.preset,
+            self.tune,
+            self.crf if self.crf is not None else "none",
+            self.movflags,
+        )
         self._process = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -146,7 +156,11 @@ class FFmpegPipeBackend(BaseRecordingBackend):
             raise RuntimeError("ffmpeg backend not opened")
         if self._process.poll() is not None:
             raise RuntimeError(f"ffmpeg terminated early with code {self._process.returncode}")
-        self._process.stdin.write(frame.tobytes())
+        try:
+            self._process.stdin.write(frame.tobytes())
+        except (BrokenPipeError, OSError) as exc:
+            self._broken_pipe = True
+            raise RuntimeError(f"ffmpeg pipe write failed: {exc}") from exc
 
     def close(self) -> None:
         if self._process is None:
@@ -158,10 +172,22 @@ class FFmpegPipeBackend(BaseRecordingBackend):
         with suppress(Exception):
             if self._process.stderr is not None:
                 stderr_text = self._process.stderr.read().decode("utf-8", errors="replace")
-        self._ffmpeg_exit_code = self._process.wait(timeout=5.0)
+        try:
+            self._ffmpeg_exit_code = self._process.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            self._close_timeout = True
+            self._process.kill()
+            self._ffmpeg_exit_code = self._process.wait(timeout=2.0)
         if stderr_text:
             lines = [ln.strip() for ln in stderr_text.splitlines() if ln.strip()]
             self._stderr_summary = " | ".join(lines[-6:])[:1500]
+        logger.info(
+            "ffmpeg backend closed: exit_code=%s broken_pipe=%s timeout=%s stderr=%s",
+            self._ffmpeg_exit_code,
+            self._broken_pipe,
+            self._close_timeout,
+            (self._stderr_summary[:400] if self._stderr_summary else ""),
+        )
         self._process = None
 
     @property
