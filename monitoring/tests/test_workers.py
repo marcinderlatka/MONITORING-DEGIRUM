@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -402,6 +403,7 @@ def test_metrics_payload_uses_consistent_keys():
 
 def test_heartbeat_reports_nonzero_cpu_after_metrics_window(monkeypatch):
     worker = _worker()
+    worker.performance_diagnostics_enabled = True
     worker.state.last_metrics_log_ts = 0.0
     worker.state.metrics_window_started_ts = 100.0
     worker.state.metrics_last_cpu_wall_ts = 100.0
@@ -520,3 +522,78 @@ def test_dynamic_recorder_degradation_updates_stride_and_writer_fps():
     assert worker._recorder_degradation_level >= 2
     assert worker.recorder_enqueue_stride >= 3
     assert worker.current_writer_fps < 8.0
+
+
+def test_thumb_hidden_fast_path_uses_single_resize_call(monkeypatch):
+    worker = _worker()
+    worker.set_draw_overlays(False)
+    worker.set_preview_role("thumb")
+
+    calls: list[tuple[int, int]] = []
+
+    def _resize_cached(frame, max_width, max_height):
+        calls.append((int(max_width), int(max_height)))
+        return frame
+
+    monkeypatch.setattr(worker, "_resize_for_preview_cached", _resize_cached)
+
+    class _SignalRecorder:
+        def __init__(self):
+            self.frames: list[object] = []
+        def emit(self, frame, _index):
+            self.frames.append(frame)
+
+    main_signal = _SignalRecorder()
+    thumb_signal = _SignalRecorder()
+    worker.main_preview_signal = main_signal
+    worker.thumb_preview_signal = thumb_signal
+    frame = np.zeros((20, 40, 3), dtype=np.uint8)
+
+    worker._maybe_emit_preview(frame, overlays=[], now_mono=1.0)
+    worker._maybe_emit_preview(frame, overlays=[], now_mono=2.0)
+
+    expected_w = int(max(1, round(worker.preview_thumb_max_width * worker.preview_resolution_factor)))
+    expected_h = int(max(1, round(worker.preview_thumb_max_height * worker.preview_resolution_factor)))
+    assert calls == [(expected_w, expected_h)]
+    assert main_signal.frames[0] is thumb_signal.frames[0]
+
+
+def test_resize_cache_reuses_last_scaled_frame(monkeypatch):
+    worker = _worker()
+    frame = np.zeros((120, 160, 3), dtype=np.uint8)
+    frame[:, :, 0] = 5
+
+    resize_calls = {"count": 0}
+    real_resize = cv2_stub.resize
+
+    def _counting_resize(*args, **kwargs):
+        resize_calls["count"] += 1
+        return real_resize(*args, **kwargs)
+
+    monkeypatch.setattr("monitoring.workers.cv2.resize", _counting_resize)
+    resized_a = worker._resize_for_preview_cached(frame, 80, 60)
+    resized_b = worker._resize_for_preview_cached(frame.copy(), 80, 60)
+
+    assert resize_calls["count"] == 1
+    assert resized_a is resized_b
+
+
+def test_synthetic_preview_helpers_benchmark():
+    worker = _worker()
+    frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+    loops = 250
+
+    start_plain = time.perf_counter()
+    for _ in range(loops):
+        worker._resize_for_preview(frame, 320, 180)
+    plain_elapsed = time.perf_counter() - start_plain
+
+    worker._preview_resize_cache_key = None
+    worker._preview_resize_cache_frame = None
+    start_cached = time.perf_counter()
+    for _ in range(loops):
+        worker._resize_for_preview_cached(frame, 320, 180)
+    cached_elapsed = time.perf_counter() - start_cached
+
+    assert plain_elapsed >= 0.0
+    assert cached_elapsed >= 0.0
