@@ -94,6 +94,7 @@ from .config import (
     DEFAULT_PREVIEW_FPS_THUMB,
     DEFAULT_PREVIEW_MAIN_MAX_HEIGHT,
     DEFAULT_PREVIEW_GRID_MAX_HEIGHT,
+    DEFAULT_GRID_PREVIEW_QUALITY,
     DEFAULT_PREVIEW_MAIN_MAX_WIDTH,
     DEFAULT_PREVIEW_GRID_MAX_WIDTH,
     DEFAULT_PREVIEW_PAUSE_WHEN_HIDDEN,
@@ -1818,7 +1819,7 @@ QToolButton:focus { outline: none; }
             "dropped_frames": 2.0,
         }
         self._performance_log_snapshot_by_camera: dict[str, dict[str, float]] = {}
-        self.grid_preview_quality = str(self.config.get("grid_preview_quality", "normal")) if hasattr(self, "config") else "normal"
+        self.grid_preview_quality = str(self.config.get("grid_preview_quality", DEFAULT_GRID_PREVIEW_QUALITY)) if hasattr(self, "config") else DEFAULT_GRID_PREVIEW_QUALITY
         self.config_watchdog_enabled = bool(self.config.get("config_watchdog_enabled", DEFAULT_CONFIG_WATCHDOG_ENABLED))
         self.config_watchdog_eval_seconds = float(self.config.get("config_watchdog_eval_seconds", DEFAULT_CONFIG_WATCHDOG_EVAL_SECONDS))
         self.config_watchdog_drop_delta_threshold = int(self.config.get("config_watchdog_drop_delta_threshold", DEFAULT_CONFIG_WATCHDOG_DROP_DELTA_THRESHOLD))
@@ -1874,6 +1875,7 @@ QToolButton:focus { outline: none; }
         cfg["preview_thumb_max_width"] = int(self.preview_thumb_max_width)
         cfg["preview_thumb_max_height"] = int(self.preview_thumb_max_height)
         cfg["quality_performance_preset"] = str(self.quality_performance_preset)
+        cfg["grid_preview_quality"] = str(self.grid_preview_quality)
         cfg["config_watchdog_enabled"] = bool(self.config_watchdog_enabled)
         cfg["config_watchdog_eval_seconds"] = float(self.config_watchdog_eval_seconds)
         cfg["config_watchdog_drop_delta_threshold"] = int(self.config_watchdog_drop_delta_threshold)
@@ -2975,7 +2977,7 @@ QToolButton:focus { outline: none; }
         target_fps = float(self.preview_fps_grid)
         if self.camera_grid.isVisible() and str(self.grid_preview_quality).lower() == "high-quality":
             target_fps = max(target_fps, float(self.preview_fps_main))
-        if self.overload_mode_active:
+        if self.overload_mode_active and int(self.overload_level) >= 2:
             target_fps *= max(0.4, float(overload_level_profile(self.overload_level).thumb_preview_fps_factor))
         return max(0.5, target_fps)
 
@@ -2984,6 +2986,11 @@ QToolButton:focus { outline: none; }
         main_source = self._last_main_frame.get(idx)
         source = thumb_source if thumb_source is not None else main_source
         source_tag = "thumb"
+        camera_name = str(self.cameras[idx].get("name", idx)) if 0 <= idx < len(self.cameras) else str(idx)
+        camera_overload_state = self.worker_status.get(camera_name, {}) if isinstance(self.worker_status, dict) else {}
+        camera_critical_overload = self.overload_mode_active and (
+            int(self.overload_level) >= 2 or bool(camera_overload_state.get("overload_degraded", False))
+        )
 
         tile_width = 320
         tile_height = 180
@@ -3001,13 +3008,17 @@ QToolButton:focus { outline: none; }
             dpr = 1.0
 
         if self.camera_grid.isVisible() and str(self.grid_preview_quality).lower() == "high-quality":
-            if main_source is not None:
+            if main_source is not None and not camera_critical_overload:
                 source = main_source
                 source_tag = "main"
             else:
                 tile_width = max(tile_width, int(self.preview_grid_max_width))
                 tile_height = max(tile_height, int(self.preview_grid_max_height))
                 source_tag = "thumb-hq"
+
+        if camera_critical_overload and thumb_source is not None:
+            source = thumb_source
+            source_tag = "thumb"
 
         if self.overload_mode_active:
             overload_scale = 0.85 if int(self.overload_level) <= 1 else 0.65
@@ -3494,6 +3505,13 @@ class QualityPerformanceDialog(QDialog):
         if idx >= 0:
             self.preset_combo.setCurrentIndex(idx)
         form.addRow("Preset globalny", self.preset_combo)
+        self.grid_quality_combo = QComboBox()
+        self.grid_quality_combo.addItem("Normalna", "normal")
+        self.grid_quality_combo.addItem("Najwyższa (main source)", "high-quality")
+        grid_idx = self.grid_quality_combo.findData(str(parent.grid_preview_quality).lower())
+        if grid_idx >= 0:
+            self.grid_quality_combo.setCurrentIndex(grid_idx)
+        form.addRow("Jakość podglądu siatki", self.grid_quality_combo)
         layout.addLayout(form)
         hint = QLabel("Preset aktualizuje limity kanałów: main, grid, thumb (FPS + rozdzielczość).")
         hint.setWordWrap(True)
@@ -3510,6 +3528,7 @@ class QualityPerformanceDialog(QDialog):
 
     def _apply(self):
         key = str(self.preset_combo.currentData() or "balanced")
+        self.parent_window.grid_preview_quality = str(self.grid_quality_combo.currentData() or DEFAULT_GRID_PREVIEW_QUALITY)
         self.parent_window.apply_quality_performance_preset(key)
         self.accept()
 

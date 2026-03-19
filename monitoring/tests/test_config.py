@@ -102,9 +102,18 @@ def test_overload_config_backward_compat(tmp_path):
     assert cfg["overload_camera_count_threshold"] == 6
     assert cfg["overload_reduce_thumb_preview_fps"] == 1
     assert cfg["quality_performance_preset"] == "balanced"
+    assert cfg["grid_preview_quality"] == "normal"
     assert cfg["config_watchdog_enabled"] is True
     assert "log_filters" in cfg
     assert "groups" in cfg["log_filters"]
+
+
+def test_quality_monitoring_preset_uses_higher_grid_limits():
+    from monitoring.config import QUALITY_PERFORMANCE_PRESETS
+
+    quality = QUALITY_PERFORMANCE_PRESETS["quality_monitoring"]
+    assert quality["preview_grid_max_width"] >= 1280
+    assert quality["preview_grid_max_height"] >= 720
 
 
 def test_log_filters_are_normalized_and_applied():
