@@ -18,6 +18,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSizePolicy,
@@ -43,6 +44,38 @@ SUPPORTED_LOG_GROUPS = {
 }
 
 
+def format_log_entry_for_clipboard(entry: dict[str, Any]) -> str:
+    timestamp = str(entry.get("timestamp", "")).strip()
+    group = str(entry.get("group", "")).strip()
+    level = str(entry.get("level", "")).strip()
+    source = str(entry.get("source", "")).strip()
+    camera = str(entry.get("camera", "")).strip()
+    action = str(entry.get("action", "")).strip()
+    details = str(entry.get("details", "")).strip()
+    traceback_text = str(entry.get("traceback", "")).strip()
+
+    lines: list[str] = []
+    if timestamp:
+        lines.append(f"Czas: {timestamp}")
+    if group:
+        lines.append(f"Grupa: {group}")
+    if level:
+        lines.append(f"Poziom: {level}")
+    if source:
+        lines.append(f"Źródło: {source}")
+    if camera:
+        lines.append(f"{msg('camera_label')}: {camera}")
+    if action:
+        lines.append(f"Akcja: {action}")
+    if details:
+        lines.append(f"{msg('details_prefix')}: {details}")
+    if traceback_text:
+        lines.append(f"Traceback:\n{traceback_text}")
+    if not lines:
+        return "Brak danych logu."
+    return "\n".join(lines)
+
+
 class LogEntryWidget(QFrame):
     BASE_STYLE = (
         "#logEntry{border:0.5px solid transparent; border-radius:10px;"
@@ -66,6 +99,16 @@ class LogEntryWidget(QFrame):
         detected = str(entry.get("detected", "")).strip()
         recording = str(entry.get("recording", "")).strip()
         ts = str(entry.get("timestamp", ""))
+        self._copy_payload = {
+            "timestamp": ts,
+            "group": self.group,
+            "level": level,
+            "source": source,
+            "camera": camera,
+            "action": action,
+            "details": details,
+            "traceback": traceback_text,
+        }
 
         colors = {
             "application": "#4aa3ff",
@@ -210,6 +253,25 @@ class LogEntryWidget(QFrame):
             self.rec_dot = QLabel()
             self.rec_text = QLabel()
             self._blink_timer = QTimer(self)
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.RightButton:
+            self._show_context_menu(event.pos())
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def _show_context_menu(self, pos: QPoint) -> None:
+        menu = QMenu(self)
+        copy_action = menu.addAction("Kopiuj wpis logu")
+        selected = menu.exec_(self.mapToGlobal(pos))
+        if selected == copy_action:
+            self.copy_log_entry_to_clipboard()
+
+    def copy_log_entry_to_clipboard(self) -> None:
+        clipboard_text = format_log_entry_for_clipboard(self._copy_payload)
+        QApplication.clipboard().setText(clipboard_text)
+        QMessageBox.information(self, "Log", "Skopiowano wpis logu do schowka.")
 
     def _update_details_text(self) -> None:
         if self.details_label is None:
@@ -692,4 +754,4 @@ class LogSettingsDialog(QDialog):
         return super().eventFilter(obj, event)
 
 
-__all__ = ["LogEntryWidget", "LogWindow", "LogSettingsDialog"]
+__all__ = ["format_log_entry_for_clipboard", "LogEntryWidget", "LogWindow", "LogSettingsDialog"]

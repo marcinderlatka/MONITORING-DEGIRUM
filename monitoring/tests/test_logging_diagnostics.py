@@ -62,6 +62,7 @@ if "PyQt5" not in sys.modules:
     qtwidgets.QLabel = _Dummy
     qtwidgets.QListWidget = _ListWidget
     qtwidgets.QListWidgetItem = _Dummy
+    qtwidgets.QMenu = _Dummy
     qtwidgets.QMessageBox = _Dummy
     qtwidgets.QPushButton = _Dummy
     qtwidgets.QSizePolicy = types.SimpleNamespace(Expanding=0, Preferred=0)
@@ -83,7 +84,7 @@ from monitoring.runtime_helpers import (
     evaluate_overload_transition,
     worker_stop_timeout_details,
 )
-from monitoring.widgets.logs import LogWindow
+from monitoring.widgets.logs import LogWindow, format_log_entry_for_clipboard
 
 
 class _FakeHistoryWriter:
@@ -144,6 +145,24 @@ def test_structured_log_entry_serialization(tmp_path):
     data = json.loads(Path(window.log_path).read_text(encoding="utf-8"))
     assert data[0]["source"] == "test"
     assert data[0]["traceback"] == "tb"
+
+
+def test_log_entry_formatter_builds_full_copy_text():
+    text = format_log_entry_for_clipboard({
+        "timestamp": "Thursday 12:34:56 2026-03-19",
+        "group": "error",
+        "level": "ERROR",
+        "source": "worker",
+        "camera": "Camera 1",
+        "action": "Błąd połączenia",
+        "details": "Nie udało się otworzyć strumienia",
+        "traceback": "Traceback line 1\nline 2",
+    })
+    assert "Czas: Thursday 12:34:56 2026-03-19" in text
+    assert "Kamera: Camera 1" in text
+    assert "Akcja: Błąd połączenia" in text
+    assert "Szczegóły: Nie udało się otworzyć strumienia" in text
+    assert "Traceback:\nTraceback line 1\nline 2" in text
 
 
 def test_camera_setting_change_logging_helpers_if_extracted():
