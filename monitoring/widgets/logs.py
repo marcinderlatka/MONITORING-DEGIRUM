@@ -27,6 +27,7 @@ from PyQt5.QtWidgets import (
 )
 
 from ..config import LOG_HISTORY_PATH, LOG_RETENTION_HOURS
+from ..log_messages import msg, summarize_performance_details
 
 SUPPORTED_LOG_GROUPS = {
     "detection",
@@ -146,29 +147,40 @@ class LogEntryWidget(QFrame):
         layout.addLayout(time_weekday_layout)
 
         if camera:
-            add_line(f"Kamera: {camera}", "#4aa3ff")
+            add_line(f"{msg('camera_label')}: {camera}", "#4aa3ff")
         if detected:
-            add_line(f"Detekcja: {detected.upper()}", "#4caf50")
+            add_line(f"{msg('detection_label')}: {detected.upper()}", "#4caf50")
         if action:
             add_line(action, "#ff8800" if self.group == "detection" else "#ddd")
 
         preview = details or traceback_text
         if preview:
             self.details_label = add_line("", "#cfcfcf")
-            self._details_full_text = f"Szczegóły: {preview}"
-            self._details_short_text = self._details_full_text
-            self._details_expanded = True
-            if len(self._details_full_text) > 900:
-                self._details_short_text = f"{self._details_full_text[:900]}…"
+            if self.group == "performance":
+                self._details_short_text = summarize_performance_details(preview)
+                self._details_full_text = f"{msg('details_technical_prefix')}: {preview}"
                 self._details_expanded = False
-                self.details_toggle_btn = QPushButton("Pokaż więcej")
+                self.details_toggle_btn = QPushButton(msg("show_more"))
                 self.details_toggle_btn.setStyleSheet("font-size:13px; color:#8bc6ff; text-align:left;")
                 self.details_toggle_btn.setFlat(True)
                 self.details_toggle_btn.setCursor(Qt.PointingHandCursor)
                 self.details_toggle_btn.clicked.connect(self._toggle_details)
                 layout.addWidget(self.details_toggle_btn)
             else:
-                self.details_toggle_btn = None
+                self._details_full_text = f"{msg('details_prefix')}: {preview}"
+                self._details_short_text = self._details_full_text
+                self._details_expanded = True
+                if len(self._details_full_text) > 900:
+                    self._details_short_text = f"{self._details_full_text[:900]}…"
+                    self._details_expanded = False
+                    self.details_toggle_btn = QPushButton(msg("show_more"))
+                    self.details_toggle_btn.setStyleSheet("font-size:13px; color:#8bc6ff; text-align:left;")
+                    self.details_toggle_btn.setFlat(True)
+                    self.details_toggle_btn.setCursor(Qt.PointingHandCursor)
+                    self.details_toggle_btn.clicked.connect(self._toggle_details)
+                    layout.addWidget(self.details_toggle_btn)
+                else:
+                    self.details_toggle_btn = None
             self._update_details_text()
         else:
             self.details_label = None
@@ -204,7 +216,7 @@ class LogEntryWidget(QFrame):
             return
         self.details_label.setText(self._details_full_text if self._details_expanded else self._details_short_text)
         if self.details_toggle_btn is not None:
-            self.details_toggle_btn.setText("Pokaż mniej" if self._details_expanded else "Pokaż więcej")
+            self.details_toggle_btn.setText(msg("show_less") if self._details_expanded else msg("show_more"))
 
     def _toggle_details(self) -> None:
         self._details_expanded = not self._details_expanded
@@ -214,27 +226,27 @@ class LogEntryWidget(QFrame):
         self.setStyleSheet(self.SELECTED_STYLE if selected else self.BASE_STYLE)
 
     def start_recording(self) -> None:
-        self.rec_text.setText("Recording started")
+        self.rec_text.setText(msg("recording_started"))
         self.rec_text.setStyleSheet("color:red; font-size:15px;")
         self.rec_dot.setStyleSheet("background:red; border-radius:5px;")
         self.rec_dot.show(); self.rec_text.show(); self.rec_dot.setVisible(True)
         self._blink_timer.start(500)
 
     def finish_recording(self) -> None:
-        self.rec_text.setText("Recording finished")
+        self.rec_text.setText(msg("recording_finished"))
         self.rec_text.setStyleSheet("color:red; font-size:15px;")
         self.rec_dot.setStyleSheet("background:red; border-radius:5px;")
         self.rec_dot.show(); self.rec_text.show(); self._blink_timer.stop(); self.rec_dot.setVisible(True)
 
     def start_detection(self) -> None:
-        self.rec_text.setText("Detection started")
+        self.rec_text.setText(msg("detection_started"))
         self.rec_text.setStyleSheet("color:green; font-size:15px;")
         self.rec_dot.setStyleSheet("background:green; border-radius:5px;")
         self.rec_dot.show(); self.rec_text.show(); self.rec_dot.setVisible(True)
         self._blink_timer.start(500)
 
     def finish_detection(self) -> None:
-        self.rec_text.setText("Detection finished")
+        self.rec_text.setText(msg("detection_finished"))
         self.rec_text.setStyleSheet("color:green; font-size:15px;")
         self.rec_dot.setStyleSheet("background:green; border-radius:5px;")
         self.rec_dot.show(); self.rec_text.show(); self._blink_timer.stop(); self.rec_dot.setVisible(True)

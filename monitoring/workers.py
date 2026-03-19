@@ -57,6 +57,7 @@ from .config import (
     apply_sensitivity_profile,
 )
 from .recordings import build_recording_sidecar_metadata
+from .log_messages import msg
 from .runtime_helpers import app_log, compute_effective_writer_fps, worker_stop_timeout_details
 from .storage import update_recordings_catalog
 
@@ -1087,7 +1088,7 @@ class CameraWorker(QThread):
         )
         app_log(
             "performance",
-            "worker metrics summary",
+            msg("worker_metrics_summary_action"),
             camera=str(self.camera.get("name", self.index)),
             source="worker",
             level="INFO",
