@@ -119,6 +119,8 @@ from .config import (
     DEFAULT_OVERLOAD_MAX_UI_RENDER_MS,
     DEFAULT_OVERLOAD_MAX_QUEUE_SIZE,
     DEFAULT_OVERLOAD_MAX_PREVIEW_BANDWIDTH_MBPS,
+    DEFAULT_PERFORMANCE_DIAGNOSTICS_ENABLED,
+    DEFAULT_PERFORMANCE_LOG_INTERVAL_S,
     DEFAULT_PRE_SECONDS,
     DEFAULT_RECORD_PATH,
     DEFAULT_RECORD_START_MODE,
@@ -1342,7 +1344,9 @@ class AppLogBridge(QObject):
         self._target_window = target_window
 
     def _should_suppress_duplicate(self, group: str, source: str, message: str) -> bool:
-        if group != "performance" or source != "worker":
+        if group != "performance" or source not in {"worker", "ui", "heartbeat-watchdog"}:
+            return False
+        if "metryk" not in message.lower() and "metrics" not in message.lower():
             return False
         now = time.monotonic()
         key = (group, source, message)
@@ -1696,7 +1700,21 @@ QToolButton:focus { outline: none; }
         self._ui_render_ms_by_camera: dict[str, float] = {}
         self._ui_render_stage_ms_by_camera: dict[str, dict[str, float]] = {}
         self._performance_log_last_ts_by_camera: dict[str, float] = {}
-        self._performance_log_interval_s = 10.0
+        self._base_performance_log_interval_s = float(
+            self.config.get("performance_log_interval_s", DEFAULT_PERFORMANCE_LOG_INTERVAL_S)
+        )
+        self._performance_log_interval_s = self._base_performance_log_interval_s
+        self.performance_diagnostics_enabled = bool(
+            self.config.get("performance_diagnostics_enabled", DEFAULT_PERFORMANCE_DIAGNOSTICS_ENABLED)
+        )
+        self._performance_log_delta_thresholds = {
+            "capture_fps": 1.0,
+            "infer_fps": 1.0,
+            "cpu_percent": 6.0,
+            "queue_size": 3.0,
+            "dropped_frames": 2.0,
+        }
+        self._performance_log_snapshot_by_camera: dict[str, dict[str, float]] = {}
         self.grid_preview_quality = str(self.config.get("grid_preview_quality", "normal")) if hasattr(self, "config") else "normal"
         self.config_watchdog_enabled = bool(self.config.get("config_watchdog_enabled", DEFAULT_CONFIG_WATCHDOG_ENABLED))
         self.config_watchdog_eval_seconds = float(self.config.get("config_watchdog_eval_seconds", DEFAULT_CONFIG_WATCHDOG_EVAL_SECONDS))
@@ -1757,7 +1775,26 @@ QToolButton:focus { outline: none; }
         cfg["config_watchdog_eval_seconds"] = float(self.config_watchdog_eval_seconds)
         cfg["config_watchdog_drop_delta_threshold"] = int(self.config_watchdog_drop_delta_threshold)
         cfg["config_watchdog_queue_delta_threshold"] = int(self.config_watchdog_queue_delta_threshold)
+        cfg["performance_log_interval_s"] = float(self._base_performance_log_interval_s)
+        cfg["performance_diagnostics_enabled"] = bool(self.performance_diagnostics_enabled)
         return cfg
+
+    def _heartbeat_perf_changed(self, camera_name: str, payload: dict) -> bool:
+        current = {
+            "capture_fps": float(payload.get("capture_fps", 0.0)),
+            "infer_fps": float(payload.get("infer_fps", 0.0)),
+            "cpu_percent": float(payload.get("cpu_percent", 0.0)),
+            "queue_size": float(payload.get("queue_size", 0.0)),
+            "dropped_frames": float(payload.get("dropped_frames", 0.0)),
+        }
+        previous = self._performance_log_snapshot_by_camera.get(camera_name)
+        self._performance_log_snapshot_by_camera[camera_name] = current
+        if not previous:
+            return True
+        for key, threshold in self._performance_log_delta_thresholds.items():
+            if abs(current[key] - float(previous.get(key, 0.0))) >= threshold:
+                return True
+        return False
 
     def _save_runtime_config(self) -> dict:
         cfg = self._build_runtime_config()
@@ -2128,7 +2165,7 @@ QToolButton:focus { outline: none; }
             )
 
         profile = overload_level_profile(self.overload_level)
-        self._performance_log_interval_s = float(profile.performance_log_interval_s)
+        self._performance_log_interval_s = max(self._base_performance_log_interval_s, float(profile.performance_log_interval_s))
 
         selected_idx = self.camera_list.currentRow()
         for idx, worker in enumerate(self.workers):
@@ -2203,7 +2240,10 @@ QToolButton:focus { outline: none; }
             QMessageBox.warning(self, "Model", f"Nie udało się załadować modelu '{model_name}': {e}")
             self._log_error("error", f"model {model_name}: {e}", source="app", camera=str(cam.get("name", idx)))
             return
-        w = CameraWorker(camera=cam, model=model, index=idx)
+        cam_runtime = dict(cam)
+        cam_runtime["performance_log_interval_s"] = float(self._base_performance_log_interval_s)
+        cam_runtime["performance_diagnostics_enabled"] = bool(self.performance_diagnostics_enabled)
+        w = CameraWorker(camera=cam_runtime, model=model, index=idx)
         w.preview_fps_main = self.preview_fps_main
         w.preview_fps_thumb = self.preview_fps_thumb
         w.preview_pause_when_hidden = self.preview_pause_when_hidden
@@ -2330,7 +2370,8 @@ QToolButton:focus { outline: none; }
 
         now = time.monotonic()
         last_perf = float(self._performance_log_last_ts_by_camera.get(cam_name, 0.0))
-        if now - last_perf >= self._performance_log_interval_s:
+        significant_change = self._heartbeat_perf_changed(cam_name, payload)
+        if self.performance_diagnostics_enabled and now - last_perf >= self._performance_log_interval_s and significant_change:
             mode = str(payload.get("preview_role", "thumb"))
             overload = "on" if bool(payload.get("overload_degraded", False) or self.overload_mode_active) else "off"
             self._log_info(
