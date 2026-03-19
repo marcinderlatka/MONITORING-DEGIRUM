@@ -31,6 +31,8 @@ from .config import (
     DEFAULT_LOST_SECONDS,
     DEFAULT_MIN_RECORD_SECONDS,
     DEFAULT_OVERLOAD_DISABLE_NONESSENTIAL_OVERLAYS,
+    DEFAULT_OVERLAY_DRAW_EVERY_N,
+    DEFAULT_OVERLAY_TEXT_ENABLED,
     DEFAULT_PERFORMANCE_DIAGNOSTICS_ENABLED,
     DEFAULT_PERFORMANCE_LOG_INTERVAL_S,
     DEFAULT_RECORDER_DEGRADE_WARN_WINDOW_S,
@@ -70,7 +72,7 @@ from .config import (
 from .recordings import build_recording_sidecar_metadata
 from .recording_backends import BaseRecordingBackend, DeGirumWriterBackend, FFmpegPipeBackend
 from .log_messages import PERFORMANCE_PARAM_LABELS, format_dict_multiline, msg
-from .runtime_helpers import app_log, compute_effective_writer_fps, compute_effective_writer_fps_details, stabilized_stream_fps, worker_stop_timeout_details
+from .runtime_helpers import app_log, compute_effective_writer_fps, compute_effective_writer_fps_details, scale_bbox, stabilized_stream_fps, worker_stop_timeout_details
 from .storage import enqueue_recording_metadata_persist
 
 LABEL_COLORS = {
@@ -192,26 +194,6 @@ def _extract_image_size(result: Any) -> tuple[int, int] | None:
     if isinstance(result, dict):
         return _normalize_size(result.get("image_size") or result.get("input_image_size"))
     return None
-
-
-def _scale_bbox(bbox: list[float] | tuple[float, ...], frame_shape: tuple[int, ...], source_size: tuple[int, int] | None) -> tuple[int, int, int, int]:
-    x1, y1, x2, y2 = map(float, bbox)
-    h, w = frame_shape[:2]
-    if source_size:
-        src_w, src_h = source_size
-        if src_w and src_h and (src_w != w or src_h != h):
-            x1 *= w / src_w
-            x2 *= w / src_w
-            y1 *= h / src_h
-            y2 *= h / src_h
-    if 0.0 <= x1 <= 1.0 and 0.0 <= x2 <= 1.0 and 0.0 <= y1 <= 1.0 and 0.0 <= y2 <= 1.0:
-        x1 *= w
-        x2 *= w
-        y1 *= h
-        y2 *= h
-    x1, x2 = sorted((x1, x2))
-    y1, y2 = sorted((y1, y2))
-    return int(max(0, x1)), int(max(0, y1)), int(min(w - 1, x2)), int(min(h - 1, y2))
 
 
 def _preview_interval_for_role(role: str, main_fps: float, grid_fps: float, thumb_fps: float, pause_hidden: bool) -> float:
@@ -548,6 +530,8 @@ class CameraWorker(QThread):
         self.is_overload_degraded = False
         self.app_overload_mode = False
         self.overload_disable_nonessential_overlays = bool(self.camera.get("overload_disable_nonessential_overlays", DEFAULT_OVERLOAD_DISABLE_NONESSENTIAL_OVERLAYS))
+        self.overlay_text_enabled = bool(self.camera.get("overlay_text_enabled", DEFAULT_OVERLAY_TEXT_ENABLED))
+        self.overlay_draw_every_n = int(max(1, self.camera.get("overlay_draw_every_n", DEFAULT_OVERLAY_DRAW_EVERY_N)))
         self.detect_fps_factor = 1.0
         self.overload_level = 0
         self.overlay_stride = 1
@@ -898,6 +882,8 @@ class CameraWorker(QThread):
         self.preview_grid_max_height = int(camera_config.get("preview_grid_max_height", getattr(self, "preview_grid_max_height", self.preview_thumb_max_height)))
         self.preview_thumb_max_width = int(camera_config.get("preview_thumb_max_width", self.preview_thumb_max_width))
         self.preview_thumb_max_height = int(camera_config.get("preview_thumb_max_height", self.preview_thumb_max_height))
+        self.overlay_text_enabled = bool(camera_config.get("overlay_text_enabled", self.overlay_text_enabled))
+        self.overlay_draw_every_n = int(max(1, camera_config.get("overlay_draw_every_n", self.overlay_draw_every_n)))
         self.camera_priority = str(camera_config.get("camera_priority", getattr(self, "camera_priority", "normal")))
         self.detection_debug_enabled = bool(camera_config.get("detection_debug_enabled", self.detection_debug_enabled))
         self._detection_debug_log_interval_s = max(4.0, float(camera_config.get("performance_log_interval_s", self.performance_log_interval_s)))
@@ -911,6 +897,8 @@ class CameraWorker(QThread):
         self.camera["preview_grid_max_height"] = self.preview_grid_max_height
         self.camera["preview_thumb_max_width"] = self.preview_thumb_max_width
         self.camera["preview_thumb_max_height"] = self.preview_thumb_max_height
+        self.camera["overlay_text_enabled"] = self.overlay_text_enabled
+        self.camera["overlay_draw_every_n"] = self.overlay_draw_every_n
         self.camera["camera_priority"] = self.camera_priority
         self.camera["detection_debug_enabled"] = self.detection_debug_enabled
         self.recorder_queue_warn_threshold = int(camera_config.get("recorder_queue_warn_threshold", self.recorder_queue_warn_threshold))
@@ -1504,7 +1492,7 @@ class CameraWorker(QThread):
             label = obj.get("label", "").lower(); confidence = float(obj.get("confidence", obj.get("score", 1.0))); bbox = obj.get("bbox")
             if not label or bbox is None:
                 continue
-            scaled = _scale_bbox(bbox, raw_frame.shape, source_size)
+            scaled = scale_bbox(bbox, raw_frame.shape, source_size)
             if self.draw_overlays and confidence >= self.confidence_threshold_draw and label in self.visible_classes_lower:
                 overlays.append((*scaled, label, confidence, _label_color(label)))
             if not self.enable_detection:
@@ -1621,12 +1609,16 @@ class CameraWorker(QThread):
             self.preview_processing_ms = max(0.0, (time.monotonic() - preview_start) * 1000.0)
             return
         self.state.preview_frame_skip_counter = 0
+        overload_overlay_stride = 1
+        if self.overload_level >= 2:
+            overload_overlay_stride = max(2, min(3, int(self.overlay_draw_every_n)))
+        effective_overlay_stride = max(1, int(self.overlay_stride), int(overload_overlay_stride))
         should_draw = (
             bool(overlays)
             and self.draw_overlays
             and not (self.preview_role == "hidden")
             and not (self.app_overload_mode and self.overload_disable_nonessential_overlays and not self.recording)
-            and ((self.state.frames_emitted % max(1, self.overlay_stride)) == 0)
+            and ((self.state.frames_emitted % effective_overlay_stride) == 0)
         )
         is_thumb_like_role = self.preview_role in {"grid", "thumb", "hidden"}
         target_main_w = int(max(1, round(self.preview_main_max_width * self.preview_resolution_factor)))
@@ -1653,7 +1645,8 @@ class CameraWorker(QThread):
             self.frame_copies_total += 1
             for x1, y1, x2, y2, label, confidence, color in overlays:
                 cv2.rectangle(main_source_frame, (x1, y1), (x2, y2), color, 2)
-                cv2.putText(main_source_frame, f"{label}: {confidence * 100:.1f}%", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+                if self.overlay_text_enabled and self.overload_level < 2:
+                    cv2.putText(main_source_frame, f"{label}: {confidence * 100:.1f}%", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
         main_emit_frame = self._resize_for_preview_cached(main_source_frame, target_main_w, target_main_h)
         thumb_emit_w = target_grid_w if self.preview_role == "grid" else target_thumb_w

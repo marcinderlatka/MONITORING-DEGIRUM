@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import time
 import logging
+import importlib
+import importlib.util
 from dataclasses import dataclass
 from threading import Lock
 from typing import Callable
@@ -12,6 +14,65 @@ from typing import Callable
 _APP_LOGGER: Callable[..., object] | None = None
 _LOGGER_LOCK = Lock()
 _FALLBACK_LOGGER = logging.getLogger(__name__)
+_NUMBA_SPEC = importlib.util.find_spec("numba")
+_NUMBA_NJIT = None
+if _NUMBA_SPEC is not None:
+    _NUMBA_NJIT = getattr(importlib.import_module("numba"), "njit", None)
+
+
+def _scale_bbox_core(
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    frame_w: int,
+    frame_h: int,
+    src_w: int,
+    src_h: int,
+) -> tuple[int, int, int, int]:
+    if src_w > 0 and src_h > 0 and (src_w != frame_w or src_h != frame_h):
+        sx = frame_w / src_w
+        sy = frame_h / src_h
+        x1 *= sx
+        x2 *= sx
+        y1 *= sy
+        y2 *= sy
+    if 0.0 <= x1 <= 1.0 and 0.0 <= x2 <= 1.0 and 0.0 <= y1 <= 1.0 and 0.0 <= y2 <= 1.0:
+        x1 *= frame_w
+        x2 *= frame_w
+        y1 *= frame_h
+        y2 *= frame_h
+    if x1 > x2:
+        x1, x2 = x2, x1
+    if y1 > y2:
+        y1, y2 = y2, y1
+    max_x = max(0, frame_w - 1)
+    max_y = max(0, frame_h - 1)
+    return (
+        int(max(0.0, min(max_x, x1))),
+        int(max(0.0, min(max_y, y1))),
+        int(max(0.0, min(max_x, x2))),
+        int(max(0.0, min(max_y, y2))),
+    )
+
+
+if callable(_NUMBA_NJIT):
+    _scale_bbox_core = _NUMBA_NJIT(cache=True)(_scale_bbox_core)
+
+
+def scale_bbox(
+    bbox: list[float] | tuple[float, ...],
+    frame_shape: tuple[int, ...],
+    source_size: tuple[int, int] | None,
+) -> tuple[int, int, int, int]:
+    x1, y1, x2, y2 = map(float, bbox)
+    frame_h, frame_w = map(int, frame_shape[:2])
+    src_w = 0
+    src_h = 0
+    if source_size:
+        src_w = int(source_size[0] or 0)
+        src_h = int(source_size[1] or 0)
+    return _scale_bbox_core(x1, y1, x2, y2, frame_w, frame_h, src_w, src_h)
 
 
 def register_app_logger(logger_callable: Callable[..., object] | None) -> None:
