@@ -31,6 +31,8 @@ from .config import (
     DEFAULT_LOST_SECONDS,
     DEFAULT_MIN_RECORD_SECONDS,
     DEFAULT_OVERLOAD_DISABLE_NONESSENTIAL_OVERLAYS,
+    DEFAULT_PERFORMANCE_DIAGNOSTICS_ENABLED,
+    DEFAULT_PERFORMANCE_LOG_INTERVAL_S,
     DEFAULT_POST_SECONDS,
     DEFAULT_PREVIEW_FPS_MAIN,
     DEFAULT_PREVIEW_FPS_THUMB,
@@ -334,7 +336,11 @@ class CameraWorker(QThread):
         self.overload_level = 0
         self.overlay_stride = 1
         self.preview_resolution_factor = 1.0
-        self.performance_log_interval_s = 10.0
+        self.performance_log_interval_s = float(self.camera.get("performance_log_interval_s", DEFAULT_PERFORMANCE_LOG_INTERVAL_S))
+        self.performance_diagnostics_enabled = bool(
+            self.camera.get("performance_diagnostics_enabled", DEFAULT_PERFORMANCE_DIAGNOSTICS_ENABLED)
+        )
+        self._base_performance_log_interval_s = self.performance_log_interval_s
         self.is_recording_active = False
 
         rec_path = str(self.camera.get("record_path", DEFAULT_RECORD_PATH))
@@ -467,7 +473,7 @@ class CameraWorker(QThread):
             self.overlay_stride = int(max(1, overlay_stride))
         if preview_resolution_factor is not None:
             self.preview_resolution_factor = float(max(0.3, min(1.0, preview_resolution_factor)))
-        self.performance_log_interval_s = 10.0 + float(self.overload_level * 4.0)
+        self.performance_log_interval_s = self._base_performance_log_interval_s + float(self.overload_level * 6.0)
         if previous_level != self.overload_level:
             app_log("worker", "overload state updated", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO", details=f"level=L{self.overload_level} active={self.app_overload_mode} detect_fps_factor={self.detect_fps_factor:.2f} overlay_stride={self.overlay_stride} preview_res_factor={self.preview_resolution_factor:.2f} preview_role={self.preview_role}")
 
@@ -1041,6 +1047,8 @@ class CameraWorker(QThread):
             app_log("worker", "detection ended", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO")
 
     def _maybe_log_metrics(self, detection_interval: float) -> None:
+        if not self.performance_diagnostics_enabled:
+            return
         now = time.monotonic()
         if self.state.last_metrics_log_ts and now - self.state.last_metrics_log_ts < max(4.0, float(self.performance_log_interval_s)):
             return
