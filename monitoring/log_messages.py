@@ -41,23 +41,38 @@ PERFORMANCE_PARAM_LABELS: dict[str, str] = {
 }
 
 
+
+
+def format_dict_multiline(params: dict[str, Any], labels: dict[str, str] | None = None) -> str:
+    """Format dictionary as a multiline text block (one line per param)."""
+    label_map = labels or {}
+    lines: list[str] = []
+    for key, value in params.items():
+        label = label_map.get(key, key.replace("_", " "))
+        lines.append(f"{label}: {value}")
+    return "\n".join(lines)
+
+
+def parse_legacy_kv_details(details: str) -> dict[str, str]:
+    """Parse legacy performance details stored as a single key=value line."""
+    params: dict[str, str] = {}
+    for key, value in re.findall(r"([a-zA-Z0-9_]+)=([^\s]+)", details or ""):
+        params[key] = value
+    return params
+
+
 def msg(key: str, **kwargs: Any) -> str:
     text = LOG_MESSAGES.get(key, key)
     return text.format(**kwargs) if kwargs else text
 
 
 def format_performance_summary(params: dict[str, Any]) -> str:
-    lines = [msg("performance_summary_title")]
-    for key, value in params.items():
-        label = PERFORMANCE_PARAM_LABELS.get(key, key.replace("_", " "))
-        lines.append(f"{label}: {value}")
-    return "\n".join(lines)
+    body = format_dict_multiline(params, PERFORMANCE_PARAM_LABELS)
+    return f"{msg('performance_summary_title')}\n{body}" if body else msg("performance_summary_title")
 
 
 def summarize_performance_details(details: str) -> str:
-    params: dict[str, str] = {}
-    for key, value in re.findall(r"([a-zA-Z0-9_]+)=([^\\s]+)", details or ""):
-        params[key] = value
+    params = parse_legacy_kv_details(details)
     if not params:
         return details
     return format_performance_summary(params)

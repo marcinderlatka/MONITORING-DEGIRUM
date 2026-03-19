@@ -84,6 +84,11 @@ from monitoring.runtime_helpers import (
     evaluate_overload_transition,
     worker_stop_timeout_details,
 )
+from monitoring.log_messages import (
+    PERFORMANCE_PARAM_LABELS,
+    format_dict_multiline,
+    summarize_performance_details,
+)
 from monitoring.widgets.logs import LogWindow, format_log_entry_for_clipboard
 
 
@@ -163,6 +168,24 @@ def test_log_entry_formatter_builds_full_copy_text():
     assert "Akcja: Błąd połączenia" in text
     assert "Szczegóły: Nie udało się otworzyć strumienia" in text
     assert "Traceback:\nTraceback line 1\nline 2" in text
+
+
+def test_format_dict_multiline_builds_one_line_per_param():
+    text = format_dict_multiline(
+        {"capture_fps": "12.50", "queue_size": 3},
+        PERFORMANCE_PARAM_LABELS,
+    )
+    lines = text.splitlines()
+    assert lines == ["FPS przechwytywania: 12.50", "Rozmiar kolejki: 3"]
+
+
+def test_summarize_performance_details_supports_legacy_single_line_format():
+    legacy = "capture_fps=12.50 queue_size=3 cpu_percent=17.0"
+    summary = summarize_performance_details(legacy)
+    assert "Podsumowanie wydajności" in summary
+    assert "FPS przechwytywania: 12.50" in summary
+    assert "Rozmiar kolejki: 3" in summary
+    assert "CPU [%]: 17.0" in summary
 
 
 def test_camera_setting_change_logging_helpers_if_extracted():
