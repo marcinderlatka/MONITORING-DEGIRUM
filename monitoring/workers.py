@@ -433,6 +433,12 @@ class CameraWorker(QThread):
         self.state.metrics_last_cpu_process_ts = time.process_time()
         self.state.metrics_last_sample_ts = now_mono
         self.state.last_rss_mb = _rss_mb()
+        self.rejection_counters: dict[str, int] = {
+            "below_record_threshold": 0,
+            "class_not_in_record_classes": 0,
+            "outside_schedule": 0,
+            "detection_disabled": 0,
+        }
 
     def _sample_process_metrics(self, now_mono: float) -> tuple[float, float]:
         if self.state.metrics_last_sample_ts and now_mono - self.state.metrics_last_sample_ts < 0.2:
@@ -1096,6 +1102,7 @@ class CameraWorker(QThread):
         self.state.next_inference_due_ts = max(next_due + interval, now_mono + interval * 0.1)
 
         source_size = _extract_image_size(result)
+        schedule_ok = self._is_within_schedule()
         for obj in result.results:
             label = obj.get("label", "").lower(); confidence = float(obj.get("confidence", obj.get("score", 1.0))); bbox = obj.get("bbox")
             if not label or bbox is None:
@@ -1103,10 +1110,21 @@ class CameraWorker(QThread):
             scaled = _scale_bbox(bbox, raw_frame.shape, source_size)
             if self.draw_overlays and confidence >= self.confidence_threshold_draw and label in self.visible_classes_lower:
                 overlays.append((*scaled, label, confidence, _label_color(label)))
-            if self.enable_detection and self._is_within_schedule() and label in self.record_classes_lower and confidence >= self.confidence_threshold_record:
-                detected = True
-                if confidence > best_score:
-                    best_score, best_label, best_bbox = confidence, label, scaled
+            if not self.enable_detection:
+                self.rejection_counters["detection_disabled"] += 1
+                continue
+            if not schedule_ok:
+                self.rejection_counters["outside_schedule"] += 1
+                continue
+            if label not in self.record_classes_lower:
+                self.rejection_counters["class_not_in_record_classes"] += 1
+                continue
+            if confidence < self.confidence_threshold_record:
+                self.rejection_counters["below_record_threshold"] += 1
+                continue
+            detected = True
+            if confidence > best_score:
+                best_score, best_label, best_bbox = confidence, label, scaled
         return result, detected, best_label, best_score, best_bbox, overlays
 
     @staticmethod
@@ -1338,6 +1356,7 @@ class CameraWorker(QThread):
             "calibration_sample_count": int(telemetry["calibration_sample_count"]),
             "calibration_duration_hours": float(telemetry["calibration_duration_hours"]),
             "suggested_record_threshold": telemetry["suggested_record_threshold"],
+            "rejection_counters": dict(self.rejection_counters),
         }
         status["heartbeat_ts"] = float(time.monotonic())
         self.worker_status_signal.emit(str(self.camera.get("name", self.index)), status)

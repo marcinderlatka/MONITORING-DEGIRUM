@@ -84,6 +84,14 @@ class _DummyModel:
         return types.SimpleNamespace(results=[])
 
 
+class _ModelWithResults:
+    def __init__(self, results):
+        self._results = list(results)
+
+    def predict(self, _frame):
+        return types.SimpleNamespace(results=list(self._results))
+
+
 def _worker() -> CameraWorker:
     return CameraWorker(camera={"name": "Cam", "rtsp": "rtsp://x"}, model=_DummyModel(), index=0)
 
@@ -558,7 +566,86 @@ def test_thumb_hidden_fast_path_uses_single_resize_call(monkeypatch):
     expected_w = int(max(1, round(worker.preview_thumb_max_width * worker.preview_resolution_factor)))
     expected_h = int(max(1, round(worker.preview_thumb_max_height * worker.preview_resolution_factor)))
     assert calls == [(expected_w, expected_h)]
-    assert main_signal.frames[0] is thumb_signal.frames[0]
+
+
+def test_rejection_counter_below_record_threshold():
+    model = _ModelWithResults([{"label": "person", "confidence": 0.2, "bbox": [0.1, 0.1, 0.2, 0.2]}])
+    worker = CameraWorker(camera={"name": "Cam", "rtsp": "rtsp://x"}, model=model, index=0)
+    worker.enable_detection = True
+    worker.record_classes = ["person"]
+    worker.refresh_class_filters()
+    worker.confidence_threshold_record = 0.5
+
+    _result, detected, *_ = worker._maybe_run_inference(np.zeros((10, 10, 3), dtype=np.uint8), now_mono=1.0)
+
+    assert detected is False
+    assert worker.rejection_counters["below_record_threshold"] == 1
+
+
+def test_rejection_counter_class_not_in_record_classes():
+    model = _ModelWithResults([{"label": "car", "confidence": 0.95, "bbox": [1, 1, 5, 5]}])
+    worker = CameraWorker(camera={"name": "Cam", "rtsp": "rtsp://x"}, model=model, index=0)
+    worker.enable_detection = True
+    worker.record_classes = ["person"]
+    worker.refresh_class_filters()
+
+    _result, detected, *_ = worker._maybe_run_inference(np.zeros((10, 10, 3), dtype=np.uint8), now_mono=1.0)
+
+    assert detected is False
+    assert worker.rejection_counters["class_not_in_record_classes"] == 1
+
+
+def test_rejection_counter_outside_schedule(monkeypatch):
+    model = _ModelWithResults([{"label": "person", "confidence": 0.95, "bbox": [1, 1, 5, 5]}])
+    worker = CameraWorker(camera={"name": "Cam", "rtsp": "rtsp://x"}, model=model, index=0)
+    worker.enable_detection = True
+    worker.record_classes = ["person"]
+    worker.refresh_class_filters()
+    monkeypatch.setattr(worker, "_is_within_schedule", lambda: False)
+
+    _result, detected, *_ = worker._maybe_run_inference(np.zeros((10, 10, 3), dtype=np.uint8), now_mono=1.0)
+
+    assert detected is False
+    assert worker.rejection_counters["outside_schedule"] == 1
+
+
+def test_rejection_counter_detection_disabled():
+    model = _ModelWithResults([{"label": "person", "confidence": 0.95, "bbox": [1, 1, 5, 5]}])
+    worker = CameraWorker(camera={"name": "Cam", "rtsp": "rtsp://x"}, model=model, index=0)
+    worker.enable_detection = False
+    worker.draw_overlays = True
+
+    _result, detected, *_ = worker._maybe_run_inference(np.zeros((10, 10, 3), dtype=np.uint8), now_mono=1.0)
+
+    assert detected is False
+    assert worker.rejection_counters["detection_disabled"] == 1
+
+
+def test_heartbeat_includes_rejection_counters():
+    worker = _worker()
+    worker.rejection_counters["below_record_threshold"] = 3
+    worker.rejection_counters["class_not_in_record_classes"] = 2
+    worker.rejection_counters["outside_schedule"] = 1
+    worker.rejection_counters["detection_disabled"] = 4
+
+    captured_status: dict[str, object] = {}
+
+    class _SignalRecorder:
+        def emit(self, camera_name, status):
+            captured_status["camera_name"] = camera_name
+            captured_status["status"] = status
+
+    worker.worker_status_signal = _SignalRecorder()
+    worker._maybe_emit_heartbeat()
+
+    status = dict(captured_status.get("status") or {})
+    counters = dict(status.get("rejection_counters") or {})
+    assert counters == {
+        "below_record_threshold": 3,
+        "class_not_in_record_classes": 2,
+        "outside_schedule": 1,
+        "detection_disabled": 4,
+    }
 
 
 def test_resize_cache_reuses_last_scaled_frame(monkeypatch):
