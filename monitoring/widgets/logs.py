@@ -87,6 +87,7 @@ class LogEntryWidget(QFrame):
 
         self.setObjectName("logEntry")
         self.setStyleSheet(self.BASE_STYLE)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 5, 10, 5)
         layout.setAlignment(Qt.AlignLeft)
@@ -106,28 +107,42 @@ class LogEntryWidget(QFrame):
         if source:
             group_title += f" • {source}"
         self.group_label = QLabel(group_title)
+        self.group_label.setWordWrap(True)
+        self.group_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.group_label.setStyleSheet(f"color:{color}; font-size:15px; font-weight:600;")
         header_layout.addWidget(self.group_label)
 
         date_str = dt.strftime("%Y-%m-%d") if dt else ""
         self.date_label = QLabel(date_str)
+        self.date_label.setWordWrap(True)
+        self.date_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         self.date_label.setStyleSheet(f"color:{color}; font-size:15px;")
         header_layout.addStretch()
         header_layout.addWidget(self.date_label)
         layout.addWidget(header_widget)
 
-        def add_line(text: str, text_color: str = "#ddd") -> None:
+        def add_line(text: str, text_color: str = "#ddd", font_size: int = 14) -> QLabel:
             label = QLabel(text)
             label.setWordWrap(True)
             label.setAlignment(Qt.AlignLeft)
-            label.setStyleSheet(f"color:{text_color}; font-size:14px;")
+            label.setStyleSheet(f"color:{text_color}; font-size:{font_size}px;")
             label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
             layout.addWidget(label)
+            return label
 
         time_weekday_layout = QHBoxLayout()
-        time_weekday_layout.addWidget(QLabel(dt.strftime("%H:%M:%S") if dt else ts))
+        time_label = QLabel(dt.strftime("%H:%M:%S") if dt else ts)
+        time_label.setWordWrap(True)
+        time_label.setStyleSheet("color:#ddd; font-size:14px;")
+        time_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        time_weekday_layout.addWidget(time_label)
         time_weekday_layout.addStretch()
-        time_weekday_layout.addWidget(QLabel(dt.strftime("%A").capitalize() if dt else ""))
+        weekday_label = QLabel(dt.strftime("%A").capitalize() if dt else "")
+        weekday_label.setWordWrap(True)
+        weekday_label.setStyleSheet("color:#ddd; font-size:14px;")
+        weekday_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        weekday_label.setAlignment(Qt.AlignRight)
+        time_weekday_layout.addWidget(weekday_label)
         layout.addLayout(time_weekday_layout)
 
         if camera:
@@ -139,8 +154,25 @@ class LogEntryWidget(QFrame):
 
         preview = details or traceback_text
         if preview:
-            first = preview.splitlines()[0][:180]
-            add_line(f"Szczegóły: {first}", "#cfcfcf")
+            self.details_label = add_line("", "#cfcfcf")
+            self._details_full_text = f"Szczegóły: {preview}"
+            self._details_short_text = self._details_full_text
+            self._details_expanded = True
+            if len(self._details_full_text) > 900:
+                self._details_short_text = f"{self._details_full_text[:900]}…"
+                self._details_expanded = False
+                self.details_toggle_btn = QPushButton("Pokaż więcej")
+                self.details_toggle_btn.setStyleSheet("font-size:13px; color:#8bc6ff; text-align:left;")
+                self.details_toggle_btn.setFlat(True)
+                self.details_toggle_btn.setCursor(Qt.PointingHandCursor)
+                self.details_toggle_btn.clicked.connect(self._toggle_details)
+                layout.addWidget(self.details_toggle_btn)
+            else:
+                self.details_toggle_btn = None
+            self._update_details_text()
+        else:
+            self.details_label = None
+            self.details_toggle_btn = None
 
         if self.group == "detection":
             action_row = QHBoxLayout()
@@ -166,6 +198,17 @@ class LogEntryWidget(QFrame):
             self.rec_dot = QLabel()
             self.rec_text = QLabel()
             self._blink_timer = QTimer(self)
+
+    def _update_details_text(self) -> None:
+        if self.details_label is None:
+            return
+        self.details_label.setText(self._details_full_text if self._details_expanded else self._details_short_text)
+        if self.details_toggle_btn is not None:
+            self.details_toggle_btn.setText("Pokaż mniej" if self._details_expanded else "Pokaż więcej")
+
+    def _toggle_details(self) -> None:
+        self._details_expanded = not self._details_expanded
+        self._update_details_text()
 
     def set_selected(self, selected: bool) -> None:
         self.setStyleSheet(self.SELECTED_STYLE if selected else self.BASE_STYLE)
@@ -239,7 +282,8 @@ class LogWindow(QListWidget):
 
     def __init__(self, log_path: str = str(LOG_HISTORY_PATH), retention_hours: int = LOG_RETENTION_HOURS) -> None:
         super().__init__()
-        self.setFixedWidth(300)
+        self.setMinimumWidth(280)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         self.setFrameShape(QFrame.NoFrame)
         self.setSpacing(8)
         self.setStyleSheet("\n".join([
@@ -293,8 +337,23 @@ class LogWindow(QListWidget):
         item = QListWidgetItem(self)
         self.addItem(item)
         self.setItemWidget(item, widget)
-        item.setSizeHint(widget.sizeHint())
+        self._sync_item_size(item, widget)
         self._update_selection_highlight()
+
+    def _sync_item_size(self, item: QListWidgetItem, widget: QWidget) -> None:
+        width = max(1, self.viewport().width() - 2 * self.frameWidth() - self.spacing())
+        hinted = widget.sizeHint()
+        hinted.setWidth(width)
+        item.setSizeHint(hinted)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        for row in range(self.count()):
+            item = self.item(row)
+            widget = self.itemWidget(item)
+            if item is None or widget is None:
+                continue
+            self._sync_item_size(item, widget)
 
     def _refresh_widget(self) -> None:
         self.clear()
