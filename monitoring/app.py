@@ -1336,7 +1336,7 @@ class RemoveCameraDialog(QDialog):
 
 # --- Dialog zarządzania kamerami ---
 class CameraSettingsDialog(QDialog):
-    def __init__(self, cameras, start_cb, stop_cb, test_cb, settings_cb, delete_cb, parent=None):
+    def __init__(self, cameras, start_cb, stop_cb, test_cb, settings_cb, delete_cb, load_balancer_cb=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Zarządzanie kamerami")
         self.cameras = cameras
@@ -1345,6 +1345,7 @@ class CameraSettingsDialog(QDialog):
         self.test_cb = test_cb
         self.settings_cb = settings_cb
         self.delete_cb = delete_cb
+        self.load_balancer_cb = load_balancer_cb
 
         v = QVBoxLayout(self)
         self.combo = QComboBox()
@@ -1358,8 +1359,9 @@ class CameraSettingsDialog(QDialog):
         self.btn_test = QPushButton("Test połączenia")
         self.btn_copy = QPushButton("Kopiuj RTSP")
         self.btn_settings = QPushButton("Ustawienia…")
+        self.btn_load_balancer = QPushButton("Auto balans")
         self.btn_delete = QPushButton("Usuń")
-        for b in (self.btn_start, self.btn_stop, self.btn_test, self.btn_copy, self.btn_settings, self.btn_delete):
+        for b in (self.btn_start, self.btn_stop, self.btn_test, self.btn_copy, self.btn_settings, self.btn_load_balancer, self.btn_delete):
             btns.addWidget(b)
         v.addLayout(btns)
 
@@ -1375,7 +1377,9 @@ class CameraSettingsDialog(QDialog):
         self.btn_test.clicked.connect(lambda: self.test_cb(self.combo.currentIndex()))
         self.btn_copy.clicked.connect(self._copy_rtsp)
         self.btn_settings.clicked.connect(lambda: self.settings_cb(self.combo.currentIndex()))
+        self.btn_load_balancer.clicked.connect(lambda: self.load_balancer_cb() if callable(self.load_balancer_cb) else None)
         self.btn_delete.clicked.connect(lambda: self.delete_cb(self.combo.currentIndex()))
+        self.btn_load_balancer.setEnabled(callable(self.load_balancer_cb))
 
         self._on_idx_change(self.combo.currentIndex())
 
@@ -1660,6 +1664,13 @@ class MainWindow(QMainWindow):
         btn_settings.setIcon(QIcon(str(ICON_DIR / "gear.svg")))
         btn_settings.setIconSize(QSize(50, 50))
         btn_settings.clicked.connect(self.open_settings)
+        btn_settings.setToolTip("Ustawienia główne")
+
+        btn_auto_balance = QToolButton()
+        btn_auto_balance.setIcon(QIcon(str(ICON_DIR / "sliders.svg")))
+        btn_auto_balance.setIconSize(QSize(50, 50))
+        btn_auto_balance.clicked.connect(self.open_system_load_balancer_dialog)
+        btn_auto_balance.setToolTip("Auto-balans obciążenia kamer")
 
         btn_cam_ctrl = QToolButton()
         btn_cam_ctrl.setIcon(QIcon(str(ICON_DIR / "sliders.svg")))
@@ -1701,6 +1712,7 @@ QToolButton:focus { outline: none; }
             btn_cameras,
             btn_recordings,
             btn_settings,
+            btn_auto_balance,
             btn_cam_ctrl,
             btn_alerts,
             btn_logs,
@@ -1715,6 +1727,7 @@ QToolButton:focus { outline: none; }
         controls_layout.addWidget(btn_cameras)
         controls_layout.addWidget(btn_recordings)
         controls_layout.addWidget(btn_settings)
+        controls_layout.addWidget(btn_auto_balance)
         controls_layout.addWidget(btn_cam_ctrl)
         controls_layout.addWidget(btn_alerts)
         controls_layout.addWidget(btn_logs)
@@ -1783,6 +1796,7 @@ QToolButton:focus { outline: none; }
         self.overload_max_ui_render_ms = float(self.config.get("overload_max_ui_render_ms", DEFAULT_OVERLOAD_MAX_UI_RENDER_MS)) if hasattr(self, "config") else DEFAULT_OVERLOAD_MAX_UI_RENDER_MS
         self.overload_max_queue_size = int(self.config.get("overload_max_queue_size", DEFAULT_OVERLOAD_MAX_QUEUE_SIZE)) if hasattr(self, "config") else DEFAULT_OVERLOAD_MAX_QUEUE_SIZE
         self.overload_max_preview_bandwidth_mbps = float(self.config.get("overload_max_preview_bandwidth_mbps", DEFAULT_OVERLOAD_MAX_PREVIEW_BANDWIDTH_MBPS)) if hasattr(self, "config") else DEFAULT_OVERLOAD_MAX_PREVIEW_BANDWIDTH_MBPS
+        self.overload_safety_threshold_pct = int(self.config.get("overload_safety_threshold_pct", 85)) if hasattr(self, "config") else 85
         self.overload_level = 0
         self.overload_mode_active = False
         self._overload_last_change_ts = 0.0
@@ -1866,6 +1880,18 @@ QToolButton:focus { outline: none; }
         cfg["config_watchdog_queue_delta_threshold"] = int(self.config_watchdog_queue_delta_threshold)
         cfg["performance_log_interval_s"] = float(self._base_performance_log_interval_s)
         cfg["performance_diagnostics_enabled"] = bool(self.performance_diagnostics_enabled)
+        cfg["overload_protection_enabled"] = bool(self.overload_protection_enabled)
+        cfg["overload_min_camera_count"] = int(self.overload_min_camera_count)
+        cfg["overload_camera_count_threshold"] = int(self.overload_camera_count_threshold)
+        cfg["overload_reduce_thumb_preview_fps"] = float(self.overload_reduce_thumb_preview_fps)
+        cfg["overload_reduce_detect_fps_factor"] = float(self.overload_reduce_detect_fps_factor)
+        cfg["overload_disable_nonessential_overlays"] = bool(self.overload_disable_nonessential_overlays)
+        cfg["overload_enter_debounce_seconds"] = float(self.overload_enter_debounce_seconds)
+        cfg["overload_exit_debounce_seconds"] = float(self.overload_exit_debounce_seconds)
+        cfg["overload_max_ui_render_ms"] = float(self.overload_max_ui_render_ms)
+        cfg["overload_max_queue_size"] = int(self.overload_max_queue_size)
+        cfg["overload_max_preview_bandwidth_mbps"] = float(self.overload_max_preview_bandwidth_mbps)
+        cfg["overload_safety_threshold_pct"] = int(self.overload_safety_threshold_pct)
         return cfg
 
     def _heartbeat_perf_changed(self, camera_name: str, payload: dict) -> bool:
@@ -2129,6 +2155,7 @@ QToolButton:focus { outline: none; }
             test_cb=self.test_camera,
             settings_cb=self.camera_settings,
             delete_cb=self.delete_camera,
+            load_balancer_cb=self.open_system_load_balancer_dialog,
             parent=self,
         )
         dlg.exec_()
@@ -2237,6 +2264,11 @@ QToolButton:focus { outline: none; }
             preview_bandwidth_mbps += (emit_fps / stream_fps) * width * height * 3.0 * compression_ratio * 8.0 / 1_000_000.0
 
         now_ts = time.monotonic()
+        safety_factor = max(0.6, min(1.2, float(self.overload_safety_threshold_pct) / 100.0))
+        effective_camera_threshold = max(1, int(round(self.overload_camera_count_threshold * safety_factor)))
+        effective_max_ui_render_ms = max(4.0, float(self.overload_max_ui_render_ms) * safety_factor)
+        effective_max_queue_size = max(2, int(round(self.overload_max_queue_size * safety_factor)))
+        effective_max_preview_bandwidth_mbps = max(2.0, float(self.overload_max_preview_bandwidth_mbps) * safety_factor)
         overload_level, change_ts, reason = evaluate_overload_transition(
             now_ts=now_ts,
             active_camera_count=active_count,
@@ -2246,16 +2278,16 @@ QToolButton:focus { outline: none; }
             last_change_ts=self._overload_last_change_ts,
             protection_enabled=self.overload_protection_enabled,
             min_camera_count=self.overload_min_camera_count,
-            camera_threshold=self.overload_camera_count_threshold,
+            camera_threshold=effective_camera_threshold,
             load_per_camera_threshold=10.0,
             enter_debounce_seconds=self.overload_enter_debounce_seconds,
             exit_debounce_seconds=self.overload_exit_debounce_seconds,
             ui_render_ms=avg_ui_render_ms,
-            max_ui_render_ms=self.overload_max_ui_render_ms,
+            max_ui_render_ms=effective_max_ui_render_ms,
             queue_size=max_queue_size,
-            max_queue_size=self.overload_max_queue_size,
+            max_queue_size=effective_max_queue_size,
             preview_bandwidth_mbps=preview_bandwidth_mbps,
-            max_preview_bandwidth_mbps=self.overload_max_preview_bandwidth_mbps,
+            max_preview_bandwidth_mbps=effective_max_preview_bandwidth_mbps,
         )
         self._overload_last_change_ts = change_ts
 
@@ -2269,9 +2301,10 @@ QToolButton:focus { outline: none; }
                 source="app",
                 details=(
                     f"reason={reason} level=L{overload_level} active_cameras={active_count} min_cameras={self.overload_min_camera_count} "
-                    f"camera_threshold={self.overload_camera_count_threshold} gui_load={gui_load:.2f} ui_render_ms={avg_ui_render_ms:.2f} "
+                    f"camera_threshold={effective_camera_threshold} gui_load={gui_load:.2f} ui_render_ms={avg_ui_render_ms:.2f} "
                     f"queue_size={max_queue_size} preview_bandwidth_mbps={preview_bandwidth_mbps:.2f} "
-                    f"enter_debounce_s={self.overload_enter_debounce_seconds} exit_debounce_s={self.overload_exit_debounce_seconds}"
+                    f"enter_debounce_s={self.overload_enter_debounce_seconds} exit_debounce_s={self.overload_exit_debounce_seconds} "
+                    f"safety_threshold_pct={self.overload_safety_threshold_pct}"
                 ),
             )
 
@@ -3230,6 +3263,36 @@ QToolButton:focus { outline: none; }
         dlg = SettingsHub(self)
         dlg.exec_()
 
+    def open_system_load_balancer_dialog(self):
+        self.log_window.add_entry("settings", "otworzono auto-balans obciążenia")
+        dlg = SystemLoadBalancerDialog(self)
+        dlg.exec_()
+
+    def apply_system_load_balancer_settings(self, settings: dict) -> None:
+        previous_cfg = self._build_runtime_config()
+        self.overload_protection_enabled = bool(settings.get("enabled", self.overload_protection_enabled))
+        self.overload_safety_threshold_pct = int(settings.get("safety_threshold_pct", self.overload_safety_threshold_pct))
+        self.overload_min_camera_count = int(settings.get("min_camera_count", self.overload_min_camera_count))
+        self.overload_camera_count_threshold = int(settings.get("camera_count_threshold", self.overload_camera_count_threshold))
+        self.overload_max_ui_render_ms = float(settings.get("max_ui_render_ms", self.overload_max_ui_render_ms))
+        self.overload_max_queue_size = int(settings.get("max_queue_size", self.overload_max_queue_size))
+        self.overload_max_preview_bandwidth_mbps = float(settings.get("max_preview_bandwidth_mbps", self.overload_max_preview_bandwidth_mbps))
+        self.overload_enter_debounce_seconds = float(settings.get("enter_debounce_seconds", self.overload_enter_debounce_seconds))
+        self.overload_exit_debounce_seconds = float(settings.get("exit_debounce_seconds", self.overload_exit_debounce_seconds))
+        self.overload_disable_nonessential_overlays = bool(settings.get("disable_nonessential_overlays", self.overload_disable_nonessential_overlays))
+        candidate_cfg = self._save_runtime_config()
+        self._evaluate_overload_mode()
+        self._log_info(
+            "settings",
+            "zastosowano auto-balans obciążenia",
+            source="settings",
+            details=(
+                f"enabled={self.overload_protection_enabled} safety_pct={self.overload_safety_threshold_pct} "
+                f"min_camera_count={self.overload_min_camera_count} camera_count_threshold={self.overload_camera_count_threshold}"
+            ),
+        )
+        self._start_config_watchdog(previous_cfg, candidate_cfg, reason="system-load-balancer")
+
     def open_quality_performance_panel(self):
         dlg = QualityPerformanceDialog(self)
         dlg.exec_()
@@ -3286,19 +3349,128 @@ class SettingsHub(QDialog):
         btn_add_cam = QPushButton("Dodaj kamerę RTSP")
         btn_add_usb = QPushButton("Dodaj kamerę USB")
         btn_remove_cam = QPushButton("Usuń kamerę")
+        btn_auto_balance = QPushButton("Auto-balans obciążenia")
         btn_quality_perf = QPushButton("Jakość/Wydajność")
         btn_restart = QPushButton("Restart aplikacji")
         btn_close = QPushButton("Zamknij")
 
-        for b in [btn_add_cam, btn_add_usb, btn_remove_cam, btn_quality_perf, btn_restart, btn_close]:
+        for b in [btn_add_cam, btn_add_usb, btn_remove_cam, btn_auto_balance, btn_quality_perf, btn_restart, btn_close]:
             layout.addWidget(b)
 
         btn_add_cam.clicked.connect(parent.add_camera_wizard)
         btn_add_usb.clicked.connect(parent.add_usb_camera)
         btn_remove_cam.clicked.connect(parent.remove_camera_dialog)
+        btn_auto_balance.clicked.connect(parent.open_system_load_balancer_dialog)
         btn_quality_perf.clicked.connect(parent.open_quality_performance_panel)
         btn_restart.clicked.connect(parent.restart_app)
         btn_close.clicked.connect(self.accept)
+
+
+class SystemLoadBalancerDialog(QDialog):
+    def __init__(self, parent: MainWindow):
+        super().__init__(parent)
+        self.setWindowTitle("Auto-balans obciążenia systemu")
+        self.resize(520, 380)
+        self.parent_window = parent
+
+        layout = QVBoxLayout(self)
+        intro = QLabel(
+            "Funkcja stale monitoruje wydajność i automatycznie reguluje parametry kamer, "
+            "aby utrzymać stabilną pracę aplikacji i uniknąć zawieszania."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        form = QFormLayout()
+        self.enabled_chk = QCheckBox("Włącz automatyczne równoważenie obciążenia")
+        self.enabled_chk.setChecked(bool(parent.overload_protection_enabled))
+        form.addRow(self.enabled_chk)
+
+        self.safety_threshold_spin = QSpinBox()
+        self.safety_threshold_spin.setRange(60, 120)
+        self.safety_threshold_spin.setSuffix(" %")
+        self.safety_threshold_spin.setValue(int(parent.overload_safety_threshold_pct))
+        self.safety_threshold_spin.setToolTip("Niższa wartość reaguje wcześniej (bezpieczniej), wyższa później.")
+        form.addRow("Próg bezpieczeństwa", self.safety_threshold_spin)
+
+        self.min_camera_spin = QSpinBox()
+        self.min_camera_spin.setRange(1, 128)
+        self.min_camera_spin.setValue(int(parent.overload_min_camera_count))
+        form.addRow("Min. liczba kamer", self.min_camera_spin)
+
+        self.camera_threshold_spin = QSpinBox()
+        self.camera_threshold_spin.setRange(1, 256)
+        self.camera_threshold_spin.setValue(int(parent.overload_camera_count_threshold))
+        form.addRow("Próg liczby kamer", self.camera_threshold_spin)
+
+        self.max_ui_render_spin = QDoubleSpinBox()
+        self.max_ui_render_spin.setRange(4.0, 50.0)
+        self.max_ui_render_spin.setDecimals(1)
+        self.max_ui_render_spin.setSingleStep(0.5)
+        self.max_ui_render_spin.setSuffix(" ms")
+        self.max_ui_render_spin.setValue(float(parent.overload_max_ui_render_ms))
+        form.addRow("Limit renderowania UI", self.max_ui_render_spin)
+
+        self.max_queue_spin = QSpinBox()
+        self.max_queue_spin.setRange(2, 500)
+        self.max_queue_spin.setValue(int(parent.overload_max_queue_size))
+        form.addRow("Limit kolejki klatek", self.max_queue_spin)
+
+        self.max_bandwidth_spin = QDoubleSpinBox()
+        self.max_bandwidth_spin.setRange(2.0, 200.0)
+        self.max_bandwidth_spin.setDecimals(1)
+        self.max_bandwidth_spin.setSingleStep(0.5)
+        self.max_bandwidth_spin.setSuffix(" Mbps")
+        self.max_bandwidth_spin.setValue(float(parent.overload_max_preview_bandwidth_mbps))
+        form.addRow("Limit pasma podglądu", self.max_bandwidth_spin)
+
+        self.enter_debounce_spin = QDoubleSpinBox()
+        self.enter_debounce_spin.setRange(0.5, 30.0)
+        self.enter_debounce_spin.setDecimals(1)
+        self.enter_debounce_spin.setSingleStep(0.5)
+        self.enter_debounce_spin.setSuffix(" s")
+        self.enter_debounce_spin.setValue(float(parent.overload_enter_debounce_seconds))
+        form.addRow("Wejście w tryb odciążenia", self.enter_debounce_spin)
+
+        self.exit_debounce_spin = QDoubleSpinBox()
+        self.exit_debounce_spin.setRange(0.5, 60.0)
+        self.exit_debounce_spin.setDecimals(1)
+        self.exit_debounce_spin.setSingleStep(0.5)
+        self.exit_debounce_spin.setSuffix(" s")
+        self.exit_debounce_spin.setValue(float(parent.overload_exit_debounce_seconds))
+        form.addRow("Wyjście z trybu odciążenia", self.exit_debounce_spin)
+
+        self.disable_overlay_chk = QCheckBox("Wyłączaj mniej istotne nakładki przy wysokim obciążeniu")
+        self.disable_overlay_chk.setChecked(bool(parent.overload_disable_nonessential_overlays))
+        form.addRow(self.disable_overlay_chk)
+        layout.addLayout(form)
+
+        buttons = QHBoxLayout()
+        btn_cancel = QPushButton("Anuluj")
+        btn_apply = QPushButton("Zastosuj")
+        buttons.addStretch(1)
+        buttons.addWidget(btn_cancel)
+        buttons.addWidget(btn_apply)
+        layout.addLayout(buttons)
+        btn_cancel.clicked.connect(self.reject)
+        btn_apply.clicked.connect(self._apply)
+
+    def _apply(self):
+        self.parent_window.apply_system_load_balancer_settings(
+            {
+                "enabled": self.enabled_chk.isChecked(),
+                "safety_threshold_pct": int(self.safety_threshold_spin.value()),
+                "min_camera_count": int(self.min_camera_spin.value()),
+                "camera_count_threshold": int(self.camera_threshold_spin.value()),
+                "max_ui_render_ms": float(self.max_ui_render_spin.value()),
+                "max_queue_size": int(self.max_queue_spin.value()),
+                "max_preview_bandwidth_mbps": float(self.max_bandwidth_spin.value()),
+                "enter_debounce_seconds": float(self.enter_debounce_spin.value()),
+                "exit_debounce_seconds": float(self.exit_debounce_spin.value()),
+                "disable_nonessential_overlays": self.disable_overlay_chk.isChecked(),
+            }
+        )
+        self.accept()
 
 
 class QualityPerformanceDialog(QDialog):
