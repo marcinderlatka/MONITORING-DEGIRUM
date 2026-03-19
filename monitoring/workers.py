@@ -67,7 +67,7 @@ from .config import (
 )
 from .recordings import build_recording_sidecar_metadata
 from .log_messages import PERFORMANCE_PARAM_LABELS, format_dict_multiline, msg
-from .runtime_helpers import app_log, compute_effective_writer_fps, worker_stop_timeout_details
+from .runtime_helpers import app_log, compute_effective_writer_fps, compute_effective_writer_fps_details, worker_stop_timeout_details
 from .storage import enqueue_recording_metadata_persist
 
 LABEL_COLORS = {
@@ -424,6 +424,9 @@ class CameraWorker(QThread):
         self._recorder_last_overload_warn_ts = 0.0
         self._record_queue_full_warn_ts = 0.0
         self._current_writer_fps_base = 0.0
+        self._last_session_writer_fps = 0.0
+        self.current_writer_fps_reason = "fallback_min"
+        self.current_stream_fps_measured = 0.0
         self._worker_slot_key: str | None = None
         self._preview_resize_cache_key: tuple[tuple[int, int, int], int, int, tuple[int, int, int], tuple[int, int, int]] | None = None
         self._preview_resize_cache_frame: np.ndarray | None = None
@@ -726,6 +729,32 @@ class CameraWorker(QThread):
     def _compute_effective_writer_fps(self, stream_fps: float) -> float:
         return float(max(1.0, compute_effective_writer_fps(self.rtsp_fps, float(self.fps), stream_fps)))
 
+    def _stable_stream_fps_measurement(self) -> float:
+        if len(self._stream_fps_window) < 15:
+            return 0.0
+        elapsed = float(self._stream_fps_window[-1] - self._stream_fps_window[0]) if len(self._stream_fps_window) >= 2 else 0.0
+        if elapsed < 2.0:
+            return 0.0
+        return float(max(0.0, self._get_effective_stream_fps()))
+
+    def _select_session_writer_fps(self, measured_stream_fps: float, detect_fps: float) -> tuple[float, str]:
+        target_fps, reason = compute_effective_writer_fps_details(self.rtsp_fps, detect_fps, measured_stream_fps)
+        target_fps = float(max(1.0, target_fps))
+        prev = float(max(0.0, self._last_session_writer_fps))
+        if prev <= 0:
+            return target_fps, reason
+
+        hysteresis_band = max(0.5, prev * 0.12)
+        if abs(target_fps - prev) <= hysteresis_band:
+            return prev, f"{reason}_hysteresis_hold"
+
+        min_step = max(1.0, prev * 0.7)
+        max_step = prev * 1.3
+        clamped = float(min(max(target_fps, min_step), max_step))
+        if abs(clamped - target_fps) > 1e-6:
+            return clamped, f"{reason}_clamped"
+        return clamped, reason
+
     def _get_prerecord_buffer_fps_basis(self) -> float:
         if self.rtsp_fps > 0:
             return float(max(1.0, self.rtsp_fps))
@@ -791,6 +820,9 @@ class CameraWorker(QThread):
             recorder_enqueue_stride=kwargs.get("recorder_enqueue_stride", self.recorder_enqueue_stride),
             recorder_degradation_level=kwargs.get("recorder_degradation_level", self._recorder_degradation_level),
             writer_fps_base=kwargs.get("writer_fps_base", self._current_writer_fps_base),
+            stream_fps_measured=kwargs.get("stream_fps_measured", self.current_stream_fps_measured),
+            writer_fps_selected=kwargs.get("writer_fps_selected", self.current_writer_fps),
+            writer_fps_reason=kwargs.get("writer_fps_reason", self.current_writer_fps_reason),
         )
 
     def _compute_recorder_degradation_level(self, queue_size: int, dropped_frames: int, queue_peak: int) -> int:
@@ -919,9 +951,12 @@ class CameraWorker(QThread):
         self.output_file = os.path.join(self.output_dir, f"nagranie_{self.camera['name']}_{timestamp}.mp4")
         self.current_event_metadata_path = self.output_file + ".json"
         h, w = raw_frame.shape[:2]
-        self.current_writer_fps = self._compute_effective_writer_fps(stream_fps)
+        measured_stream_fps = self._stable_stream_fps_measurement()
+        self.current_stream_fps_measured = measured_stream_fps
+        self.current_writer_fps, self.current_writer_fps_reason = self._select_session_writer_fps(measured_stream_fps, detect_fps)
         self._current_writer_fps_base = self.current_writer_fps
         self.writer_fps = self.current_writer_fps
+        self._last_session_writer_fps = self.current_writer_fps
         self.record_thread = RecordingThread(self.output_file, w, h, self.current_writer_fps)
         self.record_thread.start()
         self.recording = True
@@ -961,6 +996,9 @@ class CameraWorker(QThread):
             preview_role_at_start=self.preview_role, overload_degraded_at_start=self.is_overload_degraded,
             recorder_drop_rate=0.0, recorder_queue_latency_proxy_s=0.0, recorder_enqueue_stride=self.recorder_enqueue_stride,
             recorder_degradation_level=self._recorder_degradation_level, writer_fps_base=self._current_writer_fps_base,
+            stream_fps_measured=self.current_stream_fps_measured,
+            writer_fps_selected=self.current_writer_fps,
+            writer_fps_reason=self.current_writer_fps_reason,
         )
         self._save_recording_metadata(meta)
         self.record_signal.emit("start", self.output_file)
@@ -1007,6 +1045,9 @@ class CameraWorker(QThread):
             recorder_drop_rate=drop_rate, recorder_queue_latency_proxy_s=queue_latency_proxy_s,
             recorder_enqueue_stride=self.recorder_enqueue_stride, recorder_degradation_level=self._recorder_degradation_level,
             writer_fps_base=self._current_writer_fps_base,
+            stream_fps_measured=self.current_stream_fps_measured,
+            writer_fps_selected=self.current_writer_fps,
+            writer_fps_reason=self.current_writer_fps_reason,
         )
         io_enqueue_started_mono = time.monotonic()
         self._save_recording_metadata(meta)
@@ -1046,6 +1087,8 @@ class CameraWorker(QThread):
         self.current_event_start_ts = 0.0
         self.current_writer_fps = 0.0
         self._current_writer_fps_base = 0.0
+        self.current_writer_fps_reason = "fallback_min"
+        self.current_stream_fps_measured = 0.0
         self.recorder_enqueue_stride = 1
         self._recorder_enqueue_counter = 0
         self._recorder_degradation_level = 0

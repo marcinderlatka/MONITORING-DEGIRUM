@@ -50,16 +50,27 @@ def classify_camera_setting_changes(old_camera: dict, new_camera: dict, restart_
 
 
 def compute_effective_writer_fps(rtsp_fps: int, detect_fps: float, stream_fps: float) -> float:
-    """Compute MP4 writer FPS so playback matches processed frame cadence."""
-    if rtsp_fps > 0:
-        return float(max(1.0, rtsp_fps))
-    if detect_fps > 0:
-        if stream_fps > 0:
-            return float(max(1.0, min(stream_fps, detect_fps)))
-        return float(max(1.0, detect_fps))
+    """Compute MP4 writer FPS so playback matches incoming frame cadence."""
+    fps, _reason = compute_effective_writer_fps_details(rtsp_fps, detect_fps, stream_fps)
+    return fps
+
+
+def compute_effective_writer_fps_details(rtsp_fps: int, detect_fps: float, stream_fps: float) -> tuple[float, str]:
+    """Compute MP4 writer FPS with explicit priority and explainable reason.
+
+    Priority:
+      1) stable measured stream FPS (``stream_fps`` from runtime window),
+      2) configured RTSP throttle,
+      3) detection FPS fallback,
+      4) safe minimum.
+    """
     if stream_fps > 0:
-        return float(max(1.0, stream_fps))
-    return 1.0
+        return float(max(1.0, stream_fps)), "measured_stream"
+    if rtsp_fps > 0:
+        return float(max(1.0, rtsp_fps)), "rtsp_limit"
+    if detect_fps > 0:
+        return float(max(1.0, detect_fps)), "fallback_detect"
+    return 1.0, "fallback_min"
 
 
 def compute_letterboxed_rect(frame_width: int, frame_height: int, canvas_width: int, canvas_height: int) -> tuple[int, int, int, int]:

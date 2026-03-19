@@ -196,8 +196,8 @@ def test_thumbnail_candidates_prefer_explicit_thumb_path(tmp_path):
 
 
 def test_effective_writer_fps_helper():
-    assert compute_effective_writer_fps(5, 3.0, 25.0) == 5.0
-    assert compute_effective_writer_fps(0, 3.0, 25.0) == 3.0
+    assert compute_effective_writer_fps(5, 3.0, 25.0) == 25.0
+    assert compute_effective_writer_fps(0, 3.0, 0.0) == 3.0
 
 
 def test_old_metadata_without_new_fields_still_loads(tmp_path):
@@ -267,12 +267,18 @@ def test_metadata_preserves_recorder_efficiency_metrics():
         recorder_enqueue_stride=3,
         recorder_degradation_level=2,
         writer_fps_base=6.0,
+        stream_fps_measured=19.2,
+        writer_fps_selected=6.0,
+        writer_fps_reason="measured_stream",
     )
     assert payload["recorder_drop_rate"] == 0.13
     assert payload["recorder_queue_latency_proxy_s"] == 2.5
     assert payload["recorder_enqueue_stride"] == 3
     assert payload["recorder_degradation_level"] == 2
     assert payload["writer_fps_base"] == 6.0
+    assert payload["stream_fps_measured"] == 19.2
+    assert payload["writer_fps_selected"] == 6.0
+    assert payload["writer_fps_reason"] == "measured_stream"
 
 
 def test_load_recording_entries_uses_catalog_when_available(tmp_path, monkeypatch):

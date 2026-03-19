@@ -108,7 +108,8 @@ def test_writer_fps_computation():
     worker = _worker()
     worker.rtsp_fps = 8
     worker.fps = 20
-    assert worker._compute_effective_writer_fps(25.0) == 8.0
+    assert worker._compute_effective_writer_fps(25.0) == 25.0
+    assert worker._compute_effective_writer_fps(0.0) == 8.0
 
 
 def test_stream_fps_estimation():
@@ -117,6 +118,83 @@ def test_stream_fps_estimation():
     worker._stream_fps_last_calc_ts = 0.0
     est = worker._get_effective_stream_fps()
     assert est == 2.0
+
+
+def test_start_recording_prefers_measured_stream_over_detect_fps(monkeypatch):
+    worker = _worker()
+    worker.enable_recording = True
+    worker.fps = 3
+    worker.rtsp_fps = 0
+    worker._stream_fps_window.extend([float(i) * 0.1 for i in range(30)])
+    worker.stream_fps = 10.0
+    frame = np.zeros((12, 12, 3), dtype=np.uint8)
+    meta_box: dict[str, object] = {}
+
+    class DummyThread:
+        def __init__(self, *_a, **_k):
+            self.frames_written = 0
+            self.dropped_frames = 0
+            self.queue_peak = 0
+        def start(self):
+            return None
+        def write(self, _frame):
+            return None
+        def stop(self):
+            return True
+
+    monkeypatch.setattr("monitoring.workers.RecordingThread", DummyThread)
+    monkeypatch.setattr(worker, "_update_event_thumbnail", lambda *_a, **_k: None)
+    monkeypatch.setattr(worker, "_save_recording_metadata", lambda meta: meta_box.update(meta))
+
+    ok = worker._start_recording_session(frame, frame, "person", 0.8, None, 30.0, 3.0)
+    assert ok is True
+    assert worker.current_writer_fps > 9.0
+    assert meta_box["writer_fps_reason"] == "measured_stream"
+    assert float(meta_box["writer_fps_selected"]) > 9.0
+
+
+def test_start_recording_fallback_when_stream_measurement_missing(monkeypatch):
+    worker = _worker()
+    worker.enable_recording = True
+    worker.rtsp_fps = 6
+    worker.fps = 3
+    frame = np.zeros((12, 12, 3), dtype=np.uint8)
+    meta_box: dict[str, object] = {}
+
+    class DummyThread:
+        def __init__(self, *_a, **_k):
+            self.frames_written = 0
+            self.dropped_frames = 0
+            self.queue_peak = 0
+        def start(self):
+            return None
+        def write(self, _frame):
+            return None
+        def stop(self):
+            return True
+
+    monkeypatch.setattr("monitoring.workers.RecordingThread", DummyThread)
+    monkeypatch.setattr(worker, "_update_event_thumbnail", lambda *_a, **_k: None)
+    monkeypatch.setattr(worker, "_save_recording_metadata", lambda meta: meta_box.update(meta))
+
+    ok = worker._start_recording_session(frame, frame, "person", 0.8, None, 30.0, 3.0)
+    assert ok is True
+    assert worker.current_writer_fps == 6.0
+    assert meta_box["stream_fps_measured"] == 0.0
+    assert meta_box["writer_fps_reason"] == "rtsp_limit"
+
+
+def test_writer_fps_session_hysteresis_and_clamp():
+    worker = _worker()
+    worker._last_session_writer_fps = 10.0
+
+    held_fps, held_reason = worker._select_session_writer_fps(measured_stream_fps=10.8, detect_fps=3.0)
+    assert held_fps == 10.0
+    assert held_reason.endswith("hysteresis_hold")
+
+    clamped_fps, clamped_reason = worker._select_session_writer_fps(measured_stream_fps=25.0, detect_fps=3.0)
+    assert clamped_fps == 13.0
+    assert clamped_reason.endswith("clamped")
 
 
 def test_detection_event_summary():
