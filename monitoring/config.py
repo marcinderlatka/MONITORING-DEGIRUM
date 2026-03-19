@@ -25,6 +25,7 @@ RECORD_CLASSES = ["person", "car", "cat", "dog", "bird"]
 
 DEFAULT_MODEL = "yolov5nu_silu_coco--640x640_float_tflite_multidevice_1"
 DEFAULT_FPS = 3
+DEFAULT_DETECTION_FPS_LIMIT = 6
 DEFAULT_RTSP_FPS = 0
 DEFAULT_CONFIDENCE_THRESHOLD = 0.5
 DEFAULT_CONFIDENCE_THRESHOLD_DRAW = DEFAULT_CONFIDENCE_THRESHOLD
@@ -203,9 +204,12 @@ def _resolve_path(value: str | os.PathLike[str] | None, *, default: Path) -> Pat
 
 def fill_camera_defaults(camera: MutableMapping[str, object]) -> MutableMapping[str, object]:
     """Fill missing camera parameters with default values."""
+    has_detection_fps_limit = "detection_fps_limit" in camera
+
     defaults: Dict[str, object] = {
         "model": DEFAULT_MODEL,
         "fps": DEFAULT_FPS,
+        "detection_fps_limit": DEFAULT_DETECTION_FPS_LIMIT,
         "rtsp_fps": DEFAULT_RTSP_FPS,
         "confidence_threshold": DEFAULT_CONFIDENCE_THRESHOLD,
         "confidence_threshold_draw": DEFAULT_CONFIDENCE_THRESHOLD_DRAW,
@@ -275,6 +279,9 @@ def fill_camera_defaults(camera: MutableMapping[str, object]) -> MutableMapping[
     explicit_profile = camera.get("sensitivity_profile")
     for key, value in defaults.items():
         camera.setdefault(key, value)
+
+    if not has_detection_fps_limit:
+        camera["detection_fps_limit"] = camera.get("fps", DEFAULT_FPS)
 
     if explicit_profile is None and had_profile_inputs:
         profile_name = "custom"
@@ -458,6 +465,7 @@ __all__ = [
     "DEFAULT_ENABLE_DETECTION",
     "DEFAULT_ENABLE_RECORDING",
     "DEFAULT_FPS",
+    "DEFAULT_DETECTION_FPS_LIMIT",
     "DEFAULT_RTSP_FPS",
     "DEFAULT_SENSITIVITY_PROFILE",
     "DEFAULT_LOST_SECONDS",

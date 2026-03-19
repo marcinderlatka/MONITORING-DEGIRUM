@@ -292,6 +292,7 @@ class CameraWorker(QThread):
         self.state = PipelineState()
 
         self.fps = int(self.camera.get("fps", DEFAULT_FPS))
+        self.detection_fps_limit = float(max(1, int(self.camera.get("detection_fps_limit", self.fps))))
         self.rtsp_fps = int(self.camera.get("rtsp_fps", DEFAULT_RTSP_FPS))
         legacy_conf = float(self.camera.get("confidence_threshold", DEFAULT_CONFIDENCE_THRESHOLD))
         self.confidence_threshold_draw = float(self.camera.get("confidence_threshold_draw", legacy_conf))
@@ -604,6 +605,9 @@ class CameraWorker(QThread):
         """Apply runtime-safe camera settings without restarting worker thread."""
         legacy_conf = float(camera_config.get("confidence_threshold", self.confidence_threshold_record))
         self.set_fps(int(camera_config.get("fps", self.fps)))
+        detection_limit = camera_config.get("detection_fps_limit", camera_config.get("fps", self.fps))
+        self.detection_fps_limit = float(max(1, int(detection_limit)))
+        self.camera["detection_fps_limit"] = self.detection_fps_limit
         self.rtsp_fps = int(camera_config.get("rtsp_fps", self.rtsp_fps))
         self.camera["rtsp_fps"] = self.rtsp_fps
         self.confidence_threshold = legacy_conf
@@ -725,6 +729,13 @@ class CameraWorker(QThread):
             return False
         except Exception:
             return True
+
+    def _target_detection_fps(self) -> float:
+        detect_base = float(max(1.0, self.detection_fps_limit))
+        scaled_detect_fps = float(max(1e-3, detect_base * self.detect_fps_factor))
+        if self.recording:
+            return float(max(3.0, scaled_detect_fps))
+        return scaled_detect_fps
 
     def _compute_effective_writer_fps(self, stream_fps: float) -> float:
         return float(max(1.0, compute_effective_writer_fps(self.rtsp_fps, float(self.fps), stream_fps)))
@@ -1123,8 +1134,8 @@ class CameraWorker(QThread):
         if not run_inference:
             return None, detected, best_label, best_score, best_bbox, overlays
 
-        detect_fps = max(1e-3, self.fps * (1.0 if self.recording else self.detect_fps_factor))
-        interval = 1.0 / detect_fps
+        detect_fps = self._target_detection_fps()
+        interval = 1.0 / max(1e-3, detect_fps)
         if self.state.next_inference_due_ts <= 0:
             self.state.next_inference_due_ts = now_mono
         if now_mono < self.state.next_inference_due_ts:
@@ -1313,7 +1324,7 @@ class CameraWorker(QThread):
         telemetry = self._telemetry_payload(now)
 
         logger.info(
-            "performance camera=%s mode=%s overload=%s capture_fps=%.2f infer_fps=%.2f preview_emit_fps=%.2f ui_render_ms=%.2f queue_size=%s dropped_frames=%s cpu_percent=%.1f rss_mb=%.1f detection_interval=%.3f dropped_delta=%s",
+            "performance camera=%s mode=%s overload=%s capture_fps=%.2f infer_fps=%.2f preview_emit_fps=%.2f ui_render_ms=%.2f queue_size=%s dropped_frames=%s cpu_percent=%.1f rss_mb=%.1f detection_interval=%.3f dropped_delta=%s camera_fps_config=%.2f detection_fps_limit=%.2f",
             self.camera.get("name", self.index),
             self.preview_role,
             "on" if self.app_overload_mode else "off",
@@ -1327,6 +1338,8 @@ class CameraWorker(QThread):
             metrics["rss_mb"],
             detection_interval,
             dropped_delta,
+            float(self.fps),
+            float(self.detection_fps_limit),
         )
         app_log(
             "performance",
@@ -1349,6 +1362,8 @@ class CameraWorker(QThread):
                     "fp_proxy": f"{float(telemetry['false_positive_proxy_rate']):.3f}",
                     "avg_conf": f"{float(telemetry['avg_confidence']):.3f}",
                     "trigger_h": f"{float(telemetry['trigger_frequency_per_hour']):.2f}",
+                    "camera_fps_config": f"{float(self.fps):.2f}",
+                    "detection_fps_limit": f"{float(self.detection_fps_limit):.2f}",
                 },
                 PERFORMANCE_PARAM_LABELS,
             ),
@@ -1374,7 +1389,9 @@ class CameraWorker(QThread):
         telemetry = self._telemetry_payload(now)
         status = {
             "stream_fps": float(self.stream_fps),
-            "detect_fps": float(max(0.0, self.fps * (1.0 if self.recording else self.detect_fps_factor))),
+            "detect_fps": float(max(0.0, self._target_detection_fps())),
+            "camera_fps_config": float(self.fps),
+            "detection_fps_limit": float(self.detection_fps_limit),
             "writer_fps": float(self.current_writer_fps or self.writer_fps),
             "capture_fps": _aggregate_fps(self.state.frames_captured - self.state.metrics_frames_captured, elapsed),
             "infer_fps": _aggregate_fps(self.state.inferences_run - self.state.metrics_inferences_run, elapsed),
@@ -1451,7 +1468,7 @@ class CameraWorker(QThread):
                         self.state.next_inference_due_ts = 0.0
                         if not self._runtime_limit_logged and (self.rtsp_fps > 0 or self.fps <= 2):
                             self._runtime_limit_logged = True
-                            app_log("performance", "camera runtime limited by config", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO", details=f"rtsp_fps={self.rtsp_fps} detect_fps={self.fps}")
+                            app_log("performance", "camera runtime limited by config", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO", details=f"rtsp_fps={self.rtsp_fps} camera_fps_config={self.fps} detection_fps_limit={self.detection_fps_limit:.2f}")
 
                         video_iter = iter(degirum_tools.video_source(stream, fps=source_fps))
                         frame_retry_count = 0
@@ -1532,7 +1549,7 @@ class CameraWorker(QThread):
                                     app_log("worker", "detection became active", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO")
                                 self.detection_active = True
                                 if not self.recording and self._should_start_recording_now():
-                                    started = self._start_recording_session(raw_frame, preview_frame, best_label or "object", best_score, best_bbox, stream_fps, float(self.fps))
+                                    started = self._start_recording_session(raw_frame, preview_frame, best_label or "object", best_score, best_bbox, stream_fps, float(self._target_detection_fps()))
                                     if started:
                                         self.alert_signal.emit({
                                             "camera": self.camera["name"], "label": best_label or "object", "confidence": float(best_score),
@@ -1556,7 +1573,7 @@ class CameraWorker(QThread):
                             self._maybe_enqueue_record_frame(raw_frame, now_mono)
                             self._update_false_positive_candidate(now_mono)
                             self._maybe_emit_preview(preview_frame, overlays, now_mono)
-                            detection_interval = 1.0 / max(1e-3, self.fps * (1.0 if self.recording else self.detect_fps_factor))
+                            detection_interval = 1.0 / max(1e-3, self._target_detection_fps())
                             self._maybe_log_metrics(detection_interval)
                             self._maybe_emit_heartbeat()
 
