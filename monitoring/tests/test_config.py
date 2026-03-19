@@ -49,13 +49,24 @@ def test_config_backward_compat_threshold_mapping():
     assert updated["thumbnail_mode"] == "first_detection"
 
 
+def test_config_backward_compat_legacy_confidence_fallback_from_record_threshold():
+    from monitoring import config
+
+    camera = {"name": "Cam", "confidence_threshold_record": 0.61}
+    updated = config.fill_camera_defaults(camera)
+
+    assert updated["confidence_threshold"] == 0.61
+    assert updated["confidence_threshold_draw"] == config.DEFAULT_CONFIDENCE_THRESHOLD
+    assert updated["confidence_threshold_record"] == 0.61
+
+
 def test_fill_camera_defaults_adds_reliability_defaults():
     from monitoring import config
 
     camera = {"name": "Cam"}
     updated = config.fill_camera_defaults(camera)
 
-    assert updated["required_misses_to_end_detection"] == 1
+    assert updated["required_misses_to_end_detection"] == 3
     assert updated["min_record_seconds"] == 3
     assert updated["sensitivity_profile"] == "balanced"
     assert updated["recording_backend"] == "current"
@@ -88,9 +99,9 @@ def test_preview_role_defaults_and_config_fill():
     camera = {"name": "Cam"}
     updated = config.fill_camera_defaults(camera)
 
-    assert updated["preview_fps_main"] == 15
-    assert updated["preview_fps_grid"] == 4
-    assert updated["preview_fps_thumb"] == 3
+    assert updated["preview_fps_main"] == 12
+    assert updated["preview_fps_grid"] == 3
+    assert updated["preview_fps_thumb"] == 2
     assert updated["preview_pause_when_hidden"] is True
     assert updated["preview_main_max_width"] == 1280
     assert updated["preview_main_max_height"] == 720
@@ -100,7 +111,7 @@ def test_preview_role_defaults_and_config_fill():
     assert updated["preview_thumb_max_height"] == 180
     assert updated["camera_priority"] == "normal"
     assert "preview_channel_policies" in updated
-    assert updated["preview_channel_policies"]["grid"]["fps"] == 4.0
+    assert updated["preview_channel_policies"]["grid"]["fps"] == 3.0
 
 
 def test_overload_config_backward_compat(tmp_path):
@@ -113,7 +124,7 @@ def test_overload_config_backward_compat(tmp_path):
     assert cfg["overload_protection_enabled"] is True
     assert cfg["overload_camera_count_threshold"] == 6
     assert cfg["overload_reduce_thumb_preview_fps"] == 1
-    assert cfg["quality_performance_preset"] == "balanced"
+    assert cfg["quality_performance_preset"] == "economy_monitoring"
     assert cfg["grid_preview_quality"] == "normal"
     assert cfg["config_watchdog_enabled"] is True
     assert "log_filters" in cfg
