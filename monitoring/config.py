@@ -85,6 +85,7 @@ CAMERA_PRIORITIES = ("high", "normal", "low")
 DEFAULT_PREVIEW_FPS_GRID = 4
 DEFAULT_PREVIEW_GRID_MAX_WIDTH = 640
 DEFAULT_PREVIEW_GRID_MAX_HEIGHT = 360
+DEFAULT_GRID_PREVIEW_QUALITY = "normal"
 
 DEFAULT_OVERLOAD_PROTECTION_ENABLED = True
 DEFAULT_OVERLOAD_MIN_CAMERA_COUNT = 2
@@ -106,8 +107,8 @@ QUALITY_PERFORMANCE_PRESETS = {
         "preview_fps_thumb": 4.0,
         "preview_main_max_width": 1600,
         "preview_main_max_height": 900,
-        "preview_grid_max_width": 960,
-        "preview_grid_max_height": 540,
+        "preview_grid_max_width": 1280,
+        "preview_grid_max_height": 720,
         "preview_thumb_max_width": 384,
         "preview_thumb_max_height": 216,
     },
@@ -413,6 +414,7 @@ def load_config(path: Path | None = None) -> Dict[str, object]:
     cfg.setdefault("overload_max_queue_size", DEFAULT_OVERLOAD_MAX_QUEUE_SIZE)
     cfg.setdefault("overload_max_preview_bandwidth_mbps", DEFAULT_OVERLOAD_MAX_PREVIEW_BANDWIDTH_MBPS)
     cfg.setdefault("quality_performance_preset", DEFAULT_QUALITY_PERFORMANCE_PRESET)
+    cfg.setdefault("grid_preview_quality", DEFAULT_GRID_PREVIEW_QUALITY)
     cfg.setdefault("preview_fps_grid", DEFAULT_PREVIEW_FPS_GRID)
     cfg.setdefault("preview_grid_max_width", DEFAULT_PREVIEW_GRID_MAX_WIDTH)
     cfg.setdefault("preview_grid_max_height", DEFAULT_PREVIEW_GRID_MAX_HEIGHT)
@@ -475,6 +477,7 @@ __all__ = [
     "DEFAULT_PREVIEW_MAIN_MAX_HEIGHT",
     "DEFAULT_PREVIEW_GRID_MAX_WIDTH",
     "DEFAULT_PREVIEW_GRID_MAX_HEIGHT",
+    "DEFAULT_GRID_PREVIEW_QUALITY",
     "DEFAULT_PREVIEW_THUMB_MAX_WIDTH",
     "DEFAULT_PREVIEW_THUMB_MAX_HEIGHT",
     "DEFAULT_CAMERA_PRIORITY",
