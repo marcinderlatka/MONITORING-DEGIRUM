@@ -6,7 +6,9 @@ import json
 import os
 import time
 from pathlib import Path
+from queue import Empty, Queue
 from threading import Lock, Timer
+from threading import Event, Thread
 from typing import Iterable, List
 
 from .config import ALERTS_HISTORY_PATH, BASE_DIR, RECORDINGS_CATALOG_PATH
@@ -45,6 +47,88 @@ class _DebouncedJsonWriter:
         except Exception as exc:  # pragma: no cover - I/O errors
             app_log("error", "json write failed", source="storage", level="ERROR", details=f"path={self.path}; error={exc}")
             print("Nie udało się zapisać JSON:", exc)
+
+
+def _persist_recording_metadata_sync(meta: dict) -> None:
+    filepath = str(meta.get("filepath") or meta.get("file") or "")
+    if not filepath:
+        return
+    sidecar_path = Path(filepath + ".json")
+    sidecar_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    _RECORDINGS_CATALOG.update(dict(meta))
+
+
+class _RecordingMetadataIoWorker:
+    def __init__(self, max_retries: int = 3, base_retry_delay_s: float = 0.15) -> None:
+        self.max_retries = int(max(1, max_retries))
+        self.base_retry_delay_s = float(max(0.01, base_retry_delay_s))
+        self._queue: Queue[dict] = Queue()
+        self._stop_event = Event()
+        self._idle_event = Event()
+        self._idle_event.set()
+        self._thread = Thread(target=self._run, name="recording-metadata-io", daemon=True)
+        self._thread.start()
+
+    def submit(self, payload: dict) -> None:
+        self._idle_event.clear()
+        self._queue.put(dict(payload))
+
+    def flush(self, timeout_s: float = 8.0) -> bool:
+        deadline = time.monotonic() + max(0.1, float(timeout_s))
+        while time.monotonic() < deadline:
+            if self._queue.empty() and self._idle_event.is_set():
+                return True
+            time.sleep(0.02)
+        return bool(self._queue.empty() and self._idle_event.is_set())
+
+    def shutdown(self, timeout_s: float = 8.0) -> bool:
+        self._stop_event.set()
+        self.flush(timeout_s=timeout_s)
+        self._thread.join(timeout=max(0.1, float(timeout_s)))
+        return not self._thread.is_alive()
+
+    def _run(self) -> None:
+        while True:
+            if self._stop_event.is_set() and self._queue.empty():
+                self._idle_event.set()
+                return
+            try:
+                payload = self._queue.get(timeout=0.1)
+            except Empty:
+                self._idle_event.set()
+                continue
+            self._idle_event.clear()
+            self._persist_with_retry(payload)
+            self._queue.task_done()
+            if self._queue.empty():
+                self._idle_event.set()
+
+    def _persist_with_retry(self, payload: dict) -> None:
+        camera_name = str(payload.get("camera", ""))
+        filepath = str(payload.get("filepath") or payload.get("file") or "")
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                _persist_recording_metadata_sync(payload)
+                return
+            except Exception as exc:  # pragma: no cover - timing dependent I/O errors
+                app_log(
+                    "error",
+                    "Błąd zapisu metadanych nagrania",
+                    camera=camera_name,
+                    source="storage",
+                    level="ERROR",
+                    details=f"plik={filepath} próba={attempt}/{self.max_retries} błąd={exc}",
+                )
+                if attempt < self.max_retries:
+                    time.sleep(self.base_retry_delay_s * attempt)
+        app_log(
+            "error",
+            "Trwała awaria zapisu metadanych nagrania po ponowieniach",
+            camera=camera_name,
+            source="storage",
+            level="ERROR",
+            details=f"plik={filepath}",
+        )
 
 
 class AlertMemory:
@@ -241,6 +325,7 @@ def _load_recordings_catalog_sync(path: Path | str = RECORDINGS_CATALOG_PATH) ->
 
 
 _RECORDINGS_CATALOG = _RecordingsCatalog(RECORDINGS_CATALOG_PATH)
+_RECORDING_METADATA_IO = _RecordingMetadataIoWorker()
 
 
 def load_recordings_catalog(path: Path | str = RECORDINGS_CATALOG_PATH) -> List[dict]:
@@ -285,6 +370,10 @@ def update_recordings_catalog(entry: dict, path: Path | str = RECORDINGS_CATALOG
     _RECORDINGS_CATALOG.update(entry)
 
 
+def enqueue_recording_metadata_persist(meta: dict) -> None:
+    _RECORDING_METADATA_IO.submit(meta)
+
+
 def remove_from_recordings_catalog(paths: Iterable[str], path: Path | str = RECORDINGS_CATALOG_PATH) -> bool:
     if Path(path) != RECORDINGS_CATALOG_PATH:
         catalog_path = Path(path)
@@ -313,6 +402,7 @@ def remove_from_recordings_catalog(paths: Iterable[str], path: Path | str = RECO
 
 
 def flush_storage() -> None:
+    _RECORDING_METADATA_IO.flush()
     _RECORDINGS_CATALOG.flush()
 
 

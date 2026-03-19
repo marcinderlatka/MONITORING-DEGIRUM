@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import datetime
-import json
 import logging
 import os
 import resource
@@ -69,7 +68,7 @@ from .config import (
 from .recordings import build_recording_sidecar_metadata
 from .log_messages import PERFORMANCE_PARAM_LABELS, format_dict_multiline, msg
 from .runtime_helpers import app_log, compute_effective_writer_fps, worker_stop_timeout_details
-from .storage import update_recordings_catalog
+from .storage import enqueue_recording_metadata_persist
 
 LABEL_COLORS = {
     "person": (0, 0, 255),
@@ -813,13 +812,7 @@ class CameraWorker(QThread):
     def _save_recording_metadata(self, meta: dict) -> None:
         if not self.output_file:
             return
-        try:
-            with open(self.output_file + ".json", "w", encoding="utf-8") as handle:
-                json.dump(meta, handle, indent=2)
-        except Exception as exc:
-            logger.exception("Nie zapisano metadanych")
-            app_log("error", "Nie zapisano metadanych", camera=str(self.camera.get("name", self.index)), source="worker", level="ERROR", details=str(exc))
-        update_recordings_catalog(dict(meta))
+        enqueue_recording_metadata_persist(dict(meta))
 
     def _update_event_thumbnail(self, preview_frame: np.ndarray, best_bbox: tuple[int, int, int, int] | None, best_label: str, best_score: float) -> None:
         if not self.output_file or not best_label:
@@ -947,6 +940,7 @@ class CameraWorker(QThread):
     def _finalize_recording_session(self) -> None:
         if not self.output_file:
             return
+        finalize_started_mono = time.monotonic()
         frames_written = dropped_frames = queue_peak = 0
         if self.record_thread:
             thread_stopped = self.record_thread.stop()
@@ -984,10 +978,21 @@ class CameraWorker(QThread):
             recorder_enqueue_stride=self.recorder_enqueue_stride, recorder_degradation_level=self._recorder_degradation_level,
             writer_fps_base=self._current_writer_fps_base,
         )
+        io_enqueue_started_mono = time.monotonic()
         self._save_recording_metadata(meta)
+        io_enqueue_elapsed_ms = (time.monotonic() - io_enqueue_started_mono) * 1000.0
         app_log("worker", "event finalized", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO", details=f"scene_thumb={scene_thumb_path}")
         self.record_signal.emit("stop", self.output_file)
+        finalize_elapsed_ms = (time.monotonic() - finalize_started_mono) * 1000.0
         app_log("recording", "recording session finalized", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO", details=f"frames_written={frames_written} dropped_frames={dropped_frames} queue_peak={queue_peak}")
+        app_log(
+            "worker",
+            "czas finalizacji zdarzenia",
+            camera=str(self.camera.get("name", self.index)),
+            source="worker",
+            level="INFO",
+            details=f"finalizacja_ms={finalize_elapsed_ms:.2f} enqueue_io_ms={io_enqueue_elapsed_ms:.2f}",
+        )
         if dropped_frames > 0:
             app_log("warning", "recorder dropped frames", camera=str(self.camera.get("name", self.index)), source="worker", level="WARNING", details=f"dropped_frames={dropped_frames}")
         short_clip = duration <= max(4.0, float(self.min_record_seconds) + 1.0)
