@@ -2615,6 +2615,15 @@ QToolButton:focus { outline: none; }
     def _on_worker_heartbeat(self, camera_name: str, status: dict):
         payload = dict(status or {})
         cam_name = str(camera_name)
+        payload.setdefault("inference_ms", 0.0)
+        payload.setdefault("average_inference_ms", 0.0)
+        payload.setdefault("preview_processing_ms", 0.0)
+        payload.setdefault("recording_enqueue_ms", 0.0)
+        payload.setdefault("recording_frames_written", 0)
+        payload.setdefault("recording_queue_size", int(payload.get("queue_size", 0) or 0))
+        payload.setdefault("recording_queue_peak", 0)
+        payload.setdefault("dropped_frames", 0)
+        payload.setdefault("overload_level", int(self.overload_level))
         payload["ui_render_ms"] = float(self._ui_render_ms_by_camera.get(cam_name, 0.0))
         stage_stats = self._ui_render_stage_ms_by_camera.get(cam_name, {})
         payload["ui_thumb_ms"] = float(stage_stats.get("thumb", 0.0))
@@ -2645,10 +2654,15 @@ QToolButton:focus { outline: none; }
                     {
                         "mode": mode,
                         "overload": overload,
+                        "overload_level": int(payload.get("overload_level", self.overload_level)),
                         "capture_fps": f"{float(payload.get('capture_fps', 0.0)):.2f}",
                         "infer_fps": f"{float(payload.get('infer_fps', 0.0)):.2f}",
                         "preview_emit_fps": f"{float(payload.get('preview_emit_fps', 0.0)):.2f}",
                         "preview_target_fps": f"{float(payload.get('preview_target_fps', 0.0)):.2f}",
+                        "inference_ms": f"{float(payload.get('inference_ms', payload.get('last_inference_ms', 0.0))):.2f}",
+                        "average_inference_ms": f"{float(payload.get('average_inference_ms', 0.0)):.2f}",
+                        "preview_processing_ms": f"{float(payload.get('preview_processing_ms', 0.0)):.2f}",
+                        "recording_enqueue_ms": f"{float(payload.get('recording_enqueue_ms', 0.0)):.2f}",
                         "ui_render_ms": f"{float(payload.get('ui_render_ms', 0.0)):.2f}",
                         "thumb_ms": f"{float(payload.get('ui_thumb_ms', 0.0)):.2f}",
                         "grid_ms": f"{float(payload.get('ui_grid_ms', 0.0)):.2f}",
@@ -2656,6 +2670,9 @@ QToolButton:focus { outline: none; }
                         "grid_fps": f"{float(payload.get('ui_grid_fps', 0.0)):.2f}/{float(payload.get('ui_grid_target_fps', 0.0)):.2f}",
                         "main_ms": f"{float(payload.get('ui_main_ms', 0.0)):.2f}",
                         "queue_size": int(payload.get("queue_size", 0)),
+                        "recording_queue_size": int(payload.get("recording_queue_size", payload.get("queue_size", 0))),
+                        "recording_queue_peak": int(payload.get("recording_queue_peak", 0)),
+                        "recording_frames_written": int(payload.get("recording_frames_written", 0)),
                         "dropped_frames": int(payload.get("dropped_frames", 0)),
                         "cpu_percent": f"{float(payload.get('cpu_percent', 0.0)):.1f}",
                         "rss_mb": f"{float(payload.get('rss_mb', 0.0)):.1f}",
