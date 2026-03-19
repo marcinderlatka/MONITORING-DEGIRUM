@@ -9,17 +9,21 @@ from monitoring.runtime_helpers import evaluate_overload_transition, overload_le
 def test_overload_level_profiles_match_multilevel_policy():
     level1 = overload_level_profile(1)
     assert level1.performance_log_interval_s > overload_level_profile(0).performance_log_interval_s
-    assert level1.thumb_preview_fps_factor == 1.0
+    assert level1.thumb_preview_fps_factor < 1.0
+    assert level1.grid_preview_fps_factor < 1.0
+    assert level1.main_preview_fps_factor == 1.0
     assert level1.detect_fps_factor == 1.0
 
     level2 = overload_level_profile(2)
-    assert level2.thumb_preview_fps_factor < 1.0
+    assert level2.main_preview_fps_factor < 1.0
+    assert level2.overlay_stride >= 2
     assert level2.disable_nonessential_overlays is True
     assert level2.detect_fps_factor == 1.0
 
     level3 = overload_level_profile(3)
     assert level3.detect_fps_factor < 1.0
     assert level3.thumb_preview_fps_factor <= level2.thumb_preview_fps_factor
+    assert level3.grid_preview_fps_factor <= level2.grid_preview_fps_factor
 
 
 def test_overload_hysteresis_uses_different_enter_and_exit_thresholds():

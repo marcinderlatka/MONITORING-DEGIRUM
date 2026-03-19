@@ -234,10 +234,11 @@ def test_telemetry_payload_contains_calibration_stats():
 
 
 def test_effective_preview_emit_policy_for_roles():
-    main_i = _preview_interval_for_role("main", 15, 3, True)
-    thumb_i = _preview_interval_for_role("thumb", 15, 3, True)
-    hidden_i = _preview_interval_for_role("hidden", 15, 3, True)
-    assert main_i < thumb_i
+    main_i = _preview_interval_for_role("main", 15, 8, 3, True)
+    grid_i = _preview_interval_for_role("grid", 15, 8, 3, True)
+    thumb_i = _preview_interval_for_role("thumb", 15, 8, 3, True)
+    hidden_i = _preview_interval_for_role("hidden", 15, 8, 3, True)
+    assert main_i < grid_i < thumb_i
     assert hidden_i == float("inf")
 
 
@@ -252,6 +253,16 @@ def test_prerecord_buffer_basis_helper():
     worker.rtsp_fps = 0
     worker.stream_fps = 7.5
     assert worker._get_prerecord_buffer_fps_basis() == 7.5
+
+
+
+def test_grid_preview_role_is_accepted_and_has_target_fps():
+    worker = _worker()
+    worker.set_preview_role("grid")
+    worker.preview_fps_grid = 7.0
+
+    assert worker.preview_role == "grid"
+    assert worker._effective_preview_target_fps() == 7.0
 
 
 def test_hidden_preview_role_does_not_break_recording_state():

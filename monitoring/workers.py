@@ -178,10 +178,12 @@ def _scale_bbox(bbox: list[float] | tuple[float, ...], frame_shape: tuple[int, .
     return int(max(0, x1)), int(max(0, y1)), int(min(w - 1, x2)), int(min(h - 1, y2))
 
 
-def _preview_interval_for_role(role: str, main_fps: float, thumb_fps: float, pause_hidden: bool) -> float:
+def _preview_interval_for_role(role: str, main_fps: float, grid_fps: float, thumb_fps: float, pause_hidden: bool) -> float:
     role_l = (role or "thumb").lower()
     if role_l == "main":
         return 1.0 / max(1e-3, main_fps)
+    if role_l == "grid":
+        return 1.0 / max(1e-3, max(0.5, grid_fps))
     if role_l == "hidden" and pause_hidden:
         return float("inf")
     basis = max(0.5, thumb_fps)
@@ -509,13 +511,14 @@ class CameraWorker(QThread):
         self._worker_slot_key = None
 
     def set_preview_role(self, role: str) -> None:
-        self.preview_role = role if role in {"main", "thumb", "hidden"} else "thumb"
+        self.preview_role = role if role in {"main", "grid", "thumb", "hidden"} else "thumb"
 
     def set_overload_state(
         self,
         overload_level: int,
         detect_fps_factor: float | None = None,
         thumb_preview_fps: float | None = None,
+        grid_preview_fps: float | None = None,
         disable_overlays: bool | None = None,
         overlay_stride: int | None = None,
         preview_resolution_factor: float | None = None,
@@ -531,6 +534,8 @@ class CameraWorker(QThread):
             self.detect_fps_factor = 1.0
         if thumb_preview_fps is not None and thumb_preview_fps > 0:
             self.preview_fps_thumb = float(thumb_preview_fps)
+        if grid_preview_fps is not None and grid_preview_fps > 0:
+            self.preview_fps_grid = float(grid_preview_fps)
         if disable_overlays is not None:
             self.overload_disable_nonessential_overlays = bool(disable_overlays)
         if overlay_stride is not None:
@@ -1280,8 +1285,20 @@ class CameraWorker(QThread):
         self._preview_resize_cache_frame = resized
         return resized
 
+    def _effective_preview_target_fps(self) -> float:
+        role = str(self.preview_role or "thumb").lower()
+        if role == "main":
+            return float(max(0.5, self.preview_fps_main))
+        if role == "grid":
+            return float(max(0.5, self.preview_fps_grid))
+        if role == "hidden":
+            if self.preview_pause_when_hidden:
+                return 0.0
+            return float(min(max(0.5, self.preview_fps_thumb), 1.0))
+        return float(max(0.5, self.preview_fps_thumb))
+
     def _maybe_emit_preview(self, preview_frame: np.ndarray, overlays: list[tuple[int, int, int, int, str, float, tuple[int, int, int]]], now_mono: float) -> None:
-        interval = _preview_interval_for_role(self.preview_role, self.preview_fps_main, self.preview_fps_thumb, self.preview_pause_when_hidden)
+        interval = _preview_interval_for_role(self.preview_role, self.preview_fps_main, self.preview_fps_grid, self.preview_fps_thumb, self.preview_pause_when_hidden)
         if interval == float("inf"):
             self.state.preview_frames_dropped_total += 1
             return
@@ -1290,7 +1307,7 @@ class CameraWorker(QThread):
             self.state.preview_frame_skip_counter += 1
             self.state.preview_frames_dropped_total += 1
             return
-        if self.preview_role in {"thumb", "hidden"} and self.state.preview_frame_skip_counter < (2 if self.app_overload_mode else 1):
+        if self.preview_role in {"grid", "thumb", "hidden"} and self.state.preview_frame_skip_counter < (2 if self.app_overload_mode else 1):
             self.state.preview_frame_skip_counter += 1
             self.state.preview_frames_dropped_total += 1
             return
@@ -1302,14 +1319,18 @@ class CameraWorker(QThread):
             and not (self.app_overload_mode and self.overload_disable_nonessential_overlays and not self.recording)
             and ((self.state.frames_emitted % max(1, self.overlay_stride)) == 0)
         )
-        is_thumb_like_role = self.preview_role in {"thumb", "hidden"}
+        is_thumb_like_role = self.preview_role in {"grid", "thumb", "hidden"}
         target_main_w = int(max(1, round(self.preview_main_max_width * self.preview_resolution_factor)))
         target_main_h = int(max(1, round(self.preview_main_max_height * self.preview_resolution_factor)))
+        target_grid_w = int(max(1, round(self.preview_grid_max_width * self.preview_resolution_factor)))
+        target_grid_h = int(max(1, round(self.preview_grid_max_height * self.preview_resolution_factor)))
         target_thumb_w = int(max(1, round(self.preview_thumb_max_width * self.preview_resolution_factor)))
         target_thumb_h = int(max(1, round(self.preview_thumb_max_height * self.preview_resolution_factor)))
 
         if is_thumb_like_role and not should_draw:
-            thumb_emit_frame = self._resize_for_preview_cached(preview_frame, target_thumb_w, target_thumb_h)
+            emit_w = target_grid_w if self.preview_role == "grid" else target_thumb_w
+            emit_h = target_grid_h if self.preview_role == "grid" else target_thumb_h
+            thumb_emit_frame = self._resize_for_preview_cached(preview_frame, emit_w, emit_h)
             self.main_preview_signal.emit(thumb_emit_frame, self.index)
             self.thumb_preview_signal.emit(thumb_emit_frame, self.index)
             self.state.last_preview_emit_ts = now_mono
@@ -1324,7 +1345,9 @@ class CameraWorker(QThread):
                 cv2.putText(main_source_frame, f"{label}: {confidence * 100:.1f}%", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
         main_emit_frame = self._resize_for_preview_cached(main_source_frame, target_main_w, target_main_h)
-        thumb_emit_frame = self._resize_for_preview_cached(main_source_frame, target_thumb_w, target_thumb_h)
+        thumb_emit_w = target_grid_w if self.preview_role == "grid" else target_thumb_w
+        thumb_emit_h = target_grid_h if self.preview_role == "grid" else target_thumb_h
+        thumb_emit_frame = self._resize_for_preview_cached(main_source_frame, thumb_emit_w, thumb_emit_h)
         if is_thumb_like_role:
             main_emit_frame = thumb_emit_frame
 
@@ -1379,10 +1402,11 @@ class CameraWorker(QThread):
         telemetry = self._telemetry_payload(now)
 
         logger.info(
-            "performance camera=%s mode=%s overload=%s capture_fps=%.2f infer_fps=%.2f preview_emit_fps=%.2f ui_render_ms=%.2f queue_size=%s dropped_frames=%s cpu_percent=%.1f rss_mb=%.1f detection_interval=%.3f dropped_delta=%s camera_fps_config=%.2f detection_fps_limit=%.2f",
+            "performance camera=%s mode=%s overload=%s preview_target_fps=%.2f capture_fps=%.2f infer_fps=%.2f preview_emit_fps=%.2f ui_render_ms=%.2f queue_size=%s dropped_frames=%s cpu_percent=%.1f rss_mb=%.1f detection_interval=%.3f dropped_delta=%s camera_fps_config=%.2f detection_fps_limit=%.2f",
             self.camera.get("name", self.index),
             self.preview_role,
             "on" if self.app_overload_mode else "off",
+            self._effective_preview_target_fps(),
             metrics["capture_fps"],
             metrics["infer_fps"],
             metrics["preview_emit_fps"],
@@ -1409,6 +1433,7 @@ class CameraWorker(QThread):
                     "capture_fps": f"{float(metrics['capture_fps']):.2f}",
                     "infer_fps": f"{float(metrics['infer_fps']):.2f}",
                     "preview_emit_fps": f"{float(metrics['preview_emit_fps']):.2f}",
+                    "preview_target_fps": f"{float(self._effective_preview_target_fps()):.2f}",
                     "ui_render_ms": f"{float(metrics['ui_render_ms']):.2f}",
                     "queue_size": int(metrics["queue_size"]),
                     "dropped_frames": int(metrics["dropped_frames"]),
@@ -1451,6 +1476,7 @@ class CameraWorker(QThread):
             "capture_fps": _aggregate_fps(self.state.frames_captured - self.state.metrics_frames_captured, elapsed),
             "infer_fps": _aggregate_fps(self.state.inferences_run - self.state.metrics_inferences_run, elapsed),
             "preview_emit_fps": _aggregate_fps(self.state.frames_emitted - self.state.metrics_frames_emitted, elapsed),
+            "preview_target_fps": float(self._effective_preview_target_fps()),
             "ui_render_ms": 0.0,
             "queue_size": int(queue_size),
             "dropped_frames": int(dropped),
