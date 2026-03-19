@@ -109,6 +109,7 @@ class PipelineState:
     metrics_inferences_run: int = 0
     metrics_frames_emitted: int = 0
     metrics_dropped_frames: int = 0
+    metrics_frame_copies: int = 0
     metrics_last_cpu_process_ts: float = 0.0
     metrics_last_cpu_wall_ts: float = 0.0
     metrics_last_sample_ts: float = 0.0
@@ -564,6 +565,7 @@ class CameraWorker(QThread):
         self._inference_ms_total = 0.0
         self.preview_processing_ms = 0.0
         self.recording_enqueue_ms = 0.0
+        self.frame_copies_total = 0
         self._preview_resize_cache_key: tuple[int, int, int, int, int] | None = None
         self._preview_resize_cache_frame: np.ndarray | None = None
         self.last_input_size: tuple[int, int] | None = None
@@ -1440,9 +1442,8 @@ class CameraWorker(QThread):
         self._stream_fps_window.append(now_mono)
         self._get_effective_stream_fps()
         raw_frame = frame
-        preview_frame = frame
         self.prerecord_buffer.append(raw_frame)
-        return raw_frame, preview_frame
+        return raw_frame, raw_frame
 
     def _maybe_run_inference(self, raw_frame: np.ndarray, now_mono: float) -> tuple[Any | None, bool, str, float, tuple[int, int, int, int] | None, list[tuple[int, int, int, int, str, float, tuple[int, int, int]]]]:
         detected = False
@@ -1649,6 +1650,7 @@ class CameraWorker(QThread):
         main_source_frame = preview_frame
         if should_draw:
             main_source_frame = preview_frame.copy()
+            self.frame_copies_total += 1
             for x1, y1, x2, y2, label, confidence, color in overlays:
                 cv2.rectangle(main_source_frame, (x1, y1), (x2, y2), color, 2)
                 cv2.putText(main_source_frame, f"{label}: {confidence * 100:.1f}%", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
@@ -1707,6 +1709,7 @@ class CameraWorker(QThread):
         queue_peak = self.record_thread.queue_peak if self.record_thread else 0
         frames_written = self.record_thread.frames_written if self.record_thread else 0
         dropped_delta = _dropped_frames_delta(dropped_total, self.state.metrics_dropped_frames)
+        frame_copies_delta = int(max(0, int(self.frame_copies_total) - int(self.state.metrics_frame_copies)))
 
         metrics = _build_metrics_payload(
             capture_fps=_aggregate_fps(self.state.frames_captured - self.state.metrics_frames_captured, elapsed),
@@ -1721,7 +1724,7 @@ class CameraWorker(QThread):
         telemetry = self._telemetry_payload(now)
 
         logger.info(
-            "performance camera=%s mode=%s overload=%s overload_level=%s preview_target_fps=%.2f capture_fps=%.2f infer_fps=%.2f preview_emit_fps=%.2f ui_render_ms=%.2f queue_size=%s queue_peak=%s frames_written=%s dropped_frames=%s enqueue_stride=%s cpu_percent=%.1f rss_mb=%.1f detection_interval=%.3f dropped_delta=%s camera_fps_config=%.2f detection_fps_limit=%.2f metrics_snapshot=%s",
+            "performance camera=%s mode=%s overload=%s overload_level=%s preview_target_fps=%.2f capture_fps=%.2f infer_fps=%.2f preview_emit_fps=%.2f ui_render_ms=%.2f queue_size=%s queue_peak=%s frames_written=%s dropped_frames=%s enqueue_stride=%s cpu_percent=%.1f rss_mb=%.1f detection_interval=%.3f dropped_delta=%s frame_copies_total=%s frame_copies_delta=%s camera_fps_config=%.2f detection_fps_limit=%.2f metrics_snapshot=%s",
             self.camera.get("name", self.index),
             self.preview_role,
             "on" if self.app_overload_mode else "off",
@@ -1740,6 +1743,8 @@ class CameraWorker(QThread):
             metrics["rss_mb"],
             detection_interval,
             dropped_delta,
+            int(self.frame_copies_total),
+            frame_copies_delta,
             float(self.fps),
             float(self.detection_fps_limit),
             {
@@ -1756,6 +1761,8 @@ class CameraWorker(QThread):
                 "preview_emit_fps": float(metrics["preview_emit_fps"]),
                 "cpu_percent": float(metrics["cpu_percent"]),
                 "rss_mb": float(metrics["rss_mb"]),
+                "frame_copies_total": int(self.frame_copies_total),
+                "frame_copies_delta": int(frame_copies_delta),
             },
         )
         app_log(
@@ -1784,6 +1791,8 @@ class CameraWorker(QThread):
                     "recording_frames_written": int(frames_written),
                     "enqueue_stride": int(self.recorder_enqueue_stride),
                     "dropped_frames": int(metrics["dropped_frames"]),
+                    "frame_copies_total": int(self.frame_copies_total),
+                    "frame_copies_delta": int(frame_copies_delta),
                     "cpu_percent": f"{float(metrics['cpu_percent']):.1f}",
                     "rss_mb": f"{float(metrics['rss_mb']):.1f}",
                     "fp_proxy": f"{float(telemetry['false_positive_proxy_rate']):.3f}",
@@ -1801,6 +1810,7 @@ class CameraWorker(QThread):
         self.state.metrics_inferences_run = self.state.inferences_run
         self.state.metrics_frames_emitted = self.state.frames_emitted
         self.state.metrics_dropped_frames = int(dropped_total)
+        self.state.metrics_frame_copies = int(self.frame_copies_total)
         self.state.last_metrics_log_ts = now
 
     def _maybe_emit_heartbeat(self) -> None:
