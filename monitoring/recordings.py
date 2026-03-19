@@ -228,6 +228,8 @@ def build_recording_sidecar_metadata(
     stream_fps_measured: float = 0.0,
     writer_fps_selected: float = 0.0,
     writer_fps_reason: str = "",
+    writer_backend: str = "current",
+    ffmpeg_exit_code: int | None = None,
     alert_thumb: str = "",
     scene_thumb: str = "",
 ) -> Dict[str, object]:
@@ -281,6 +283,8 @@ def build_recording_sidecar_metadata(
         "stream_fps_measured": float(stream_fps_measured),
         "writer_fps_selected": float(writer_fps_selected),
         "writer_fps_reason": str(writer_fps_reason),
+        "writer_backend": str(writer_backend),
+        "ffmpeg_exit_code": ffmpeg_exit_code if ffmpeg_exit_code is None else int(ffmpeg_exit_code),
     }
 
 

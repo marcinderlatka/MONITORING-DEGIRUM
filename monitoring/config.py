@@ -40,6 +40,7 @@ DEFAULT_POST_SECONDS = 5
 DEFAULT_LOST_SECONDS = 10
 DEFAULT_THUMBNAIL_MODE = "first_detection"
 DEFAULT_RECORD_START_MODE = "detection_first"
+DEFAULT_RECORDING_BACKEND = "current"
 DEFAULT_REQUIRED_HITS_TO_START_RECORDING = 1
 DEFAULT_REQUIRED_MISSES_TO_END_DETECTION = 1
 DEFAULT_MIN_RECORD_SECONDS = 3
@@ -227,6 +228,7 @@ def fill_camera_defaults(camera: MutableMapping[str, object]) -> MutableMapping[
         "lost_seconds": DEFAULT_LOST_SECONDS,
         "thumbnail_mode": DEFAULT_THUMBNAIL_MODE,
         "record_start_mode": DEFAULT_RECORD_START_MODE,
+        "recording_backend": DEFAULT_RECORDING_BACKEND,
         "required_hits_to_start_recording": DEFAULT_REQUIRED_HITS_TO_START_RECORDING,
         "required_misses_to_end_detection": DEFAULT_REQUIRED_MISSES_TO_END_DETECTION,
         "min_record_seconds": DEFAULT_MIN_RECORD_SECONDS,
@@ -300,6 +302,8 @@ def fill_camera_defaults(camera: MutableMapping[str, object]) -> MutableMapping[
     camera["record_path"] = str(record_path)
     camera_priority = str(camera.get("camera_priority", DEFAULT_CAMERA_PRIORITY)).lower()
     camera["camera_priority"] = camera_priority if camera_priority in CAMERA_PRIORITIES else DEFAULT_CAMERA_PRIORITY
+    recording_backend = str(camera.get("recording_backend", DEFAULT_RECORDING_BACKEND)).lower()
+    camera["recording_backend"] = recording_backend if recording_backend in {"current", "ffmpeg"} else DEFAULT_RECORDING_BACKEND
     camera.setdefault(
         "preview_channel_policies",
         {
@@ -476,6 +480,7 @@ __all__ = [
     "DEFAULT_PRE_SECONDS",
     "DEFAULT_RECORD_PATH",
     "DEFAULT_RECORD_START_MODE",
+    "DEFAULT_RECORDING_BACKEND",
     "DEFAULT_REQUIRED_HITS_TO_START_RECORDING",
     "DEFAULT_REQUIRED_MISSES_TO_END_DETECTION",
     "DEFAULT_MIN_RECORD_SECONDS",

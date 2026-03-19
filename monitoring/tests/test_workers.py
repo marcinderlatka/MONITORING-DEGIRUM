@@ -184,6 +184,36 @@ def test_start_recording_fallback_when_stream_measurement_missing(monkeypatch):
     assert meta_box["writer_fps_reason"] == "rtsp_limit"
 
 
+def test_start_recording_uses_ffmpeg_backend_when_configured(monkeypatch):
+    worker = CameraWorker(camera={"name": "Cam", "rtsp": "rtsp://x", "recording_backend": "ffmpeg"}, model=_DummyModel(), index=0)
+    worker.enable_recording = True
+    frame = np.zeros((12, 12, 3), dtype=np.uint8)
+    meta_box: dict[str, object] = {}
+
+    class DummyThread:
+        def __init__(self, *_a, **kwargs):
+            self.frames_written = 0
+            self.dropped_frames = 0
+            self.queue_peak = 0
+            backend = kwargs["backend"]
+            self.ffmpeg_exit_code = getattr(backend, "ffmpeg_exit_code", None)
+        def start(self):
+            return None
+        def write(self, _frame):
+            return None
+        def stop(self):
+            return True
+
+    monkeypatch.setattr("monitoring.workers.RecordingThread", DummyThread)
+    monkeypatch.setattr(worker, "_update_event_thumbnail", lambda *_a, **_k: None)
+    monkeypatch.setattr(worker, "_save_recording_metadata", lambda meta: meta_box.update(meta))
+
+    ok = worker._start_recording_session(frame, frame, "person", 0.8, None, 30.0, 3.0)
+    assert ok is True
+    assert worker.current_recording_backend == "ffmpeg"
+    assert meta_box["writer_backend"] == "ffmpeg"
+
+
 def test_writer_fps_session_hysteresis_and_clamp():
     worker = _worker()
     worker._last_session_writer_fps = 10.0
