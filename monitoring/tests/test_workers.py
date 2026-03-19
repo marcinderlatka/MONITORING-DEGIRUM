@@ -77,6 +77,7 @@ from monitoring.workers import (
     _dropped_frames_delta,
     _preview_interval_for_role,
 )
+from monitoring.recording_backends import FFmpegPipeBackend
 
 
 class _DummyModel:
@@ -212,6 +213,39 @@ def test_start_recording_uses_ffmpeg_backend_when_configured(monkeypatch):
     assert ok is True
     assert worker.current_recording_backend == "ffmpeg"
     assert meta_box["writer_backend"] == "ffmpeg"
+
+
+def test_ffmpeg_backend_uses_throughput_profile_for_multi_camera_default():
+    previous = dict(CameraWorker._active_workers_by_camera)
+    CameraWorker._active_workers_by_camera = {"rtsp:a": 0, "rtsp:b": 1}
+    try:
+        worker = CameraWorker(
+            camera={"name": "Cam", "rtsp": "rtsp://x", "recording_backend": "ffmpeg"},
+            model=_DummyModel(),
+            index=0,
+        )
+        backend = worker._create_recording_backend("/tmp/out.mp4", 64, 48, 8.0)
+        assert isinstance(backend, FFmpegPipeBackend)
+        assert backend.profile == "throughput"
+    finally:
+        CameraWorker._active_workers_by_camera = previous
+
+
+def test_ffmpeg_codec_falls_back_to_x264_when_x265_conditions_not_met():
+    worker = CameraWorker(
+        camera={"name": "Cam", "rtsp": "rtsp://x", "recording_backend": "ffmpeg", "ffmpeg_codec": "libx265"},
+        model=_DummyModel(),
+        index=0,
+    )
+    previous = set(CameraWorker._active_recording_workers)
+    try:
+        worker.state.last_cpu_percent = 75.0
+        CameraWorker._active_recording_workers = {0, 1, 2}
+        backend = worker._create_recording_backend("/tmp/out.mp4", 64, 48, 8.0)
+        assert isinstance(backend, FFmpegPipeBackend)
+        assert backend.codec == "libx264"
+    finally:
+        CameraWorker._active_recording_workers = previous
 
 
 def test_writer_fps_session_hysteresis_and_clamp():
