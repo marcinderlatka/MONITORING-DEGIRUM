@@ -483,6 +483,7 @@ class CameraWorker(QThread):
         self._worker_slot_key: str | None = None
         self._prerecord_buffer_basis_fps = 0.0
         self._prerecord_force_synced_for_stream = False
+        self._prerecord_pending_runtime_sync = False
         now_mono = time.monotonic()
         self.state.metrics_window_started_ts = now_mono
         self.state.metrics_last_cpu_wall_ts = now_mono
@@ -771,6 +772,7 @@ class CameraWorker(QThread):
         os.makedirs(self.output_dir, exist_ok=True)
 
         self._sync_prerecord_buffer(force=True)
+        self._prerecord_pending_runtime_sync = True
         self.camera.update(camera_config)
 
     def _is_within_schedule(self) -> bool:
@@ -791,10 +793,13 @@ class CameraWorker(QThread):
     def _target_detection_fps(self) -> float:
         detect_base = float(max(1.0, self.detection_fps_limit))
         scaled_detect_fps = float(max(1e-3, detect_base * self.detect_fps_factor))
-        if self.preview_role == "main" or self.camera_priority == "high":
+        is_priority_camera = self.preview_role == "main" or self.camera_priority == "high" or self.recording
+        if is_priority_camera:
             scaled_detect_fps = float(max(detect_base, scaled_detect_fps))
         if self.recording:
             return float(max(4.0, scaled_detect_fps))
+        if not is_priority_camera and self.app_overload_mode and self.overload_level >= 3:
+            return float(max(2.0, scaled_detect_fps * 0.8))
         return scaled_detect_fps
 
     def _compute_effective_writer_fps(self, stream_fps: float) -> float:
@@ -911,7 +916,9 @@ class CameraWorker(QThread):
         backend_name = str(self.camera.get("recording_backend", DEFAULT_RECORDING_BACKEND)).lower()
         if backend_name == "ffmpeg":
             ffmpeg_codec = str(self.camera.get("ffmpeg_codec", "libx264"))
-            ffmpeg_preset = str(self.camera.get("ffmpeg_preset", "veryfast"))
+            ffmpeg_preset_profile = str(self.camera.get("ffmpeg_preset_profile", "balanced")).lower()
+            preset_default = "ultrafast" if ffmpeg_preset_profile == "ultrafast_test" else "superfast"
+            ffmpeg_preset = str(self.camera.get("ffmpeg_preset", preset_default))
             ffmpeg_tune = str(self.camera.get("ffmpeg_tune", "zerolatency"))
             ffmpeg_movflags = str(self.camera.get("ffmpeg_movflags", "+faststart"))
             ffmpeg_crf_raw = self.camera.get("ffmpeg_crf", 23)
@@ -1387,7 +1394,10 @@ class CameraWorker(QThread):
             self.state.preview_frames_dropped_total += 1
             self.preview_processing_ms = max(0.0, (time.monotonic() - preview_start) * 1000.0)
             return
-        if self.preview_role in {"grid", "thumb", "hidden"} and self.state.preview_frame_skip_counter < (2 if self.app_overload_mode else 1):
+        skip_budget = 2 if self.app_overload_mode else 1
+        if self.recording and self.preview_role in {"grid", "thumb"}:
+            skip_budget = max(1, skip_budget - 1)
+        if self.preview_role in {"grid", "thumb", "hidden"} and self.state.preview_frame_skip_counter < skip_budget:
             self.state.preview_frame_skip_counter += 1
             self.state.preview_frames_dropped_total += 1
             self.preview_processing_ms = max(0.0, (time.monotonic() - preview_start) * 1000.0)
@@ -1431,7 +1441,9 @@ class CameraWorker(QThread):
         thumb_emit_frame = self._resize_for_preview(main_source_frame, thumb_emit_w, thumb_emit_h)
         if self.preview_role == "main":
             self.main_preview_signal.emit(main_emit_frame, self.index)
-        self.thumb_preview_signal.emit(thumb_emit_frame, self.index)
+        emit_thumb_for_main = self.preview_role != "main" or self.recording or ((self.state.frames_emitted % 3) == 0)
+        if emit_thumb_for_main:
+            self.thumb_preview_signal.emit(thumb_emit_frame, self.index)
         self.state.last_preview_emit_ts = now_mono
         self.state.frames_emitted += 1
         self.preview_processing_ms = max(0.0, (time.monotonic() - preview_start) * 1000.0)
@@ -1487,7 +1499,7 @@ class CameraWorker(QThread):
         telemetry = self._telemetry_payload(now)
 
         logger.info(
-            "performance camera=%s mode=%s overload=%s overload_level=%s preview_target_fps=%.2f capture_fps=%.2f infer_fps=%.2f preview_emit_fps=%.2f ui_render_ms=%.2f queue_size=%s dropped_frames=%s cpu_percent=%.1f rss_mb=%.1f detection_interval=%.3f dropped_delta=%s camera_fps_config=%.2f detection_fps_limit=%.2f metrics_snapshot=%s",
+            "performance camera=%s mode=%s overload=%s overload_level=%s preview_target_fps=%.2f capture_fps=%.2f infer_fps=%.2f preview_emit_fps=%.2f ui_render_ms=%.2f queue_size=%s queue_peak=%s frames_written=%s dropped_frames=%s enqueue_stride=%s cpu_percent=%.1f rss_mb=%.1f detection_interval=%.3f dropped_delta=%s camera_fps_config=%.2f detection_fps_limit=%.2f metrics_snapshot=%s",
             self.camera.get("name", self.index),
             self.preview_role,
             "on" if self.app_overload_mode else "off",
@@ -1498,7 +1510,10 @@ class CameraWorker(QThread):
             metrics["preview_emit_fps"],
             metrics["ui_render_ms"],
             metrics["queue_size"],
+            queue_peak,
+            frames_written,
             metrics["dropped_frames"],
+            int(self.recorder_enqueue_stride),
             metrics["cpu_percent"],
             metrics["rss_mb"],
             detection_interval,
@@ -1545,6 +1560,7 @@ class CameraWorker(QThread):
                     "recording_queue_size": int(queue_size),
                     "recording_queue_peak": int(queue_peak),
                     "recording_frames_written": int(frames_written),
+                    "enqueue_stride": int(self.recorder_enqueue_stride),
                     "dropped_frames": int(metrics["dropped_frames"]),
                     "cpu_percent": f"{float(metrics['cpu_percent']):.1f}",
                     "rss_mb": f"{float(metrics['rss_mb']):.1f}",
@@ -1599,6 +1615,7 @@ class CameraWorker(QThread):
             "recording_frames_written": int(frames_written),
             "recording_queue_size": int(queue_size),
             "recording_queue_peak": int(queue_peak),
+            "enqueue_stride": int(self.recorder_enqueue_stride),
             "cpu_percent": float(cpu_percent),
             "rss_mb": float(rss_mb),
             "cpu_sample_age_ms": float(cpu_sample_age_ms),
@@ -1719,6 +1736,10 @@ class CameraWorker(QThread):
                             if not self._prerecord_force_synced_for_stream and (now_mono - self.state.stream_start_ts) >= 2.5:
                                 self._sync_prerecord_buffer(force=True)
                                 self._prerecord_force_synced_for_stream = True
+                            if self._prerecord_pending_runtime_sync and len(self._stream_fps_window) >= 20 and (now_mono - self.state.stream_start_ts) >= 3.0:
+                                # Runtime config updates should be reflected only after stream cadence stabilizes.
+                                self._sync_prerecord_buffer(force=True)
+                                self._prerecord_pending_runtime_sync = False
                             if now_mono - self.last_frame_ts > self.stream_stall_seconds and self.last_frame_ts > 0:
                                 self.last_stream_reset_ts = now_mono
                                 self.error_counter += 1

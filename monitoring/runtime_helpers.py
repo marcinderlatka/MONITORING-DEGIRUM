@@ -80,21 +80,41 @@ def stabilized_stream_fps(
     min_samples: int = 5,
     min_window_seconds: float = 0.0,
 ) -> float:
-    """Return a robust stream FPS estimate based on trimmed median."""
+    """Return a robust stream FPS estimate based on trimmed/weighted median."""
     values = [float(v) for v in samples if float(v) > 0.0]
     if len(values) < max(1, int(min_samples)):
         return float(max(0.0, fallback))
-    _ = float(min_window_seconds)
+    if min_window_seconds > 0:
+        approx_window_s = sum(1.0 / max(1e-6, v) for v in values)
+        if approx_window_s < float(min_window_seconds):
+            return float(max(0.0, fallback))
     if len(values) < 5:
         return float(max(0.0, fallback))
     values.sort()
     trim = max(0, int(len(values) * 0.1))
     core = values[trim: len(values) - trim] if (len(values) - (2 * trim)) >= 3 else values
+    if not core:
+        return float(max(0.0, fallback))
+    if len(core) >= 7:
+        q1 = core[len(core) // 4]
+        q3 = core[(len(core) * 3) // 4]
+        iqr = max(1e-6, q3 - q1)
+        low = q1 - 1.5 * iqr
+        high = q3 + 1.5 * iqr
+        clipped = [v for v in core if low <= v <= high]
+        if len(clipped) >= 3:
+            core = clipped
     mid = len(core) // 2
     if len(core) % 2:
         median = core[mid]
     else:
         median = (core[mid - 1] + core[mid]) / 2.0
+    fallback_n = float(max(0.0, fallback))
+    if fallback_n > 0.0:
+        delta = abs(median - fallback_n)
+        allowed_jump = max(1.0, fallback_n * 0.35)
+        if delta > allowed_jump:
+            median = fallback_n + allowed_jump if median > fallback_n else fallback_n - allowed_jump
     return float(max(0.0, median))
 
 
@@ -299,14 +319,17 @@ def build_root_cause_summary(
     ui_over = ui_render_ms > max(1.0, ui_render_limit_ms)
     rec_over = queue_size > max(1, queue_limit)
     inf_over = detect_fps_target > 0 and infer_fps < (0.7 * detect_fps_target)
-    stream_over = stream_fps > 0 and writer_fps > 0 and stream_fps < (0.75 * writer_fps)
+    stream_over = stream_fps > 0 and (
+        (writer_fps > 0 and stream_fps < (0.75 * writer_fps))
+        or (detect_fps_target > 0 and stream_fps < (0.6 * detect_fps_target))
+    )
 
     if ui_over:
-        reasons.append("gui_render_overload")
+        reasons.append("gui_bottleneck")
     if rec_over:
-        reasons.append("recording_pipeline_overload")
+        reasons.append("recording_bottleneck")
     if inf_over:
-        reasons.append("inference_overload")
+        reasons.append("inference_bottleneck")
     if stream_over:
         reasons.append("stream_bottleneck")
     if len(reasons) > 1:

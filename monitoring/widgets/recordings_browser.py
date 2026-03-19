@@ -656,6 +656,8 @@ class RecordingsBrowserDialog(QDialog):
             self.empty_label.hide()
 
     def _schedule_visible_thumbnail_requests(self) -> None:
+        if not self.isVisible():
+            return
         if self.view_mode.currentText() != "Kafelki":
             for entry in self._filtered_entries[: max(1, self._thumbnail_buffer_items * 2)]:
                 key = self._thumb_cache_key(entry.filepath)
@@ -681,6 +683,9 @@ class RecordingsBrowserDialog(QDialog):
     def _start_thumbnail_request(self, entry: RecordingMetadata, allow_mp4_fallback: bool = False) -> None:
         key = self._thumb_cache_key(entry.filepath)
         self._thumbnail_entries[key] = entry
+        if allow_mp4_fallback and (not self.isVisible() or not self._is_tile_visible(entry.filepath)):
+            # MP4 fallback is the most expensive path; keep it limited to visible cards only.
+            return
         if key in self._pending_thumbnails:
             return
         if key in self._thumbnail_tasks:
@@ -989,3 +994,13 @@ class RecordingsBrowserDialog(QDialog):
         self._mp4_fallback_inflight.clear()
         self.thumbnail_pool.clear()
         super().closeEvent(event)
+
+    def showEvent(self, event):  # noqa: D401
+        # Fresh generation token avoids applying stale async thumbnails after reopen.
+        self._thumbnail_generation += 1
+        self._pending_thumbnails.clear()
+        self._thumbnail_tasks.clear()
+        self._thumbnail_request_tokens.clear()
+        self._mp4_fallback_inflight.clear()
+        super().showEvent(event)
+        self._schedule_visible_thumbnail_requests()

@@ -81,7 +81,7 @@ class FFmpegPipeBackend(BaseRecordingBackend):
         fps: float,
         *,
         codec: str = "libx264",
-        preset: str = "veryfast",
+        preset: str = "superfast",
         tune: str = "zerolatency",
         crf: int | None = 23,
         movflags: str = "+faststart",
@@ -98,6 +98,7 @@ class FFmpegPipeBackend(BaseRecordingBackend):
         self._process: subprocess.Popen[bytes] | None = None
         self._ffmpeg_exit_code: int | None = None
         self._stderr_summary = ""
+        self._stderr_tail = ""
         self._command_line = ""
         self._broken_pipe = False
         self._close_timeout = False
@@ -180,14 +181,20 @@ class FFmpegPipeBackend(BaseRecordingBackend):
             self._ffmpeg_exit_code = self._process.wait(timeout=2.0)
         if stderr_text:
             lines = [ln.strip() for ln in stderr_text.splitlines() if ln.strip()]
+            self._stderr_tail = " | ".join(lines[-20:])[:3000]
             self._stderr_summary = " | ".join(lines[-6:])[:1500]
         logger.info(
-            "ffmpeg backend closed: exit_code=%s broken_pipe=%s timeout=%s stderr=%s",
+            "ffmpeg backend closed: cmd=%s exit_code=%s broken_pipe=%s timeout=%s stderr=%s",
+            self._command_line,
             self._ffmpeg_exit_code,
             self._broken_pipe,
             self._close_timeout,
             (self._stderr_summary[:400] if self._stderr_summary else ""),
         )
+        if self._broken_pipe:
+            logger.warning("ffmpeg broken pipe detected: cmd=%s", self._command_line)
+        if self._close_timeout:
+            logger.warning("ffmpeg close timeout detected: cmd=%s", self._command_line)
         self._process = None
 
     @property

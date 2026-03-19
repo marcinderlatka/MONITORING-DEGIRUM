@@ -3062,7 +3062,10 @@ QToolButton:focus { outline: none; }
             return
 
         self._last_frame_update_ts[idx] = time.monotonic()
-        self._invalidate_preview_cache(idx)
+        if quality_mode == "main":
+            self._invalidate_preview_cache(idx, channels={"main"})
+        else:
+            self._invalidate_preview_cache(idx, channels={"thumb", "grid"})
         now_mono = time.monotonic()
         if quality_mode == "main":
             self._last_main_frame[idx] = frame
@@ -3134,11 +3137,16 @@ QToolButton:focus { outline: none; }
             self.camera_grid.update_pixmap(idx, grid_pm)
         self._last_grid_update_ts[idx] = now_mono
         self._record_render_stage(idx, "grid", (time.perf_counter() - grid_started) * 1000.0)
-    def _invalidate_preview_cache(self, idx: int | None = None) -> None:
+    def _invalidate_preview_cache(self, idx: int | None = None, channels: set[str] | None = None) -> None:
         if idx is None:
             self._preview_cache.clear()
             return
-        keys = [key for key in self._preview_cache if key[0] == int(idx)]
+        normalized_channels = {str(ch).lower() for ch in (channels or set()) if str(ch).strip()}
+        keys = [
+            key
+            for key in self._preview_cache
+            if key[0] == int(idx) and (not normalized_channels or str(key[1]).lower() in normalized_channels)
+        ]
         for key in keys:
             self._preview_cache.pop(key, None)
 
@@ -3437,8 +3445,7 @@ QToolButton:focus { outline: none; }
         cam_name = str(self.cameras[idx].get("name", idx)) if 0 <= idx < len(self.cameras) else str(idx)
         render_started = time.perf_counter()
         frame = self._last_main_frame.get(idx)
-        render_frame = frame if frame is not None else np.zeros((720, 1280, 3), dtype=np.uint8)
-        composed_qimg, image_rect, compose_timing = self._compose_letterboxed(render_frame, idx)
+        composed_qimg, image_rect, compose_timing = self._compose_letterboxed(frame, idx)
         hud_key = (
             idx,
             composed_qimg.width(),
@@ -3463,7 +3470,12 @@ QToolButton:focus { outline: none; }
         self._record_render_stage(idx, "resize", compose_timing.get("resize", 0.0))
         self._record_render_stage(idx, "cvtcolor", compose_timing.get("cvtcolor", 0.0))
         self._record_render_stage(idx, "qimage", compose_timing.get("qimage", 0.0))
-        self._record_render_stage(idx, "qimage_qpixmap", qpixmap_ms)
+        self._record_render_stage(idx, "resize_ms", compose_timing.get("resize", 0.0))
+        self._record_render_stage(idx, "cvtcolor_ms", compose_timing.get("cvtcolor", 0.0))
+        self._record_render_stage(idx, "qimage_ms", compose_timing.get("qimage", 0.0))
+        self._record_render_stage(idx, "qpixmap_ms", qpixmap_ms)
+        self._record_render_stage(idx, "hud_ms", hud_ms)
+        self._record_render_stage(idx, "total_ui_render_ms", render_ms)
         self._record_render_stage(idx, "hud", hud_ms)
         self._record_render_stage(idx, "total_ui_render", render_ms)
         self._ui_render_ms_by_camera[cam_name] = float(render_ms)
