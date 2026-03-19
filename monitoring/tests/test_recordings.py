@@ -149,6 +149,11 @@ def test_build_recording_sidecar_metadata_contains_reliability_fields():
     assert payload["detection_count"] == 12
     assert payload["scene_thumb"] == "/tmp/a.mp4.jpg"
     assert payload["sensitivity_profile"] == "custom"
+    assert payload["recorder_drop_rate"] == 0.0
+    assert payload["recorder_queue_latency_proxy_s"] == 0.0
+    assert payload["recorder_enqueue_stride"] == 1
+    assert payload["recorder_degradation_level"] == 0
+    assert payload["writer_fps_base"] == 0.0
 
 
 def test_metadata_duration_fields(tmp_path):
@@ -237,6 +242,37 @@ def test_metadata_preserves_phase4_diagnostics_fields():
     assert payload["overload_degraded_at_start"] is True
     assert payload["effective_detect_fps"] == 2.8
     assert payload["preview_frames_dropped"] == 33
+
+
+def test_metadata_preserves_recorder_efficiency_metrics():
+    payload = build_recording_sidecar_metadata(
+        camera="Cam2",
+        label="car",
+        confidence=0.75,
+        event_time="2024-01-01 00:00:00",
+        filepath="/tmp/y.mp4",
+        thumb="/tmp/y.jpg",
+        source_fps=25.0,
+        writer_fps=4.0,
+        detect_fps=3.0,
+        event_start_ts=2.0,
+        thumbnail_ts=2.1,
+        frames_written=20,
+        dropped_frames=3,
+        thumbnail_mode="best_detection",
+        inference_count=12,
+        positive_detection_count=6,
+        recorder_drop_rate=0.13,
+        recorder_queue_latency_proxy_s=2.5,
+        recorder_enqueue_stride=3,
+        recorder_degradation_level=2,
+        writer_fps_base=6.0,
+    )
+    assert payload["recorder_drop_rate"] == 0.13
+    assert payload["recorder_queue_latency_proxy_s"] == 2.5
+    assert payload["recorder_enqueue_stride"] == 3
+    assert payload["recorder_degradation_level"] == 2
+    assert payload["writer_fps_base"] == 6.0
 
 
 def test_load_recording_entries_uses_catalog_when_available(tmp_path, monkeypatch):

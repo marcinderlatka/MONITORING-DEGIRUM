@@ -83,6 +83,11 @@ Najważniejsze pola opcjonalne:
 | `thumbnail_font_scale` | Skala fontu etykiety na miniaturze alertu (domyślnie `0.5`). |
 | `thumbnail_font_thickness` | Grubość fontu etykiety na miniaturze alertu (domyślnie `1`). |
 | `camera_info_overlay_alpha` | Krycie tła HUD informacji na obrazie (`0` = przezroczyste, `255` = nieprzezroczyste; domyślnie `153`, czyli ~60%). |
+| `recorder_queue_warn_threshold` / `recorder_queue_critical_threshold` | Progi kolejki nagrywarki uruchamiające degradację (`queue_size`). |
+| `recorder_dropped_warn_threshold` / `recorder_dropped_critical_threshold` | Progi dropów (`dropped_frames`) uruchamiające degradację nagrywania. |
+| `recorder_queue_peak_warn_threshold` / `recorder_queue_peak_critical_threshold` | Progi historycznego maksimum kolejki (`queue_peak`) dla bardziej agresywnej degradacji. |
+| `recorder_degrade_warn_window_s` | Minimalny odstęp pomiędzy ostrzeżeniami o przeciążeniu nagrywarki (rate-limit logów). |
+| `recorder_min_dynamic_writer_fps` | Minimalny bezpieczny `writer_fps`, poniżej którego degradacja nie schodzi. |
 
 Przykład „subtelnej” miniatury (cienka etykieta + brak ramki):
 
@@ -97,6 +102,23 @@ Przykład „subtelnej” miniatury (cienka etykieta + brak ramki):
 ```
 
 Zmiany w konfiguracji można wprowadzać z poziomu UI (przycisk „Ustawienia” → dialog kamery) lub ręcznie edytując plik i ponownie uruchamiając aplikację.
+
+### Polityka degradacji nagrywarki (dynamiczna)
+Podczas aktywnego nagrywania worker monitoruje trzy sygnały przeciążenia:
+
+1. `queue_size` (bieżące zapełnienie kolejki zapisu),
+2. `dropped_frames` (łączna liczba dropów writera),
+3. `queue_peak` (maksimum kolejki w danej sesji nagrania).
+
+Po przekroczeniu progów warn/critical aktywowany jest poziom degradacji `L1..L3`, który:
+
+* dynamicznie obniża `writer_fps` (z zachowaniem `recorder_min_dynamic_writer_fps`),
+* zwiększa `recorder_enqueue_stride` (enqueue co 2/3/4 klatkę),
+* emituje ostrzeżenia o przeciążeniu maksymalnie raz na `recorder_degrade_warn_window_s`.
+
+W metadanych sidecar (`*.mp4.json`) zapisywane są również wskaźniki skuteczności:
+`recorder_drop_rate`, `recorder_queue_latency_proxy_s`, `recorder_enqueue_stride`,
+`recorder_degradation_level`, `writer_fps_base`.
 
 ## Uruchomienie aplikacji
 ```bash

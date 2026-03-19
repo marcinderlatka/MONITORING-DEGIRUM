@@ -220,6 +220,11 @@ def build_recording_sidecar_metadata(
     skipped_inference_cycles: int = 0,
     app_overload_mode: bool | None = None,
     recorder_queue_peak: int = 0,
+    recorder_drop_rate: float = 0.0,
+    recorder_queue_latency_proxy_s: float = 0.0,
+    recorder_enqueue_stride: int = 1,
+    recorder_degradation_level: int = 0,
+    writer_fps_base: float = 0.0,
     alert_thumb: str = "",
     scene_thumb: str = "",
 ) -> Dict[str, object]:
@@ -265,6 +270,11 @@ def build_recording_sidecar_metadata(
         "skipped_inference_cycles": int(skipped_inference_cycles),
         "app_overload_mode": bool(app_overload_mode) if app_overload_mode is not None else False,
         "recorder_queue_peak": int(recorder_queue_peak),
+        "recorder_drop_rate": float(recorder_drop_rate),
+        "recorder_queue_latency_proxy_s": float(recorder_queue_latency_proxy_s),
+        "recorder_enqueue_stride": int(recorder_enqueue_stride),
+        "recorder_degradation_level": int(recorder_degradation_level),
+        "writer_fps_base": float(writer_fps_base),
     }
 
 
