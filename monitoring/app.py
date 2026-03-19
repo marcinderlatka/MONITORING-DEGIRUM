@@ -380,6 +380,7 @@ class VideoPlayerDialog(QDialog):
             | Qt.WindowCloseButtonHint
         )
         self.resize(900, 600)
+        self.setMinimumSize(840, 520)
 
         # lista plików w katalogu – umożliwia przełączanie
         folder = os.path.dirname(filepath) or "."
@@ -399,10 +400,21 @@ class VideoPlayerDialog(QDialog):
         self.btn_stop = QPushButton("◼")
         self.btn_back = QPushButton("<<")
         self.btn_fwd = QPushButton(">>")
-        self.btn_prev = QPushButton("Nagranie ←")
-        self.btn_next = QPushButton("Nagranie →")
+        self.btn_prev = QPushButton("⏮ Poprzednie")
+        self.btn_next = QPushButton("Następne ⏭")
         self.btn_snap = QPushButton("📷")
         self.slider = QSlider(Qt.Horizontal)
+        self.slider.setTracking(True)
+        self.speed_combo = QComboBox()
+        self.speed_combo.addItem("0.5x", 0.5)
+        self.speed_combo.addItem("1.0x", 1.0)
+        self.speed_combo.addItem("1.5x", 1.5)
+        self.speed_combo.addItem("2.0x", 2.0)
+        self.speed_combo.setCurrentIndex(1)
+        self.loop_chk = QCheckBox("Zapętl")
+        self.autoplay_next_chk = QCheckBox("Auto następne")
+        self.autoplay_next_chk.setChecked(True)
+        self.position_label = QLabel("0:00:00 / 0:00:00")
         self.btn_full = QPushButton("Pełny ekran")
         ctrl.addWidget(self.btn_prev)
         ctrl.addWidget(self.btn_next)
@@ -413,6 +425,10 @@ class VideoPlayerDialog(QDialog):
         ctrl.addWidget(self.btn_fwd)
         ctrl.addWidget(self.btn_snap)
         ctrl.addWidget(self.slider, stretch=1)
+        ctrl.addWidget(self.position_label)
+        ctrl.addWidget(self.speed_combo)
+        ctrl.addWidget(self.loop_chk)
+        ctrl.addWidget(self.autoplay_next_chk)
         ctrl.addWidget(self.btn_full)
         v.addLayout(ctrl)
 
@@ -429,7 +445,9 @@ class VideoPlayerDialog(QDialog):
         self.btn_snap.clicked.connect(self.save_screenshot)
         self.btn_full.clicked.connect(self.toggle_fullscreen)
         self.slider.sliderPressed.connect(self.pause)
+        self.slider.valueChanged.connect(self._seek_preview)
         self.slider.sliderReleased.connect(self.seek_to_slider)
+        self.speed_combo.currentIndexChanged.connect(self._apply_playback_speed)
 
         self.video_label.mouseDoubleClickEvent = lambda e: self.toggle_fullscreen()
 
@@ -438,6 +456,11 @@ class VideoPlayerDialog(QDialog):
         self.current_frame = None
         self._normal_geometry = None
         self._is_fullscreen = False
+        self.playback_speed = 1.0
+        try:
+            self.timer.setTimerType(Qt.PreciseTimer)
+        except Exception:
+            pass
         self.load_video(self.file_list[self.file_index])
 
     def showEvent(self, event):
@@ -473,10 +496,21 @@ class VideoPlayerDialog(QDialog):
             self.slider.setValue(self.current_index)
             self.slider.blockSignals(False)
             self._show_frame(frame)
+            self._update_position_label()
 
     def _next_frame(self):
         ret, frame = self.cap.read()
         if not ret:
+            if self.loop_chk.isChecked():
+                self._show_frame_at(0)
+                self.play()
+                return
+            if self.autoplay_next_chk.isChecked() and self.file_index < len(self.file_list) - 1:
+                was_playing = self.timer.isActive()
+                self.next_video()
+                if was_playing:
+                    self.play()
+                return
             self.pause()
             return
         self.current_index = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
@@ -484,10 +518,11 @@ class VideoPlayerDialog(QDialog):
         self.slider.setValue(self.current_index)
         self.slider.blockSignals(False)
         self._show_frame(frame)
+        self._update_position_label()
 
     def play(self):
         if not self.timer.isActive():
-            interval_ms = int(1000 / max(self.fps, 0.01))
+            interval_ms = int(1000 / max(self.fps * self.playback_speed, 0.01))
             self.timer.start(interval_ms)
 
     def pause(self):
@@ -509,6 +544,16 @@ class VideoPlayerDialog(QDialog):
         self.pause()
         self._show_frame_at(self.slider.value())
 
+    def _seek_preview(self, value: int):
+        if self.slider.isSliderDown():
+            self._show_frame_at(int(value))
+
+    def _apply_playback_speed(self):
+        self.playback_speed = float(self.speed_combo.currentData() or 1.0)
+        if self.timer.isActive():
+            self.pause()
+            self.play()
+
     # --- Pliki ---
     def load_video(self, filepath):
         if self.cap:
@@ -524,16 +569,30 @@ class VideoPlayerDialog(QDialog):
         self.slider.setRange(0, max(self.frame_count - 1, 0))
         self.current_index = 0
         self._show_frame_at(0)
+        self._update_position_label()
 
     def next_video(self):
         if self.file_index < len(self.file_list) - 1:
             self.file_index += 1
+            self.load_video(self.file_list[self.file_index])
+        elif self.loop_chk.isChecked() and self.file_list:
+            self.file_index = 0
             self.load_video(self.file_list[self.file_index])
 
     def prev_video(self):
         if self.file_index > 0:
             self.file_index -= 1
             self.load_video(self.file_list[self.file_index])
+        elif self.loop_chk.isChecked() and self.file_list:
+            self.file_index = len(self.file_list) - 1
+            self.load_video(self.file_list[self.file_index])
+
+    def _update_position_label(self):
+        total_seconds = (self.frame_count / max(self.fps, 1e-3)) if self.frame_count else 0.0
+        current_seconds = (self.current_index / max(self.fps, 1e-3)) if self.frame_count else 0.0
+        self.position_label.setText(
+            f"{datetime.timedelta(seconds=int(max(0, current_seconds)))} / {datetime.timedelta(seconds=int(max(0, total_seconds)))}"
+        )
 
     def save_screenshot(self):
         if self.current_frame is None:
@@ -580,6 +639,29 @@ class VideoPlayerDialog(QDialog):
             self._show_frame(self.current_frame)
 
     def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Space:
+            if self.timer.isActive():
+                self.pause()
+            else:
+                self.play()
+            event.accept()
+            return
+        if event.key() in (Qt.Key_Right, Qt.Key_D):
+            self.step_forward()
+            event.accept()
+            return
+        if event.key() in (Qt.Key_Left, Qt.Key_A):
+            self.step_back()
+            event.accept()
+            return
+        if event.key() == Qt.Key_N:
+            self.next_video()
+            event.accept()
+            return
+        if event.key() == Qt.Key_P:
+            self.prev_video()
+            event.accept()
+            return
         if event.key() == Qt.Key_Escape and self.isFullScreen():
             self.toggle_fullscreen()
             event.accept()
@@ -2114,10 +2196,16 @@ QToolButton:focus { outline: none; }
 
     def _apply_worker_preview_roles(self) -> None:
         selected_idx = self.camera_list.currentRow()
+        grid_visible = bool(self.camera_grid.isVisible())
         for idx, worker in enumerate(self.workers):
             if not isinstance(worker, CameraWorker):
                 continue
-            role = "main" if idx == selected_idx else "thumb"
+            if idx == selected_idx and not grid_visible:
+                role = "main"
+            elif grid_visible:
+                role = "thumb"
+            else:
+                role = "hidden"
             worker.preview_fps_main = self.preview_fps_main
             worker.preview_fps_thumb = self.preview_fps_thumb
             worker.preview_pause_when_hidden = self.preview_pause_when_hidden
@@ -2852,7 +2940,7 @@ QToolButton:focus { outline: none; }
 
     def _grid_target_fps(self) -> float:
         target_fps = float(self.preview_fps_grid)
-        if self._is_fullscreen and self.camera_grid.isVisible() and str(self.grid_preview_quality).lower() == "high-quality":
+        if self.camera_grid.isVisible() and str(self.grid_preview_quality).lower() == "high-quality":
             target_fps = max(target_fps, float(self.preview_fps_main))
         if self.overload_mode_active:
             target_fps *= max(0.4, float(overload_level_profile(self.overload_level).thumb_preview_fps_factor))
@@ -2879,7 +2967,7 @@ QToolButton:focus { outline: none; }
         if dpr <= 0:
             dpr = 1.0
 
-        if self._is_fullscreen and self.camera_grid.isVisible() and str(self.grid_preview_quality).lower() == "high-quality":
+        if self.camera_grid.isVisible() and str(self.grid_preview_quality).lower() == "high-quality":
             if main_source is not None:
                 source = main_source
                 source_tag = "main"
@@ -3125,9 +3213,11 @@ QToolButton:focus { outline: none; }
         self.log_window.add_entry("application", "otwarto listę kamer")
         dlg = CameraListDialog(self.camera_grid, self)
         dlg.camera_selected.connect(lambda idx: self.camera_list.setCurrentRow(idx))
+        self._apply_worker_preview_roles()
         dlg.exec_()
         self.camera_grid.setParent(None)
         self.camera_grid.hide()
+        self._apply_worker_preview_roles()
 
     def closeEvent(self, event):
         self.stop_all()

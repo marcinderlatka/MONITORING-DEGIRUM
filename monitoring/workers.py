@@ -1217,7 +1217,8 @@ class CameraWorker(QThread):
         cpu_wall = max(1e-6, now - (self.state.metrics_last_cpu_wall_ts or now))
         cpu_proc_now = time.process_time()
         cpu_proc_delta = max(0.0, cpu_proc_now - self.state.metrics_last_cpu_process_ts)
-        cpu_percent_raw = float(max(0.0, min(100.0, (cpu_proc_delta / cpu_wall) * 100.0)))
+        cpu_count = max(1, int(os.cpu_count() or 1))
+        cpu_percent_raw = float(max(0.0, min(100.0, ((cpu_proc_delta / cpu_wall) / cpu_count) * 100.0)))
         self.state.cpu_percent_samples.append(cpu_percent_raw)
         cpu_percent = float(sum(self.state.cpu_percent_samples) / len(self.state.cpu_percent_samples)) if self.state.cpu_percent_samples else cpu_percent_raw
         self.state.last_cpu_percent = cpu_percent

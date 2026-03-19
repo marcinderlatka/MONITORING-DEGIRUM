@@ -585,8 +585,8 @@ class LogSettingsDialog(QDialog):
         self.mw = main_window
         self.setWindowTitle("Logi")
         self.setPalette(QApplication.palette())
-        self.setMinimumSize(400, 250)
-        self.resize(450, 260)
+        self.setMinimumSize(760, 520)
+        self.resize(920, 620)
         self._drag_offset: QPoint | None = None
         self._group_checks: dict[str, QCheckBox] = {}
         self._level_checks: dict[str, QCheckBox] = {}
