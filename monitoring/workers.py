@@ -108,7 +108,9 @@ class PipelineState:
     metrics_dropped_frames: int = 0
     metrics_last_cpu_process_ts: float = 0.0
     metrics_last_cpu_wall_ts: float = 0.0
+    metrics_last_sample_ts: float = 0.0
     last_cpu_percent: float = 0.0
+    last_rss_mb: float = 0.0
     cpu_percent_samples: deque[float] = field(default_factory=lambda: deque(maxlen=3))
 
 
@@ -429,6 +431,28 @@ class CameraWorker(QThread):
         self.state.metrics_window_started_ts = now_mono
         self.state.metrics_last_cpu_wall_ts = now_mono
         self.state.metrics_last_cpu_process_ts = time.process_time()
+        self.state.metrics_last_sample_ts = now_mono
+        self.state.last_rss_mb = _rss_mb()
+
+    def _sample_process_metrics(self, now_mono: float) -> tuple[float, float]:
+        if self.state.metrics_last_sample_ts and now_mono - self.state.metrics_last_sample_ts < 0.2:
+            return float(self.state.last_cpu_percent), float(self.state.last_rss_mb)
+
+        cpu_wall = max(1e-6, now_mono - (self.state.metrics_last_cpu_wall_ts or now_mono))
+        cpu_proc_now = time.process_time()
+        cpu_proc_delta = max(0.0, cpu_proc_now - self.state.metrics_last_cpu_process_ts)
+        cpu_count = max(1, int(os.cpu_count() or 1))
+        cpu_percent_raw = float(max(0.0, min(100.0, ((cpu_proc_delta / cpu_wall) / cpu_count) * 100.0)))
+        self.state.cpu_percent_samples.append(cpu_percent_raw)
+        cpu_percent = float(sum(self.state.cpu_percent_samples) / len(self.state.cpu_percent_samples)) if self.state.cpu_percent_samples else cpu_percent_raw
+        rss_mb = _rss_mb()
+
+        self.state.last_cpu_percent = cpu_percent
+        self.state.last_rss_mb = rss_mb
+        self.state.metrics_last_cpu_wall_ts = now_mono
+        self.state.metrics_last_cpu_process_ts = cpu_proc_now
+        self.state.metrics_last_sample_ts = now_mono
+        return cpu_percent, rss_mb
 
     def _camera_worker_key(self) -> str:
         camera_type = str(self.camera.get("type", "rtsp")).lower()
@@ -1203,9 +1227,10 @@ class CameraWorker(QThread):
             app_log("worker", "detection ended", camera=str(self.camera.get("name", self.index)), source="worker", level="INFO")
 
     def _maybe_log_metrics(self, detection_interval: float) -> None:
+        now = time.monotonic()
+        cpu_percent, rss_mb = self._sample_process_metrics(now)
         if not self.performance_diagnostics_enabled:
             return
-        now = time.monotonic()
         if self.state.last_metrics_log_ts and now - self.state.last_metrics_log_ts < max(4.0, float(self.performance_log_interval_s)):
             return
 
@@ -1213,15 +1238,6 @@ class CameraWorker(QThread):
         queue_size = self.record_thread.queue.qsize() if self.record_thread else 0
         dropped_total = self.record_thread.dropped_frames if self.record_thread else 0
         dropped_delta = _dropped_frames_delta(dropped_total, self.state.metrics_dropped_frames)
-
-        cpu_wall = max(1e-6, now - (self.state.metrics_last_cpu_wall_ts or now))
-        cpu_proc_now = time.process_time()
-        cpu_proc_delta = max(0.0, cpu_proc_now - self.state.metrics_last_cpu_process_ts)
-        cpu_count = max(1, int(os.cpu_count() or 1))
-        cpu_percent_raw = float(max(0.0, min(100.0, ((cpu_proc_delta / cpu_wall) / cpu_count) * 100.0)))
-        self.state.cpu_percent_samples.append(cpu_percent_raw)
-        cpu_percent = float(sum(self.state.cpu_percent_samples) / len(self.state.cpu_percent_samples)) if self.state.cpu_percent_samples else cpu_percent_raw
-        self.state.last_cpu_percent = cpu_percent
 
         metrics = _build_metrics_payload(
             capture_fps=_aggregate_fps(self.state.frames_captured - self.state.metrics_frames_captured, elapsed),
@@ -1231,7 +1247,7 @@ class CameraWorker(QThread):
             queue_size=int(queue_size),
             dropped_frames=int(dropped_total),
             cpu_percent=cpu_percent,
-            rss_mb=_rss_mb(),
+            rss_mb=rss_mb,
         )
         telemetry = self._telemetry_payload(now)
 
@@ -1282,18 +1298,18 @@ class CameraWorker(QThread):
         self.state.metrics_inferences_run = self.state.inferences_run
         self.state.metrics_frames_emitted = self.state.frames_emitted
         self.state.metrics_dropped_frames = int(dropped_total)
-        self.state.metrics_last_cpu_wall_ts = now
-        self.state.metrics_last_cpu_process_ts = cpu_proc_now
         self.state.last_metrics_log_ts = now
 
     def _maybe_emit_heartbeat(self) -> None:
         now = time.monotonic()
         if self.state.last_heartbeat_ts and now - self.state.last_heartbeat_ts < 10.0:
             return
+        cpu_percent, rss_mb = self._sample_process_metrics(now)
         queue_size = self.record_thread.queue.qsize() if self.record_thread else 0
         dropped = self.record_thread.dropped_frames if self.record_thread else 0
         since_detect = (now - self.detection_last_seen_ts) if self.detection_last_seen_ts > 0 else -1.0
         elapsed = max(1e-6, now - (self.state.metrics_window_started_ts or now))
+        cpu_sample_age_ms = max(0.0, (now - self.state.metrics_last_sample_ts) * 1000.0)
         telemetry = self._telemetry_payload(now)
         status = {
             "stream_fps": float(self.stream_fps),
@@ -1305,8 +1321,10 @@ class CameraWorker(QThread):
             "ui_render_ms": 0.0,
             "queue_size": int(queue_size),
             "dropped_frames": int(dropped),
-            "cpu_percent": float(self.state.last_cpu_percent),
-            "rss_mb": _rss_mb(),
+            "cpu_percent": float(cpu_percent),
+            "rss_mb": float(rss_mb),
+            "cpu_sample_age_ms": float(cpu_sample_age_ms),
+            "metrics_fresh": bool(cpu_sample_age_ms <= 3000.0),
             "recording_active": bool(self.recording),
             "preview_role": self.preview_role,
             "overload_degraded": bool(self.is_overload_degraded),
