@@ -103,6 +103,36 @@ def test_overload_config_backward_compat(tmp_path):
     assert cfg["overload_reduce_thumb_preview_fps"] == 1
     assert cfg["quality_performance_preset"] == "balanced"
     assert cfg["config_watchdog_enabled"] is True
+    assert "log_filters" in cfg
+    assert "groups" in cfg["log_filters"]
+
+
+def test_log_filters_are_normalized_and_applied():
+    from monitoring import config
+
+    filters = config.normalize_log_filters(
+        {
+            "groups": ["detection", "error", "detection"],
+            "levels": ["warning", "ERROR"],
+            "sources": ["worker", "app", "worker"],
+        }
+    )
+    assert filters["groups"] == ["detection", "error"]
+    assert filters["levels"] == ["WARNING", "ERROR"]
+    assert filters["sources"] == ["worker", "app"]
+
+
+def test_log_filter_source_category_mapping(monkeypatch):
+    from monitoring import config
+
+    monkeypatch.setattr(
+        config,
+        "LOG_FILTERS",
+        {"groups": ["application"], "levels": ["INFO"], "sources": ["app"]},
+    )
+
+    assert config.is_log_entry_enabled("application", "INFO", "monitoring.runtime_helpers") is True
+    assert config.is_log_entry_enabled("application", "INFO", "ui") is False
 
 
 def test_restart_required_for_model_or_rtsp_url_change():

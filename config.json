@@ -1,6 +1,31 @@
 {
     "log_history_path": "log_history.json",
     "log_retention_hours": 48,
+    "log_filters": {
+        "groups": [
+            "application",
+            "browser",
+            "detection",
+            "error",
+            "performance",
+            "recording",
+            "settings",
+            "ui",
+            "warning",
+            "worker"
+        ],
+        "levels": [
+            "INFO",
+            "WARNING",
+            "ERROR",
+            "CRITICAL"
+        ],
+        "sources": [
+            "worker",
+            "ui",
+            "app"
+        ]
+    },
     "cameras": [
         {
             "name": "Kamera 1",

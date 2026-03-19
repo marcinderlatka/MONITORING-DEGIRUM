@@ -481,6 +481,21 @@ class LogWindow(QListWidget):
 # Keep existing dialog class from original file appended later.
 
 class LogSettingsDialog(QDialog):
+    GROUP_OPTIONS = [
+        "detection",
+        "error",
+        "warning",
+        "worker",
+        "ui",
+        "recording",
+        "performance",
+        "application",
+        "settings",
+        "browser",
+    ]
+    LEVEL_OPTIONS = ["INFO", "WARNING", "ERROR", "CRITICAL"]
+    SOURCE_OPTIONS = ["worker", "ui", "app"]
+
     def __init__(self, main_window) -> None:
         super().__init__(main_window)
         self.mw = main_window
@@ -489,6 +504,9 @@ class LogSettingsDialog(QDialog):
         self.setMinimumSize(400, 250)
         self.resize(450, 260)
         self._drag_offset: QPoint | None = None
+        self._group_checks: dict[str, QCheckBox] = {}
+        self._level_checks: dict[str, QCheckBox] = {}
+        self._source_checks: dict[str, QCheckBox] = {}
 
         layout = QVBoxLayout(self)
 
@@ -531,6 +549,7 @@ class LogSettingsDialog(QDialog):
 
         self.retention_slider.valueChanged.connect(self._update_retention)
         self._update_retention(self.retention_slider.value())
+        self._build_filters_section(layout)
 
         btn_layout = QHBoxLayout()
 
@@ -548,6 +567,70 @@ class LogSettingsDialog(QDialog):
 
         layout.addLayout(btn_layout)
         layout.addStretch(1)
+
+    def _build_filters_section(self, root_layout: QVBoxLayout) -> None:
+        filters = self.mw.current_log_filters()
+        container = QWidget()
+        box_layout = QVBoxLayout(container)
+        box_layout.setContentsMargins(10, 8, 10, 8)
+        title = QLabel("Filtry logów")
+        title.setStyleSheet("font-size:14px; font-weight:bold;")
+        box_layout.addWidget(title)
+
+        box_layout.addWidget(self._create_checkbox_group(
+            "Grupy",
+            self.GROUP_OPTIONS,
+            set(filters.get("groups", [])),
+            self._group_checks,
+        ))
+        box_layout.addWidget(self._create_checkbox_group(
+            "Poziomy",
+            self.LEVEL_OPTIONS,
+            set(filters.get("levels", [])),
+            self._level_checks,
+        ))
+        box_layout.addWidget(self._create_checkbox_group(
+            "Źródła",
+            self.SOURCE_OPTIONS,
+            set(filters.get("sources", [])),
+            self._source_checks,
+        ))
+        root_layout.addWidget(container)
+
+    def _create_checkbox_group(
+        self,
+        title: str,
+        options: list[str],
+        enabled: set[str],
+        target: dict[str, QCheckBox],
+    ) -> QWidget:
+        group_widget = QWidget()
+        group_layout = QVBoxLayout(group_widget)
+        group_layout.setContentsMargins(0, 0, 0, 0)
+        title_label = QLabel(title)
+        title_label.setStyleSheet("font-weight:bold;")
+        group_layout.addWidget(title_label)
+
+        row_layout = QHBoxLayout()
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(14)
+        for option in options:
+            chk = QCheckBox(option)
+            chk.setChecked(option in enabled)
+            chk.toggled.connect(self._save_filters)
+            target[option] = chk
+            row_layout.addWidget(chk)
+        row_layout.addStretch(1)
+        group_layout.addLayout(row_layout)
+        return group_widget
+
+    def _save_filters(self) -> None:
+        filters = {
+            "groups": [name for name, box in self._group_checks.items() if box.isChecked()],
+            "levels": [name for name, box in self._level_checks.items() if box.isChecked()],
+            "sources": [name for name, box in self._source_checks.items() if box.isChecked()],
+        }
+        self.mw.update_log_filters(filters)
 
     def _update_retention(self, hours: int) -> None:
         hours = max(1, int(hours))

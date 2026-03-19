@@ -141,6 +141,25 @@ DEFAULT_CONFIG_WATCHDOG_DROP_DELTA_THRESHOLD = 5
 DEFAULT_CONFIG_WATCHDOG_QUEUE_DELTA_THRESHOLD = 4
 DEFAULT_PERFORMANCE_LOG_INTERVAL_S = 45.0
 DEFAULT_PERFORMANCE_DIAGNOSTICS_ENABLED = False
+DEFAULT_LOG_FILTER_GROUPS = [
+    "application",
+    "browser",
+    "detection",
+    "error",
+    "performance",
+    "recording",
+    "settings",
+    "ui",
+    "warning",
+    "worker",
+]
+DEFAULT_LOG_FILTER_LEVELS = ["INFO", "WARNING", "ERROR", "CRITICAL"]
+DEFAULT_LOG_FILTER_SOURCES = ["worker", "ui", "app"]
+LOG_FILTERS: Dict[str, List[str]] = {
+    "groups": list(DEFAULT_LOG_FILTER_GROUPS),
+    "levels": list(DEFAULT_LOG_FILTER_LEVELS),
+    "sources": list(DEFAULT_LOG_FILTER_SOURCES),
+}
 
 
 
@@ -294,15 +313,57 @@ def list_usb_cameras() -> List[tuple[int, str]]:
     return devices
 
 
+def normalize_log_filters(raw_filters: object) -> Dict[str, List[str]]:
+    """Normalize log filter structure from configuration data."""
+    normalized: Dict[str, List[str]] = {
+        "groups": list(DEFAULT_LOG_FILTER_GROUPS),
+        "levels": list(DEFAULT_LOG_FILTER_LEVELS),
+        "sources": list(DEFAULT_LOG_FILTER_SOURCES),
+    }
+    if not isinstance(raw_filters, MutableMapping):
+        return normalized
+    for key in ("groups", "levels", "sources"):
+        values = raw_filters.get(key, normalized[key])
+        if isinstance(values, list):
+            cleaned = [str(item).strip() for item in values if str(item).strip()]
+            if key == "levels":
+                cleaned = [item.upper() for item in cleaned]
+            unique: List[str] = []
+            for item in cleaned:
+                if item not in unique:
+                    unique.append(item)
+            normalized[key] = unique
+    return normalized
+
+
+def is_log_entry_enabled(group: str, level: str, source: str) -> bool:
+    """Return ``True`` if a log entry matches active filter configuration."""
+    group_name = str(group or "application").strip()
+    level_name = str(level or "INFO").strip().upper()
+    source_name = str(source or "").strip()
+    source_category = source_name if source_name in {"worker", "ui"} else "app"
+    enabled_groups = set(LOG_FILTERS.get("groups", []))
+    enabled_levels = set(LOG_FILTERS.get("levels", []))
+    enabled_sources = set(LOG_FILTERS.get("sources", []))
+    if enabled_groups and group_name not in enabled_groups:
+        return False
+    if enabled_levels and level_name not in enabled_levels:
+        return False
+    if enabled_sources and source_category not in enabled_sources:
+        return False
+    return True
+
+
 def load_config(path: Path | None = None) -> Dict[str, object]:
     """Load the application configuration."""
-    global LOG_HISTORY_PATH, LOG_RETENTION_HOURS
+    global LOG_HISTORY_PATH, LOG_RETENTION_HOURS, LOG_FILTERS
 
     cfg_path = path or CONFIG_PATH
     if not cfg_path.exists():
         cfg: Dict[str, object] = {
             "log_history_path": str(LOG_HISTORY_PATH),
             "log_retention_hours": LOG_RETENTION_HOURS,
+            "log_filters": normalize_log_filters(None),
             "cameras": [
                 {
                     "name": "kamera1",
@@ -316,6 +377,8 @@ def load_config(path: Path | None = None) -> Dict[str, object]:
 
     LOG_HISTORY_PATH = _resolve_path(cfg.get("log_history_path"), default=LOG_HISTORY_PATH)
     LOG_RETENTION_HOURS = int(cfg.get("log_retention_hours", LOG_RETENTION_HOURS))
+    LOG_FILTERS = normalize_log_filters(cfg.get("log_filters"))
+    cfg["log_filters"] = dict(LOG_FILTERS)
     cfg.setdefault("overload_protection_enabled", DEFAULT_OVERLOAD_PROTECTION_ENABLED)
     cfg.setdefault("overload_min_camera_count", DEFAULT_OVERLOAD_MIN_CAMERA_COUNT)
     cfg.setdefault("overload_camera_count_threshold", DEFAULT_OVERLOAD_CAMERA_COUNT_THRESHOLD)
@@ -346,13 +409,15 @@ def load_config(path: Path | None = None) -> Dict[str, object]:
 
 def save_config(config: MutableMapping[str, object], path: Path | None = None) -> None:
     """Persist configuration to disk."""
-    global LOG_HISTORY_PATH, LOG_RETENTION_HOURS
+    global LOG_HISTORY_PATH, LOG_RETENTION_HOURS, LOG_FILTERS
 
     for camera in config.get("cameras", []):
         if isinstance(camera, MutableMapping):
             fill_camera_defaults(camera)
     config.setdefault("log_history_path", str(LOG_HISTORY_PATH))
     config.setdefault("log_retention_hours", LOG_RETENTION_HOURS)
+    LOG_FILTERS = normalize_log_filters(config.get("log_filters"))
+    config["log_filters"] = dict(LOG_FILTERS)
 
     cfg_path = path or CONFIG_PATH
     cfg_path.write_text(json.dumps(config, indent=4), encoding="utf-8")
@@ -420,7 +485,12 @@ __all__ = [
     "DEFAULT_THUMBNAIL_MODE",
     "ICON_DIR",
     "LOG_HISTORY_PATH",
+    "LOG_FILTERS",
     "LOG_RETENTION_HOURS",
+    "DEFAULT_LOG_FILTER_GROUPS",
+    "DEFAULT_LOG_FILTER_LEVELS",
+    "DEFAULT_LOG_FILTER_SOURCES",
+    "is_log_entry_enabled",
     "MODELS_PATH",
     "RECORDINGS_CATALOG_PATH",
     "SENSITIVITY_PROFILES",
@@ -431,5 +501,6 @@ __all__ = [
     "infer_sensitivity_profile",
     "list_usb_cameras",
     "load_config",
+    "normalize_log_filters",
     "save_config",
 ]

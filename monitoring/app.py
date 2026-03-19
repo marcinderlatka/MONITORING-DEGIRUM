@@ -121,6 +121,9 @@ from .config import (
     DEFAULT_OVERLOAD_MAX_PREVIEW_BANDWIDTH_MBPS,
     DEFAULT_PERFORMANCE_DIAGNOSTICS_ENABLED,
     DEFAULT_PERFORMANCE_LOG_INTERVAL_S,
+    DEFAULT_LOG_FILTER_GROUPS,
+    DEFAULT_LOG_FILTER_LEVELS,
+    DEFAULT_LOG_FILTER_SOURCES,
     DEFAULT_PRE_SECONDS,
     DEFAULT_RECORD_PATH,
     DEFAULT_RECORD_START_MODE,
@@ -140,6 +143,8 @@ from .config import (
     VISIBLE_CLASSES,
     apply_sensitivity_profile,
     fill_camera_defaults,
+    normalize_log_filters,
+    is_log_entry_enabled,
     infer_sensitivity_profile,
     list_usb_cameras,
     load_config,
@@ -1362,6 +1367,8 @@ class AppLogBridge(QObject):
             traceback_text = str(legacy_traceback)
         if traceback_text and traceback_text not in details:
             details = f"{details}\n\n{traceback_text}".strip() if details else traceback_text
+        if not is_log_entry_enabled(group=group, level=level, source=source):
+            return
         if self._should_suppress_duplicate(group=group, source=source, message=message):
             return
         payload = {
@@ -2014,6 +2021,22 @@ QToolButton:focus { outline: none; }
         cfg["log_retention_hours"] = hours
         save_config(cfg)
         config_module.LOG_RETENTION_HOURS = hours
+
+    def update_log_filters(self, filters: dict[str, list[str]]) -> None:
+        normalized = normalize_log_filters(filters)
+        config_module.LOG_FILTERS = dict(normalized)
+        cfg = load_config()
+        cfg["cameras"] = self.cameras
+        cfg["log_filters"] = dict(normalized)
+        save_config(cfg)
+
+    def current_log_filters(self) -> dict[str, list[str]]:
+        active = normalize_log_filters(getattr(config_module, "LOG_FILTERS", {}))
+        return {
+            "groups": list(active.get("groups", DEFAULT_LOG_FILTER_GROUPS)),
+            "levels": list(active.get("levels", DEFAULT_LOG_FILTER_LEVELS)),
+            "sources": list(active.get("sources", DEFAULT_LOG_FILTER_SOURCES)),
+        }
 
     def open_camera_settings(self):
         self.log_window.add_entry("settings", "otwarto ustawienia kamer")
