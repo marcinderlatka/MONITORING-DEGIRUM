@@ -2209,20 +2209,20 @@ QToolButton:focus { outline: none; }
                 priority_detect_scale = extra
                 priority_thumb_scale = extra
                 priority_resolution_floor = 0.45
-            detect_factor = 1.0 if is_main or worker.recording else max(0.2, profile.detect_fps_factor * priority_detect_scale)
-            if camera_priority == "high" and not is_main:
-                detect_factor = max(0.9, detect_factor)
             thumb_fps = max(0.5, self.preview_fps_thumb * profile.thumb_preview_fps_factor * priority_thumb_scale)
             preview_resolution_factor = profile.preview_resolution_factor
             if camera_priority == "high":
                 preview_resolution_factor = max(0.9, preview_resolution_factor)
             else:
                 preview_resolution_factor = max(priority_resolution_floor, preview_resolution_factor)
+            detect_factor = 1.0
+            if self.overload_level >= 3 and not is_main and not worker.recording and camera_priority != "high":
+                detect_factor = max(0.2, profile.detect_fps_factor * priority_detect_scale)
             worker.set_overload_state(
                 overload_level=(self.overload_level if not is_main else 0),
                 detect_fps_factor=detect_factor,
                 thumb_preview_fps=thumb_fps,
-                disable_overlays=(self.overload_disable_nonessential_overlays or profile.disable_nonessential_overlays),
+                disable_overlays=(self.overload_level >= 2 and (self.overload_disable_nonessential_overlays or profile.disable_nonessential_overlays)),
                 overlay_stride=profile.overlay_stride,
                 preview_resolution_factor=preview_resolution_factor,
             )
@@ -2973,6 +2973,7 @@ QToolButton:focus { outline: none; }
 
         return [
             f"Kamera: {name}",
+            f"Tryb odciążenia: poziom {int(self.overload_level)}",
             f"Status: {status_text}",
             f"Podgląd FPS: {preview_fps or '0.0 fps'}",
             f"Strumień FPS: {float(stat.get('stream_fps', 0.0)):.1f}",
