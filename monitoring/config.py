@@ -25,7 +25,7 @@ RECORD_CLASSES = ["person", "car", "cat", "dog", "bird"]
 
 DEFAULT_MODEL = "yolov5nu_silu_coco--640x640_float_tflite_multidevice_1"
 DEFAULT_FPS = 3
-DEFAULT_DETECTION_FPS_LIMIT = 6
+DEFAULT_DETECTION_FPS_LIMIT = 8
 DEFAULT_RTSP_FPS = 0
 DEFAULT_CONFIDENCE_THRESHOLD = 0.5
 DEFAULT_CONFIDENCE_THRESHOLD_DRAW = DEFAULT_CONFIDENCE_THRESHOLD
@@ -42,7 +42,7 @@ DEFAULT_THUMBNAIL_MODE = "first_detection"
 DEFAULT_RECORD_START_MODE = "detection_first"
 DEFAULT_RECORDING_BACKEND = "current"
 DEFAULT_REQUIRED_HITS_TO_START_RECORDING = 1
-DEFAULT_REQUIRED_MISSES_TO_END_DETECTION = 1
+DEFAULT_REQUIRED_MISSES_TO_END_DETECTION = 3
 DEFAULT_MIN_RECORD_SECONDS = 3
 DEFAULT_SENSITIVITY_PROFILE = "balanced"
 
@@ -51,7 +51,7 @@ SENSITIVITY_PROFILES = {
         "confidence_threshold_draw": 0.35,
         "confidence_threshold_record": 0.40,
         "required_hits_to_start_recording": 1,
-        "required_misses_to_end_detection": 3,
+        "required_misses_to_end_detection": 4,
         "min_record_seconds": 6,
     },
     "balanced": {
@@ -69,8 +69,8 @@ SENSITIVITY_PROFILES = {
         "min_record_seconds": 2,
     },
 }
-DEFAULT_PREVIEW_FPS_MAIN = 15
-DEFAULT_PREVIEW_FPS_THUMB = 3
+DEFAULT_PREVIEW_FPS_MAIN = 12
+DEFAULT_PREVIEW_FPS_THUMB = 2
 DEFAULT_PREVIEW_PAUSE_WHEN_HIDDEN = True
 DEFAULT_PREVIEW_MAIN_MAX_WIDTH = 1280
 DEFAULT_PREVIEW_MAIN_MAX_HEIGHT = 720
@@ -84,7 +84,7 @@ DEFAULT_THUMBNAIL_FONT_SCALE = 0.5
 DEFAULT_THUMBNAIL_FONT_THICKNESS = 1
 DEFAULT_CAMERA_PRIORITY = "normal"
 CAMERA_PRIORITIES = ("high", "normal", "low")
-DEFAULT_PREVIEW_FPS_GRID = 4
+DEFAULT_PREVIEW_FPS_GRID = 3
 DEFAULT_PREVIEW_GRID_MAX_WIDTH = 640
 DEFAULT_PREVIEW_GRID_MAX_HEIGHT = 360
 DEFAULT_GRID_PREVIEW_QUALITY = "normal"
@@ -100,7 +100,7 @@ DEFAULT_OVERLOAD_EXIT_DEBOUNCE_SECONDS = 5.0
 DEFAULT_OVERLOAD_MAX_UI_RENDER_MS = 14.0
 DEFAULT_OVERLOAD_MAX_QUEUE_SIZE = 24
 DEFAULT_OVERLOAD_MAX_PREVIEW_BANDWIDTH_MBPS = 12.0
-DEFAULT_QUALITY_PERFORMANCE_PRESET = "balanced"
+DEFAULT_QUALITY_PERFORMANCE_PRESET = "economy_monitoring"
 QUALITY_PERFORMANCE_PRESETS = {
     "quality_monitoring": {
         "label": "Monitoring jakościowy",
@@ -279,6 +279,8 @@ def fill_camera_defaults(camera: MutableMapping[str, object]) -> MutableMapping[
         camera["confidence_threshold_draw"] = legacy_confidence
     if "confidence_threshold_record" not in camera:
         camera["confidence_threshold_record"] = legacy_confidence
+    if "confidence_threshold" not in camera:
+        camera["confidence_threshold"] = camera.get("confidence_threshold_record", legacy_confidence)
 
     explicit_profile = camera.get("sensitivity_profile")
     for key, value in defaults.items():

@@ -1025,10 +1025,10 @@ class SingleCameraDialog(QDialog):
         self._add_field_row(left_layout, "show_camera_info_overlay", "Pokaż informacje na obrazie", self.info_overlay_chk)
 
         self._add_field_row(middle_layout, "confidence_threshold", "Próg pewności (legacy, kompatybilność)", self.conf_spin)
-        self._add_field_row(middle_layout, "confidence_threshold_draw", "Próg wizualizacji", self.conf_draw_spin)
-        self._add_field_row(middle_layout, "confidence_threshold_record", "Próg uruchomienia zdarzenia/nagrania", self.conf_record_spin)
+        self._add_field_row(middle_layout, "confidence_threshold_draw", "Próg wizualizacji (DRAW)", self.conf_draw_spin)
+        self._add_field_row(middle_layout, "confidence_threshold_record", "Próg zdarzenia/nagrania (RECORD)", self.conf_record_spin)
         middle_layout.addRow("", self.show_legacy_conf_chk)
-        self._add_field_row(middle_layout, "sensitivity_profile", "Profil czułości", self.sensitivity_profile_combo)
+        self._add_field_row(middle_layout, "sensitivity_profile", "Profil sensitivity", self.sensitivity_profile_combo)
         self._add_field_row(middle_layout, "draw_overlays", "Rysuj nakładki", self.draw_chk)
         self._add_field_row(middle_layout, "enable_detection", "Wykrywaj obiekty", self.detect_chk)
         self._add_field_row(middle_layout, "enable_recording", "Nagrywaj detekcje", self.record_chk)
