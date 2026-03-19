@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import uuid
+from html import escape
 from threading import Lock, Timer
 from typing import Any, List
 
@@ -28,7 +29,27 @@ from PyQt5.QtWidgets import (
 )
 
 from ..config import LOG_HISTORY_PATH, LOG_RETENTION_HOURS
-from ..log_messages import msg, summarize_performance_details
+from ..log_messages import msg, parse_legacy_kv_details, summarize_performance_details
+
+
+
+def _details_to_multiline_html(text: str) -> str:
+    lines = [line.strip() for line in str(text).splitlines() if line.strip()]
+    if not lines:
+        return ""
+    blocks = "".join(f"<div style='margin:0 0 6px 0'>{escape(line)}</div>" for line in lines)
+    return f"<div>{blocks}</div>"
+
+
+def _normalize_details_for_display(group: str, details_text: str) -> str:
+    raw = str(details_text or "").strip()
+    if not raw:
+        return raw
+    if group == "performance" and "\n" not in raw:
+        legacy = parse_legacy_kv_details(raw)
+        if legacy:
+            return summarize_performance_details(raw)
+    return raw
 
 SUPPORTED_LOG_GROUPS = {
     "detection",
@@ -196,7 +217,7 @@ class LogEntryWidget(QFrame):
         if action:
             add_line(action, "#ff8800" if self.group == "detection" else "#ddd")
 
-        preview = details or traceback_text
+        preview = _normalize_details_for_display(self.group, details or traceback_text)
         if preview:
             self.details_label = add_line("", "#cfcfcf")
             if self.group == "performance":
@@ -276,7 +297,8 @@ class LogEntryWidget(QFrame):
     def _update_details_text(self) -> None:
         if self.details_label is None:
             return
-        self.details_label.setText(self._details_full_text if self._details_expanded else self._details_short_text)
+        current_text = self._details_full_text if self._details_expanded else self._details_short_text
+        self.details_label.setText(_details_to_multiline_html(current_text))
         if self.details_toggle_btn is not None:
             self.details_toggle_btn.setText(msg("show_less") if self._details_expanded else msg("show_more"))
 

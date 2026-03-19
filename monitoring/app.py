@@ -159,7 +159,7 @@ from .storage import (
     update_recordings_catalog,
 )
 from .workers import CameraWorker
-from .log_messages import msg
+from .log_messages import PERFORMANCE_PARAM_LABELS, format_dict_multiline, msg
 from .runtime_helpers import (
     app_log,
     camera_overlay_anchor,
@@ -2402,16 +2402,28 @@ QToolButton:focus { outline: none; }
                 msg("ui_worker_metrics_summary_action"),
                 source="ui",
                 camera=cam_name,
-                details=(
-                    f"mode={mode} overload={overload} "
-                    f"capture_fps={float(payload.get('capture_fps', 0.0)):.2f} infer_fps={float(payload.get('infer_fps', 0.0)):.2f} "
-                    f"preview_emit_fps={float(payload.get('preview_emit_fps', 0.0)):.2f} ui_render_ms={float(payload.get('ui_render_ms', 0.0)):.2f} "
-                    f"thumb_ms={float(payload.get('ui_thumb_ms', 0.0)):.2f} grid_ms={float(payload.get('ui_grid_ms', 0.0)):.2f} grid_avg_ms={float(payload.get('ui_grid_avg_ms', 0.0)):.2f} "
-                    f"grid_fps={float(payload.get('ui_grid_fps', 0.0)):.2f}/{float(payload.get('ui_grid_target_fps', 0.0)):.2f} main_ms={float(payload.get('ui_main_ms', 0.0)):.2f} "
-                    f"queue_size={int(payload.get('queue_size', 0))} dropped_frames={int(payload.get('dropped_frames', 0))} "
-                    f"cpu_percent={float(payload.get('cpu_percent', 0.0)):.1f} rss_mb={float(payload.get('rss_mb', 0.0)):.1f} "
-                    f"fp_proxy={float(payload.get('false_positive_proxy_rate', 0.0)):.3f} avg_conf={float(payload.get('avg_confidence', 0.0)):.3f} "
-                    f"trigger_h={float(payload.get('trigger_frequency_per_hour', 0.0)):.2f}"
+                details=format_dict_multiline(
+                    {
+                        "mode": mode,
+                        "overload": overload,
+                        "capture_fps": f"{float(payload.get('capture_fps', 0.0)):.2f}",
+                        "infer_fps": f"{float(payload.get('infer_fps', 0.0)):.2f}",
+                        "preview_emit_fps": f"{float(payload.get('preview_emit_fps', 0.0)):.2f}",
+                        "ui_render_ms": f"{float(payload.get('ui_render_ms', 0.0)):.2f}",
+                        "thumb_ms": f"{float(payload.get('ui_thumb_ms', 0.0)):.2f}",
+                        "grid_ms": f"{float(payload.get('ui_grid_ms', 0.0)):.2f}",
+                        "grid_avg_ms": f"{float(payload.get('ui_grid_avg_ms', 0.0)):.2f}",
+                        "grid_fps": f"{float(payload.get('ui_grid_fps', 0.0)):.2f}/{float(payload.get('ui_grid_target_fps', 0.0)):.2f}",
+                        "main_ms": f"{float(payload.get('ui_main_ms', 0.0)):.2f}",
+                        "queue_size": int(payload.get("queue_size", 0)),
+                        "dropped_frames": int(payload.get("dropped_frames", 0)),
+                        "cpu_percent": f"{float(payload.get('cpu_percent', 0.0)):.1f}",
+                        "rss_mb": f"{float(payload.get('rss_mb', 0.0)):.1f}",
+                        "fp_proxy": f"{float(payload.get('false_positive_proxy_rate', 0.0)):.3f}",
+                        "avg_conf": f"{float(payload.get('avg_confidence', 0.0)):.3f}",
+                        "trigger_h": f"{float(payload.get('trigger_frequency_per_hour', 0.0)):.2f}",
+                    },
+                    PERFORMANCE_PARAM_LABELS,
                 ),
             )
             self._performance_log_last_ts_by_camera[cam_name] = now

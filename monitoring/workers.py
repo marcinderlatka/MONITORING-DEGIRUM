@@ -59,7 +59,7 @@ from .config import (
     apply_sensitivity_profile,
 )
 from .recordings import build_recording_sidecar_metadata
-from .log_messages import msg
+from .log_messages import PERFORMANCE_PARAM_LABELS, format_dict_multiline, msg
 from .runtime_helpers import app_log, compute_effective_writer_fps, worker_stop_timeout_details
 from .storage import update_recordings_catalog
 
@@ -1100,14 +1100,23 @@ class CameraWorker(QThread):
             camera=str(self.camera.get("name", self.index)),
             source="worker",
             level="INFO",
-            details=(
-                f"mode={self.preview_role} overload={'on' if self.app_overload_mode else 'off'} "
-                f"capture_fps={float(metrics['capture_fps']):.2f} infer_fps={float(metrics['infer_fps']):.2f} "
-                f"preview_emit_fps={float(metrics['preview_emit_fps']):.2f} ui_render_ms={float(metrics['ui_render_ms']):.2f} "
-                f"queue_size={int(metrics['queue_size'])} dropped_frames={int(metrics['dropped_frames'])} "
-                f"cpu_percent={float(metrics['cpu_percent']):.1f} rss_mb={float(metrics['rss_mb']):.1f} "
-                f"fp_proxy={float(telemetry['false_positive_proxy_rate']):.3f} avg_conf={float(telemetry['avg_confidence']):.3f} "
-                f"trigger_h={float(telemetry['trigger_frequency_per_hour']):.2f}"
+            details=format_dict_multiline(
+                {
+                    "mode": self.preview_role,
+                    "overload": "on" if self.app_overload_mode else "off",
+                    "capture_fps": f"{float(metrics['capture_fps']):.2f}",
+                    "infer_fps": f"{float(metrics['infer_fps']):.2f}",
+                    "preview_emit_fps": f"{float(metrics['preview_emit_fps']):.2f}",
+                    "ui_render_ms": f"{float(metrics['ui_render_ms']):.2f}",
+                    "queue_size": int(metrics["queue_size"]),
+                    "dropped_frames": int(metrics["dropped_frames"]),
+                    "cpu_percent": f"{float(metrics['cpu_percent']):.1f}",
+                    "rss_mb": f"{float(metrics['rss_mb']):.1f}",
+                    "fp_proxy": f"{float(telemetry['false_positive_proxy_rate']):.3f}",
+                    "avg_conf": f"{float(telemetry['avg_confidence']):.3f}",
+                    "trigger_h": f"{float(telemetry['trigger_frequency_per_hour']):.2f}",
+                },
+                PERFORMANCE_PARAM_LABELS,
             ),
         )
 
