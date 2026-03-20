@@ -20,6 +20,7 @@ def _fake_window() -> types.SimpleNamespace:
     entries: list[tuple[str, str]] = []
     fake = types.SimpleNamespace(
         model_cache={},
+        config={},
         log_window=types.SimpleNamespace(add_entry=lambda group, message: entries.append((group, message))),
         _entries=entries,
     )
@@ -65,3 +66,60 @@ def test_get_model_keeps_separate_cpu_gpu_cache_entries_on_fallback(monkeypatch:
     cached = app_mod.MainWindow._get_model(fake, "demo-model", {"device_type": "cpu"})
     assert cached is fake.model_cache[cpu_key]
     assert len(calls) == 2
+
+
+def test_resolve_effective_degirum_device_prefers_camera_override() -> None:
+    fake = _fake_window()
+    fake.config = {
+        "degirum_device_mode": "cpu",
+        "degirum_preferred_device": "gpu",
+        "degirum_available_devices": ["cpu", "gpu"],
+    }
+    cam = {"name": "Cam-1", "degirum_device_override_enabled": True, "degirum_device_override": "gpu"}
+
+    selected = app_mod.MainWindow._resolve_effective_degirum_device(fake, cam)
+
+    assert selected == "gpu"
+    assert any("per-camera override -> gpu" in msg for _, msg in fake._entries)
+
+
+def test_resolve_effective_degirum_device_uses_global_manual_mode() -> None:
+    fake = _fake_window()
+    fake.config = {
+        "degirum_device_mode": "gpu",
+        "degirum_preferred_device": "cpu",
+        "degirum_available_devices": ["cpu", "gpu"],
+    }
+
+    selected = app_mod.MainWindow._resolve_effective_degirum_device(fake, {"name": "Cam-2"})
+
+    assert selected == "gpu"
+    assert any("global manual mode -> gpu" in msg for _, msg in fake._entries)
+
+
+def test_resolve_effective_degirum_device_uses_auto_recommendation() -> None:
+    fake = _fake_window()
+    fake.config = {
+        "degirum_device_mode": "auto",
+        "degirum_preferred_device": "gpu",
+        "degirum_available_devices": ["cpu", "gpu"],
+    }
+
+    selected = app_mod.MainWindow._resolve_effective_degirum_device(fake, {"name": "Cam-3"})
+
+    assert selected == "gpu"
+    assert any("global auto + recommendation -> gpu" in msg for _, msg in fake._entries)
+
+
+def test_resolve_effective_degirum_device_forces_cpu_when_selected_device_missing() -> None:
+    fake = _fake_window()
+    fake.config = {
+        "degirum_device_mode": "gpu",
+        "degirum_preferred_device": "gpu",
+        "degirum_available_devices": ["cpu"],
+    }
+
+    selected = app_mod.MainWindow._resolve_effective_degirum_device(fake, {"name": "Cam-4"})
+
+    assert selected == "cpu"
+    assert any(group == "warning" and "forcing cpu" in msg for group, msg in fake._entries)
