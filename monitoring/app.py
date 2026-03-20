@@ -2338,6 +2338,43 @@ QToolButton:focus { outline: none; }
                 effective_device = candidate
         return model_key, effective_device
 
+    def _resolve_effective_degirum_device(self, camera_config: dict | None) -> str:
+        cam_cfg = camera_config if isinstance(camera_config, dict) else {}
+        cam_name = str(cam_cfg.get("name", "unknown"))
+        app_cfg = self.config if isinstance(getattr(self, "config", None), dict) else {}
+
+        override_enabled = bool(cam_cfg.get("degirum_device_override_enabled", False))
+        override_value = str(cam_cfg.get("degirum_device_override", "inherit")).strip().lower()
+        if override_enabled and override_value and override_value != "inherit":
+            selected = override_value
+            self.log_window.add_entry("application", f"device resolve [{cam_name}]: per-camera override -> {selected}")
+        else:
+            mode = str(app_cfg.get("degirum_device_mode", "auto")).strip().lower() or "auto"
+            if mode != "auto":
+                selected = mode
+                self.log_window.add_entry("application", f"device resolve [{cam_name}]: global manual mode -> {selected}")
+            else:
+                recommended = str(app_cfg.get("degirum_preferred_device", "cpu")).strip().lower() or "cpu"
+                if recommended == "auto":
+                    recommended = "cpu"
+                selected = recommended
+                self.log_window.add_entry(
+                    "application",
+                    f"device resolve [{cam_name}]: global auto + recommendation -> {selected}",
+                )
+
+        available_raw = app_cfg.get("degirum_available_devices", [])
+        available_devices = {str(item).strip().lower() for item in available_raw if str(item).strip()}
+        if selected != "cpu" and available_devices and selected not in available_devices:
+            self.log_window.add_entry(
+                "warning",
+                f"device resolve [{cam_name}]: requested '{selected}' not available in {sorted(available_devices)} -> forcing cpu",
+            )
+            selected = "cpu"
+
+        self.log_window.add_entry("application", f"device resolve [{cam_name}]: effective -> {selected}")
+        return selected
+
     def _get_model(self, model_name: str, device_config: object = None):
         cache_key = self._build_model_cache_key(model_name, device_config)
         if cache_key in self.model_cache:
@@ -2561,8 +2598,9 @@ QToolButton:focus { outline: none; }
             self.workers.append(None)
         cam = self.cameras[idx]
         model_name = cam.get("model", DEFAULT_MODEL)
+        effective_device = self._resolve_effective_degirum_device(cam)
         try:
-            model = self._get_model(model_name, cam)
+            model = self._get_model(model_name, effective_device)
         except Exception as e:
             QMessageBox.warning(self, "Model", f"Nie udało się załadować modelu '{model_name}': {e}")
             self._log_error("error", f"model {model_name}: {e}", source="app", camera=str(cam.get("name", idx)))
