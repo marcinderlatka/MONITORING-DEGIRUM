@@ -45,7 +45,10 @@ from .config import (
     DEFAULT_RECORDER_QUEUE_WARN_THRESHOLD,
     DEFAULT_POST_SECONDS,
     DEFAULT_PREVIEW_FPS_MAIN,
+    DEFAULT_PREVIEW_FPS_GRID,
     DEFAULT_PREVIEW_FPS_THUMB,
+    DEFAULT_PREVIEW_GRID_MAX_HEIGHT,
+    DEFAULT_PREVIEW_GRID_MAX_WIDTH,
     DEFAULT_PREVIEW_MAIN_MAX_HEIGHT,
     DEFAULT_PREVIEW_MAIN_MAX_WIDTH,
     DEFAULT_PREVIEW_PAUSE_WHEN_HIDDEN,
@@ -518,15 +521,17 @@ class CameraWorker(QThread):
             self.min_record_seconds = int(self.camera.get("min_record_seconds", self.min_record_seconds))
 
         self.preview_fps_main = float(self.camera.get("preview_fps_main", DEFAULT_PREVIEW_FPS_MAIN))
-        self.preview_fps_grid = float(self.camera.get("preview_fps_grid", DEFAULT_PREVIEW_FPS_THUMB))
+        self.preview_fps_grid = float(self.camera.get("preview_fps_grid", DEFAULT_PREVIEW_FPS_GRID))
         self.preview_fps_thumb = float(self.camera.get("preview_fps_thumb", DEFAULT_PREVIEW_FPS_THUMB))
         self.preview_pause_when_hidden = bool(self.camera.get("preview_pause_when_hidden", DEFAULT_PREVIEW_PAUSE_WHEN_HIDDEN))
         self.preview_main_max_width = int(self.camera.get("preview_main_max_width", DEFAULT_PREVIEW_MAIN_MAX_WIDTH))
         self.preview_main_max_height = int(self.camera.get("preview_main_max_height", DEFAULT_PREVIEW_MAIN_MAX_HEIGHT))
-        self.preview_grid_max_width = int(self.camera.get("preview_grid_max_width", DEFAULT_PREVIEW_THUMB_MAX_WIDTH))
-        self.preview_grid_max_height = int(self.camera.get("preview_grid_max_height", DEFAULT_PREVIEW_THUMB_MAX_HEIGHT))
+        self.preview_grid_max_width = int(self.camera.get("preview_grid_max_width", DEFAULT_PREVIEW_GRID_MAX_WIDTH))
+        self.preview_grid_max_height = int(self.camera.get("preview_grid_max_height", DEFAULT_PREVIEW_GRID_MAX_HEIGHT))
         self.preview_thumb_max_width = int(self.camera.get("preview_thumb_max_width", DEFAULT_PREVIEW_THUMB_MAX_WIDTH))
         self.preview_thumb_max_height = int(self.camera.get("preview_thumb_max_height", DEFAULT_PREVIEW_THUMB_MAX_HEIGHT))
+        self._base_preview_fps_grid = float(self.preview_fps_grid)
+        self._base_preview_fps_thumb = float(self.preview_fps_thumb)
         self.camera_priority = str(self.camera.get("camera_priority", "normal"))
         self.preview_role = "thumb"
         self.is_overload_degraded = False
@@ -552,6 +557,8 @@ class CameraWorker(QThread):
         self.preview_processing_ms = 0.0
         self.recording_enqueue_ms = 0.0
         self.frame_copies_total = 0
+        self.preview_bytes_estimated = 0.0
+        self._preview_bytes_last_emit_ts = 0.0
         self._preview_resize_cache_key: tuple[int, int, int, int, int] | None = None
         self._preview_resize_cache_frame: np.ndarray | None = None
         self.last_input_size: tuple[int, int] | None = None
@@ -740,14 +747,22 @@ class CameraWorker(QThread):
             self.detect_fps_factor = 1.0
         if thumb_preview_fps is not None and thumb_preview_fps > 0:
             self.preview_fps_thumb = float(thumb_preview_fps)
+            self._base_preview_fps_thumb = float(thumb_preview_fps)
         if grid_preview_fps is not None and grid_preview_fps > 0:
             self.preview_fps_grid = float(grid_preview_fps)
+            self._base_preview_fps_grid = float(grid_preview_fps)
         if disable_overlays is not None:
             self.overload_disable_nonessential_overlays = bool(disable_overlays)
         if overlay_stride is not None:
             self.overlay_stride = int(max(1, overlay_stride))
         if preview_resolution_factor is not None:
             self.preview_resolution_factor = float(max(0.3, min(1.0, preview_resolution_factor)))
+        if self.overload_level >= 2:
+            forced_resolution = float(preview_resolution_factor) if preview_resolution_factor is not None else float(self.preview_resolution_factor)
+            self.preview_resolution_factor = float(max(0.6, min(0.75, forced_resolution)))
+            fps_reduction_factor = 0.65
+            self.preview_fps_thumb = float(max(0.5, self._base_preview_fps_thumb * fps_reduction_factor))
+            self.preview_fps_grid = float(max(0.5, self._base_preview_fps_grid * fps_reduction_factor))
         self.performance_log_interval_s = self._base_performance_log_interval_s + float(self.overload_level * 6.0)
         self._detection_debug_log_interval_s = max(4.0, float(self.performance_log_interval_s))
         if previous_level != self.overload_level:
@@ -877,6 +892,8 @@ class CameraWorker(QThread):
         self.preview_fps_main = float(camera_config.get("preview_fps_main", self.preview_fps_main))
         self.preview_fps_grid = float(camera_config.get("preview_fps_grid", getattr(self, "preview_fps_grid", self.preview_fps_thumb)))
         self.preview_fps_thumb = float(camera_config.get("preview_fps_thumb", self.preview_fps_thumb))
+        self._base_preview_fps_grid = float(self.preview_fps_grid)
+        self._base_preview_fps_thumb = float(self.preview_fps_thumb)
         self.preview_pause_when_hidden = bool(camera_config.get("preview_pause_when_hidden", self.preview_pause_when_hidden))
         self.preview_main_max_width = int(camera_config.get("preview_main_max_width", self.preview_main_max_width))
         self.preview_main_max_height = int(camera_config.get("preview_main_max_height", self.preview_main_max_height))
@@ -1659,8 +1676,8 @@ class CameraWorker(QThread):
             emit_w = target_grid_w if self.preview_role == "grid" else target_thumb_w
             emit_h = target_grid_h if self.preview_role == "grid" else target_thumb_h
             thumb_emit_frame = self._resize_for_preview_cached(preview_frame, emit_w, emit_h)
-            self.main_preview_signal.emit(thumb_emit_frame, self.index)
             self.thumb_preview_signal.emit(thumb_emit_frame, self.index)
+            self._update_preview_bytes_estimate(thumb_emit_frame, now_mono)
             self.state.last_preview_emit_ts = now_mono
             self.state.frames_emitted += 1
             self.preview_processing_ms = max(0.0, (time.monotonic() - preview_start) * 1000.0)
@@ -1682,14 +1699,39 @@ class CameraWorker(QThread):
             thumb_emit_frame = main_emit_frame
         else:
             thumb_emit_frame = self._resize_for_preview_cached(main_source_frame, thumb_emit_w, thumb_emit_h)
+        emitted_frames: list[np.ndarray] = []
         if self.preview_role == "main":
             self.main_preview_signal.emit(main_emit_frame, self.index)
+            emitted_frames.append(main_emit_frame)
         emit_thumb_for_main = self.preview_role != "main" or self.recording or ((self.state.frames_emitted % 3) == 0)
         if emit_thumb_for_main:
             self.thumb_preview_signal.emit(thumb_emit_frame, self.index)
+            emitted_frames.append(thumb_emit_frame)
+        self._update_preview_bytes_estimate(*emitted_frames, now_mono=now_mono)
         self.state.last_preview_emit_ts = now_mono
         self.state.frames_emitted += 1
         self.preview_processing_ms = max(0.0, (time.monotonic() - preview_start) * 1000.0)
+
+    @staticmethod
+    def _estimate_frame_bytes(frame: np.ndarray | None) -> int:
+        if frame is None:
+            return 0
+        try:
+            return int(frame.nbytes)
+        except Exception:
+            return 0
+
+    def _update_preview_bytes_estimate(self, *frames: np.ndarray, now_mono: float) -> None:
+        payload_bytes = sum(self._estimate_frame_bytes(frame) for frame in frames)
+        if payload_bytes <= 0:
+            return
+        elapsed = now_mono - self._preview_bytes_last_emit_ts if self._preview_bytes_last_emit_ts > 0 else 0.0
+        instant_bps = float(payload_bytes / max(1e-3, elapsed)) if elapsed > 0 else float(payload_bytes)
+        if self.preview_bytes_estimated <= 0:
+            self.preview_bytes_estimated = instant_bps
+        else:
+            self.preview_bytes_estimated = (self.preview_bytes_estimated * 0.75) + (instant_bps * 0.25)
+        self._preview_bytes_last_emit_ts = now_mono
 
     def _maybe_enqueue_record_frame(self, raw_frame: np.ndarray, now_mono: float) -> None:
         enqueue_start = time.monotonic()
@@ -1861,6 +1903,7 @@ class CameraWorker(QThread):
             "inference_ms": float(self.last_inference_ms),
             "average_inference_ms": float(self.average_inference_ms),
             "preview_processing_ms": float(self.preview_processing_ms),
+            "preview_bytes_estimated": float(max(0.0, self.preview_bytes_estimated)),
             "recording_enqueue_ms": float(self.recording_enqueue_ms),
             "queue_size": int(queue_size),
             "dropped_frames": int(dropped),
