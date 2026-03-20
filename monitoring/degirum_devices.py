@@ -6,6 +6,8 @@ always receive a safe, normalized list of device options.
 
 from __future__ import annotations
 
+import logging
+import time
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
@@ -18,6 +20,8 @@ GUI_LABELS = {
     "cpu": "CPU (procesor)",
     "gpu": "GPU (karta graficzna)",
 }
+
+logger = logging.getLogger(__name__)
 
 
 def _build_entry(
@@ -139,6 +143,242 @@ def _probe_gpu_with_load_model(
                     last_error = str(exc) or exc.__class__.__name__
                     continue
     return False, f"Probing GPU nie powiódł się ({last_error if 'last_error' in locals() else 'brak odpowiedzi'})."
+
+
+def _load_model_for_device(
+    dg_module: Any,
+    *,
+    model_name: str,
+    zoo_url: str,
+    candidate_hosts: Sequence[str],
+    device: str,
+) -> tuple[Any | None, str | None, str | None]:
+    load_model = getattr(dg_module, "load_model", None)
+    if not callable(load_model):
+        return None, None, "Brak API load_model."
+
+    last_error: str | None = None
+    for host in candidate_hosts:
+        attempts = (
+            {
+                "model_name": model_name,
+                "inference_host_address": host,
+                "zoo_url": zoo_url,
+                "device_type": device,
+            },
+            {
+                "model_name": model_name,
+                "inference_host_address": host,
+                "zoo_url": zoo_url,
+                "device": device,
+            },
+            {
+                "model_name": model_name,
+                "zoo_url": zoo_url,
+                "device_type": device,
+            },
+            {
+                "model_name": model_name,
+                "zoo_url": zoo_url,
+                "device": device,
+            },
+        )
+        for kwargs in attempts:
+            try:
+                model = load_model(**kwargs)
+                return model, host, None
+            except Exception as exc:
+                last_error = str(exc) or exc.__class__.__name__
+    return None, None, last_error or "Nieudane ładowanie modelu."
+
+
+def _run_short_inference(
+    model: Any,
+    sample_input: Any,
+    *,
+    runs: int,
+) -> tuple[list[float], str | None]:
+    if runs <= 0:
+        return [], None
+
+    infer_method = None
+    for name in ("predict", "infer", "run"):
+        maybe = getattr(model, name, None)
+        if callable(maybe):
+            infer_method = maybe
+            break
+
+    if infer_method is None:
+        return [], "Model nie udostępnia predict/infer/run."
+
+    times: list[float] = []
+    for _ in range(runs):
+        start = time.perf_counter()
+        infer_method(sample_input)
+        times.append(time.perf_counter() - start)
+    return times, None
+
+
+def benchmark_device_candidates(
+    dg_module: Any,
+    *,
+    model_name: str,
+    candidates: Sequence[str],
+    zoo_url: str | Path | None = None,
+    candidate_hosts: Sequence[str] = ("@local", "localhost", "127.0.0.1"),
+    sample_input: Any = None,
+    inference_runs: int = 2,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Benchmark candidate devices by model load time and short inference runs."""
+
+    normalized_zoo = str(Path(zoo_url) if zoo_url is not None else MODELS_PATH / model_name)
+    normalized_candidates = [str(item).strip().lower() for item in candidates if str(item).strip()]
+    safe_runs = max(1, min(3, int(inference_runs)))
+
+    logger.info(
+        "Start benchmarku DeGirum: model=%s, kandydaci=%s, runs=%s",
+        model_name,
+        normalized_candidates,
+        safe_runs,
+    )
+
+    results: list[dict[str, Any]] = []
+    for candidate in normalized_candidates:
+        entry: dict[str, Any] = {
+            "device": candidate,
+            "kind": _normalize_kind(candidate) or candidate,
+            "available": False,
+            "stable": False,
+            "load_time_ms": None,
+            "inference_time_ms": [],
+            "mean_inference_time_ms": None,
+            "score": 0.0,
+            "error": None,
+        }
+        load_start = time.perf_counter()
+        model = None
+        try:
+            model, host, load_error = _load_model_for_device(
+                dg_module,
+                model_name=model_name,
+                zoo_url=normalized_zoo,
+                candidate_hosts=tuple(candidate_hosts),
+                device=candidate,
+            )
+            entry["host"] = host
+            if model is None:
+                entry["error"] = load_error
+                results.append(entry)
+                continue
+            entry["load_time_ms"] = round((time.perf_counter() - load_start) * 1000.0, 3)
+            entry["available"] = True
+
+            infer_times, infer_error = _run_short_inference(model, sample_input, runs=safe_runs)
+            entry["inference_time_ms"] = [round(t * 1000.0, 3) for t in infer_times]
+            if infer_times:
+                entry["mean_inference_time_ms"] = round((sum(infer_times) / len(infer_times)) * 1000.0, 3)
+            entry["stable"] = infer_error is None
+            if infer_error:
+                entry["error"] = infer_error
+
+            load_ms = float(entry["load_time_ms"] or 0.0)
+            infer_ms = float(entry["mean_inference_time_ms"] or 0.0)
+            base = 1_000_000.0 / (1.0 + load_ms + infer_ms)
+            if entry["kind"] == "gpu":
+                base += 1_000.0
+            if entry["stable"]:
+                base += 100.0
+            entry["score"] = round(base, 3)
+        except Exception as exc:
+            entry["error"] = str(exc) or exc.__class__.__name__
+        finally:
+            close_method = getattr(model, "close", None)
+            if callable(close_method):
+                try:
+                    close_method()
+                except Exception:
+                    pass
+        results.append(entry)
+
+    results.sort(
+        key=lambda item: (
+            item["available"],
+            item["stable"],
+            item.get("kind") == "gpu",
+            item["score"],
+        ),
+        reverse=True,
+    )
+    available_devices = [item["device"] for item in results if item["available"]]
+    payload = {
+        "model_name": model_name,
+        "results": results,
+        "available_devices": available_devices,
+    }
+
+    if config is not None:
+        config["degirum_last_benchmark"] = payload
+        config["degirum_available_devices"] = available_devices
+
+    logger.info("Wyniki benchmarku DeGirum: %s", results)
+    return payload
+
+
+def choose_best_degirum_device(
+    dg_module: Any,
+    *,
+    model_name: str,
+    candidates: Sequence[str],
+    zoo_url: str | Path | None = None,
+    candidate_hosts: Sequence[str] = ("@local", "localhost", "127.0.0.1"),
+    sample_input: Any = None,
+    inference_runs: int = 2,
+    config: dict[str, Any] | None = None,
+    auto_select: bool = False,
+) -> str:
+    """Choose best DeGirum device, prefer stable GPU and always keep CPU fallback."""
+
+    benchmark = benchmark_device_candidates(
+        dg_module,
+        model_name=model_name,
+        candidates=candidates,
+        zoo_url=zoo_url,
+        candidate_hosts=candidate_hosts,
+        sample_input=sample_input,
+        inference_runs=inference_runs,
+        config=config,
+    )
+
+    choice = "cpu"
+    rows = benchmark.get("results", [])
+    stable_gpu = next(
+        (
+            row
+            for row in rows
+            if row.get("kind") == "gpu" and row.get("available") and row.get("stable")
+        ),
+        None,
+    )
+    stable_cpu = next(
+        (
+            row
+            for row in rows
+            if row.get("kind") == "cpu" and row.get("available") and row.get("stable")
+        ),
+        None,
+    )
+
+    if stable_gpu is not None:
+        choice = str(stable_gpu.get("device") or "gpu")
+    elif stable_cpu is not None:
+        choice = str(stable_cpu.get("device") or "cpu")
+
+    if config is not None and auto_select:
+        config["degirum_preferred_device"] = choice
+
+    logger.info("Rekomendowane urządzenie DeGirum: %s", choice)
+    return choice
 
 
 def detect_degirum_devices(
