@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import itertools
+
 from monitoring.degirum_devices import (
     benchmark_device_candidates,
     choose_best_degirum_device,
@@ -76,6 +78,32 @@ def test_benchmark_device_candidates_updates_config() -> None:
     assert [row["device"] for row in result["results"]] == ["gpu", "cpu"]
     assert config["degirum_available_devices"] == ["gpu", "cpu"]
     assert "degirum_last_benchmark" in config
+
+
+def test_benchmark_device_candidates_is_deterministic_with_mocked_perf_counter(monkeypatch) -> None:
+    class _Api:
+        @staticmethod
+        def load_model(**kwargs):
+            if kwargs.get("device_type") in {"gpu", "cpu"} or kwargs.get("device") in {"gpu", "cpu"}:
+                return _FakeModel()
+            raise RuntimeError("unsupported")
+
+    ticks = itertools.count(start=0, step=1)
+    monkeypatch.setattr("monitoring.degirum_devices.time.perf_counter", lambda: next(ticks) / 1000.0)
+
+    result = benchmark_device_candidates(
+        _Api(),
+        model_name="dummy",
+        candidates=["gpu", "cpu"],
+        sample_input={"frame": b"x"},
+        inference_runs=2,
+    )
+
+    assert [row["device"] for row in result["results"]] == ["gpu", "cpu"]
+    assert result["results"][0]["load_time_ms"] == 1.0
+    assert result["results"][1]["load_time_ms"] == 1.0
+    assert result["results"][0]["inference_time_ms"] == [1.0, 1.0]
+    assert result["results"][1]["inference_time_ms"] == [1.0, 1.0]
 
 
 def test_choose_best_degirum_device_falls_back_to_cpu_when_gpu_unstable() -> None:

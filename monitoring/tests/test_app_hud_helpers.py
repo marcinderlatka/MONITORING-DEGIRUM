@@ -87,3 +87,13 @@ def test_device_override_change_is_classified_as_restart_not_live():
     assert runtime_apply["count"] == 0
     assert restart_all["count"] == 0
     assert refreshed["count"] == 1
+
+
+def test_requires_worker_restart_marks_degirum_override_fields():
+    fake = types.SimpleNamespace()
+    changed_keys = ["fps", "degirum_device_override_enabled", "degirum_device_override"]
+
+    requires_restart, restart_keys = app_mod.MainWindow._requires_worker_restart(fake, changed_keys, {}, {})
+
+    assert requires_restart is True
+    assert set(restart_keys) == {"degirum_device_override_enabled", "degirum_device_override"}

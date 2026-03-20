@@ -255,3 +255,61 @@ def test_fill_camera_defaults_sets_degirum_override_default_and_inherit():
     )
     assert explicit["degirum_device_override_enabled"] is True
     assert explicit["degirum_device_override"] == "inherit"
+
+
+def test_load_config_legacy_file_adds_new_degirum_fields_for_each_camera(tmp_path):
+    from monitoring.config import load_config
+
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(
+        json.dumps(
+            {
+                "cameras": [
+                    {"name": "Cam-A", "rtsp": "rtsp://a"},
+                    {"name": "Cam-B", "rtsp": "rtsp://b"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = load_config(cfg_path)
+
+    assert cfg["degirum_device_mode"] == "auto"
+    assert cfg["degirum_preferred_device"] == "auto"
+    assert cfg["degirum_available_devices"] == []
+    assert len(cfg["cameras"]) == 2
+    assert cfg["cameras"][0]["degirum_device_override_enabled"] is False
+    assert cfg["cameras"][0]["degirum_device_override"] == "inherit"
+    assert cfg["cameras"][1]["degirum_device_override_enabled"] is False
+    assert cfg["cameras"][1]["degirum_device_override"] == "inherit"
+
+
+def test_load_config_applies_camera_defaults_independently_per_camera(tmp_path):
+    from monitoring.config import load_config
+
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(
+        json.dumps(
+            {
+                "cameras": [
+                    {
+                        "name": "Cam-A",
+                        "rtsp": "rtsp://a",
+                        "degirum_device_override_enabled": True,
+                        "degirum_device_override": "gpu:1",
+                    },
+                    {"name": "Cam-B", "rtsp": "rtsp://b"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = load_config(cfg_path)
+
+    cam_a, cam_b = cfg["cameras"]
+    assert cam_a["degirum_device_override_enabled"] is True
+    assert cam_a["degirum_device_override"] == "gpu:1"
+    assert cam_b["degirum_device_override_enabled"] is False
+    assert cam_b["degirum_device_override"] == "inherit"
