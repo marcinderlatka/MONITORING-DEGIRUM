@@ -1853,7 +1853,7 @@ QToolButton:focus { outline: none; }
 
         # backend
         self.workers = []
-        self.model_cache: dict[str, object] = {}
+        self.model_cache: dict[tuple[str, str], object] = {}
         self.camera_list.currentRowChanged.connect(self.switch_camera)
 
         self.alert_list.open_video.connect(self.open_video_file)
@@ -2314,18 +2314,75 @@ QToolButton:focus { outline: none; }
 
     # --- Zarządzanie kamerami ---
 
-    def _get_model(self, model_name: str):
-        if model_name in self.model_cache:
-            self.log_window.add_entry("application", f"model z cache: {model_name}")
-            return self.model_cache[model_name]
-        model = dg.load_model(
-            model_name=model_name,
-            inference_host_address="@local",
-            zoo_url=str(MODELS_PATH / model_name),
-        )
-        self.model_cache[model_name] = model
-        self.log_window.add_entry("application", f"model załadowany: {model_name}")
-        return model
+    def _build_model_cache_key(self, model_name: str, device_config: object = None) -> tuple[str, str]:
+        model_key = str(model_name).strip()
+        effective_device = "auto"
+        if isinstance(device_config, dict):
+            cfg = dict(device_config)
+            override_enabled = bool(cfg.get("degirum_device_override_enabled", False))
+            override_value = str(cfg.get("degirum_device_override", "inherit")).strip().lower()
+            if override_enabled and override_value and override_value != "inherit":
+                effective_device = override_value
+            else:
+                for key in ("effective_device", "device_type", "device", "degirum_preferred_device", "degirum_device_mode"):
+                    raw = cfg.get(key)
+                    if raw is None:
+                        continue
+                    candidate = str(raw).strip().lower()
+                    if candidate:
+                        effective_device = candidate
+                        break
+        elif isinstance(device_config, str):
+            candidate = device_config.strip().lower()
+            if candidate:
+                effective_device = candidate
+        return model_key, effective_device
+
+    def _get_model(self, model_name: str, device_config: object = None):
+        cache_key = self._build_model_cache_key(model_name, device_config)
+        if cache_key in self.model_cache:
+            self.log_window.add_entry("application", f"model cache-hit: {model_name} ({cache_key[1]})")
+            return self.model_cache[cache_key]
+
+        effective_device = cache_key[1]
+        load_kwargs = {
+            "model_name": model_name,
+            "inference_host_address": "@local",
+            "zoo_url": str(MODELS_PATH / model_name),
+        }
+        if effective_device and effective_device != "auto":
+            load_kwargs["device_type"] = effective_device
+
+        try:
+            model = dg.load_model(**load_kwargs)
+            self.model_cache[cache_key] = model
+            self.log_window.add_entry("application", f"model load: {model_name} ({effective_device})")
+            return model
+        except Exception as init_error:
+            self.log_window.add_entry("warning", f"model init error: {model_name} ({effective_device}) -> {init_error}")
+            if effective_device != "gpu":
+                raise
+            self.log_window.add_entry("warning", f"model fallback: {model_name} gpu -> cpu")
+
+        cpu_key = self._build_model_cache_key(model_name, "cpu")
+        if cpu_key in self.model_cache:
+            self.log_window.add_entry("application", f"model cache-hit: {model_name} (cpu)")
+            return self.model_cache[cpu_key]
+
+        cpu_kwargs = {
+            "model_name": model_name,
+            "inference_host_address": "@local",
+            "zoo_url": str(MODELS_PATH / model_name),
+            "device_type": "cpu",
+        }
+        try:
+            model = dg.load_model(**cpu_kwargs)
+            self.model_cache[cpu_key] = model
+            self.log_window.add_entry("application", f"model load: {model_name} (cpu)")
+            return model
+        except Exception as cpu_error:
+            self.log_window.add_entry("error", f"model init error: {model_name} (cpu) -> {cpu_error}")
+            raise
 
     def _apply_worker_preview_roles(self) -> None:
         selected_idx = self.camera_list.currentRow()
@@ -2505,7 +2562,7 @@ QToolButton:focus { outline: none; }
         cam = self.cameras[idx]
         model_name = cam.get("model", DEFAULT_MODEL)
         try:
-            model = self._get_model(model_name)
+            model = self._get_model(model_name, cam)
         except Exception as e:
             QMessageBox.warning(self, "Model", f"Nie udało się załadować modelu '{model_name}': {e}")
             self._log_error("error", f"model {model_name}: {e}", source="app", camera=str(cam.get("name", idx)))
