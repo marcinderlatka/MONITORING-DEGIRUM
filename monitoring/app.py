@@ -187,7 +187,13 @@ from .system_metrics import SystemMetricsSampler
 # Qt platform plugin path (Linux)
 os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = "/usr/lib/x86_64-linux-gnu/qt5/plugins/platforms"
 
-CAMERA_RESTART_REQUIRED_FIELDS = {"rtsp", "type", "model"}
+CAMERA_RESTART_REQUIRED_FIELDS = {
+    "rtsp",
+    "type",
+    "model",
+    "degirum_device_override_enabled",
+    "degirum_device_override",
+}
 CAMERA_RUNTIME_APPLY_FIELDS = {
     "fps", "detection_fps_limit", "rtsp_fps", "confidence_threshold", "confidence_threshold_draw", "confidence_threshold_record",
     "draw_overlays", "enable_detection", "enable_recording", "visible_classes", "record_classes",
@@ -2945,7 +2951,12 @@ QToolButton:focus { outline: none; }
             return result
 
         if requires_restart:
-            result["restarted"] = self._maybe_restart_camera_after_settings(idx, was_running, requires_restart)
+            result["restarted"] = self._maybe_restart_camera_after_settings(
+                idx,
+                was_running,
+                requires_restart,
+                restart_reason_keys,
+            )
             self._refresh_camera_hud(idx)
             return result
 
@@ -2975,9 +2986,23 @@ QToolButton:focus { outline: none; }
         except Exception as exc:
             self._log_warning("settings", f"nie udało się odświeżyć HUD: {exc}", source="camera-hud")
 
-    def _maybe_restart_camera_after_settings(self, idx: int, was_running: bool, requires_restart: bool) -> bool:
+    def _maybe_restart_camera_after_settings(
+        self,
+        idx: int,
+        was_running: bool,
+        requires_restart: bool,
+        restart_reason_keys: list[str] | None = None,
+    ) -> bool:
         if not requires_restart:
             return False
+        restart_reason_keys = restart_reason_keys or []
+        if any(key in {"degirum_device_override_enabled", "degirum_device_override"} for key in restart_reason_keys):
+            self._log_info(
+                "settings",
+                "restart kamery po zmianie urządzenia",
+                source="settings",
+                camera=str(self.cameras[idx].get("name", idx)),
+            )
         restarted = self._restart_camera_with_new_settings(idx, was_running)
         if restarted:
             self._log_info("settings", "kamera została automatycznie zrestartowana po zmianie ustawień", source="settings", camera=str(self.cameras[idx].get("name", idx)))
