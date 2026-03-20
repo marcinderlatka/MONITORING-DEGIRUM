@@ -1898,6 +1898,12 @@ QToolButton:focus { outline: none; }
         self.overload_max_queue_size = int(self.config.get("overload_max_queue_size", DEFAULT_OVERLOAD_MAX_QUEUE_SIZE)) if hasattr(self, "config") else DEFAULT_OVERLOAD_MAX_QUEUE_SIZE
         self.overload_max_preview_bandwidth_mbps = float(self.config.get("overload_max_preview_bandwidth_mbps", DEFAULT_OVERLOAD_MAX_PREVIEW_BANDWIDTH_MBPS)) if hasattr(self, "config") else DEFAULT_OVERLOAD_MAX_PREVIEW_BANDWIDTH_MBPS
         self.overload_safety_threshold_pct = int(self.config.get("overload_safety_threshold_pct", 85)) if hasattr(self, "config") else 85
+        self.degirum_device_mode = str(self.config.get("degirum_device_mode", "auto")).strip().lower() or "auto"
+        self.degirum_preferred_device = str(self.config.get("degirum_preferred_device", "auto")).strip().lower() or "auto"
+        self.degirum_auto_select_best = bool(self.config.get("degirum_auto_select_best", True))
+        raw_devices = self.config.get("degirum_available_devices", []) if hasattr(self, "config") else []
+        self.degirum_available_devices = [str(item).strip().lower() for item in raw_devices if str(item).strip()]
+        self.degirum_last_benchmark = dict(self.config.get("degirum_last_benchmark", {})) if hasattr(self, "config") else {}
         self.overload_level = 0
         self.overload_mode_active = False
         self._overload_last_change_ts = 0.0
@@ -2004,6 +2010,11 @@ QToolButton:focus { outline: none; }
         cfg["overload_max_queue_size"] = int(self.overload_max_queue_size)
         cfg["overload_max_preview_bandwidth_mbps"] = float(self.overload_max_preview_bandwidth_mbps)
         cfg["overload_safety_threshold_pct"] = int(self.overload_safety_threshold_pct)
+        cfg["degirum_device_mode"] = str(self.degirum_device_mode)
+        cfg["degirum_preferred_device"] = str(self.degirum_preferred_device)
+        cfg["degirum_auto_select_best"] = bool(self.degirum_auto_select_best)
+        cfg["degirum_available_devices"] = list(self.degirum_available_devices)
+        cfg["degirum_last_benchmark"] = dict(self.degirum_last_benchmark)
         return cfg
 
     def _heartbeat_perf_changed(self, camera_name: str, payload: dict) -> bool:
@@ -3703,6 +3714,33 @@ QToolButton:focus { outline: none; }
         dlg = QualityPerformanceDialog(self)
         dlg.exec_()
 
+    def open_degirum_device_settings_dialog(self):
+        self.log_window.add_entry("settings", "otworzono ustawienia urządzeń DeGirum")
+        dlg = DeGirumDeviceSettingsDialog(self)
+        dlg.exec_()
+
+    def apply_degirum_device_settings(self, settings: dict) -> None:
+        previous_cfg = self._build_runtime_config()
+        self.degirum_auto_select_best = bool(settings.get("degirum_auto_select_best", self.degirum_auto_select_best))
+        preferred = config_module._normalize_degirum_device_value(settings.get("degirum_preferred_device", self.degirum_preferred_device))
+        available = [config_module._normalize_degirum_device_value(item) for item in settings.get("degirum_available_devices", self.degirum_available_devices)]
+        unique_available = [item for item in dict.fromkeys([item for item in available if item and item not in {"auto"}])]
+        self.degirum_preferred_device = preferred
+        self.degirum_device_mode = "auto"
+        self.degirum_available_devices = unique_available
+        self.degirum_last_benchmark = dict(settings.get("degirum_last_benchmark", self.degirum_last_benchmark))
+        candidate_cfg = self._save_runtime_config()
+        self.model_cache.clear()
+        self.restart_workers_and_ui()
+        self._refresh_camera_status_indicators()
+        self._log_info(
+            "settings",
+            "zastosowano ustawienia urządzeń DeGirum",
+            source="settings",
+            details=f"mode={self.degirum_device_mode} preferred={self.degirum_preferred_device} auto_select={self.degirum_auto_select_best}",
+        )
+        self._start_config_watchdog(previous_cfg, candidate_cfg, reason="degirum-device-settings")
+
     def apply_quality_performance_preset(self, preset_key: str) -> None:
         preset = QUALITY_PERFORMANCE_PRESETS.get(str(preset_key))
         if not preset:
@@ -3757,10 +3795,11 @@ class SettingsHub(QDialog):
         btn_remove_cam = QPushButton("Usuń kamerę")
         btn_auto_balance = QPushButton("Auto-balans obciążenia")
         btn_quality_perf = QPushButton("Jakość/Wydajność")
+        btn_degirum_device = QPushButton("Urządzenia DeGirum")
         btn_restart = QPushButton("Restart aplikacji")
         btn_close = QPushButton("Zamknij")
 
-        for b in [btn_add_cam, btn_add_usb, btn_remove_cam, btn_auto_balance, btn_quality_perf, btn_restart, btn_close]:
+        for b in [btn_add_cam, btn_add_usb, btn_remove_cam, btn_auto_balance, btn_quality_perf, btn_degirum_device, btn_restart, btn_close]:
             layout.addWidget(b)
 
         btn_add_cam.clicked.connect(parent.add_camera_wizard)
@@ -3768,8 +3807,255 @@ class SettingsHub(QDialog):
         btn_remove_cam.clicked.connect(parent.remove_camera_dialog)
         btn_auto_balance.clicked.connect(parent.open_system_load_balancer_dialog)
         btn_quality_perf.clicked.connect(parent.open_quality_performance_panel)
+        btn_degirum_device.clicked.connect(parent.open_degirum_device_settings_dialog)
         btn_restart.clicked.connect(parent.restart_app)
         btn_close.clicked.connect(self.accept)
+
+
+class DeGirumDeviceSettingsDialog(QDialog):
+    _worker_finished = pyqtSignal(str, object)
+
+    def __init__(self, parent: MainWindow):
+        super().__init__(parent)
+        self.setWindowTitle("Ustawienia urządzeń DeGirum")
+        self.resize(840, 540)
+        self.parent_window = parent
+        self._task_running = False
+        self._detected_devices = list(parent.degirum_available_devices)
+        self._benchmark_data = dict(parent.degirum_last_benchmark)
+        self._worker_finished.connect(self._on_worker_finished, Qt.QueuedConnection)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.auto_select_chk = QCheckBox("Automatycznie wybieraj najlepsze urządzenie")
+        self.auto_select_chk.setChecked(bool(parent.degirum_auto_select_best))
+        self.auto_select_chk.setToolTip("Po testach aplikacja sama wskaże najszybsze urządzenie i zapisze je w konfiguracji.")
+        form.addRow(self.auto_select_chk)
+
+        self.default_device_combo = QComboBox()
+        self.default_device_combo.setToolTip("Domyślne urządzenie używane przez kamery bez lokalnego nadpisania.")
+        form.addRow("Domyślne urządzenie", self.default_device_combo)
+        layout.addLayout(form)
+
+        buttons_row = QHBoxLayout()
+        self.detect_btn = QPushButton("Wykryj urządzenia")
+        self.detect_btn.setToolTip("Wykrywa urządzenia wspierane przez lokalny runtime DeGirum bez blokowania interfejsu.")
+        self.benchmark_btn = QPushButton("Przetestuj i wybierz najlepsze")
+        self.benchmark_btn.setToolTip("Uruchamia test czasu inicjalizacji modelu na urządzeniach i wybiera rekomendację.")
+        buttons_row.addWidget(self.detect_btn)
+        buttons_row.addWidget(self.benchmark_btn)
+        buttons_row.addStretch(1)
+        layout.addLayout(buttons_row)
+
+        self.status_label = QLabel("Gotowe.")
+        self.status_label.setToolTip("Stan ostatniej operacji wykrywania/testu urządzeń.")
+        layout.addWidget(self.status_label)
+
+        self.table = QTableWidget(0, 6, self)
+        self.table.setHorizontalHeaderLabels(["Nazwa", "Typ", "Dostępność", "Czas testu", "Rekomendacja", "Szczegóły"])
+        self.table.setToolTip("Lista urządzeń wykrytych i przetestowanych. Czas testu to czas inicjalizacji modelu.")
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSelectionMode(QTableWidget.NoSelection)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.Stretch)
+        layout.addWidget(self.table, stretch=1)
+
+        action_row = QHBoxLayout()
+        self.btn_cancel = QPushButton("Anuluj")
+        self.btn_apply = QPushButton("Zapisz")
+        self.btn_apply.setToolTip("Zapisuje ustawienia urządzeń do globalnego config i odświeża działanie aplikacji.")
+        action_row.addStretch(1)
+        action_row.addWidget(self.btn_cancel)
+        action_row.addWidget(self.btn_apply)
+        layout.addLayout(action_row)
+
+        self.detect_btn.clicked.connect(self._on_detect_clicked)
+        self.benchmark_btn.clicked.connect(self._on_benchmark_clicked)
+        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_apply.clicked.connect(self._apply)
+
+        initial_device = str(parent.degirum_preferred_device or "auto")
+        self._refresh_device_combo(initial_device)
+        self._refresh_table()
+
+    def _refresh_device_combo(self, selected_device: str | None = None) -> None:
+        options: list[tuple[str, str]] = [
+            ("Auto", "auto"),
+            ("CPU (procesor)", "cpu"),
+            ("GPU (karta graficzna)", "gpu"),
+        ]
+        for dev in self._detected_devices:
+            val = str(dev).strip().lower()
+            if not val or val in {"auto", "cpu", "gpu"}:
+                continue
+            options.append((val, val))
+        unique_options = []
+        seen_values = set()
+        for label, value in options:
+            if value in seen_values:
+                continue
+            seen_values.add(value)
+            unique_options.append((label, value))
+        self.default_device_combo.clear()
+        for label, value in unique_options:
+            self.default_device_combo.addItem(label, value)
+        if selected_device is None:
+            selected_device = str(self.default_device_combo.currentData() or "auto")
+        idx = self.default_device_combo.findData(str(selected_device).strip().lower())
+        self.default_device_combo.setCurrentIndex(idx if idx >= 0 else 0)
+
+    def _rows_for_table(self) -> list[dict]:
+        benchmark_by_device = self._benchmark_data.get("by_device", {}) if isinstance(self._benchmark_data, dict) else {}
+        recommended = str(self._benchmark_data.get("recommended_device", "")).strip().lower() if isinstance(self._benchmark_data, dict) else ""
+        known_devices = ["cpu", "gpu"] + list(self._detected_devices)
+        rows = []
+        for device in dict.fromkeys([str(item).strip().lower() for item in known_devices if str(item).strip()]):
+            if not device:
+                continue
+            bench = benchmark_by_device.get(device, {}) if isinstance(benchmark_by_device, dict) else {}
+            if device == "cpu":
+                device_type = "CPU"
+            elif device == "gpu":
+                device_type = "GPU"
+            else:
+                device_type = "device_id"
+            available = "Tak" if device in self._detected_devices or device in {"cpu", "gpu"} else "Nie"
+            elapsed_ms = bench.get("elapsed_ms")
+            if isinstance(elapsed_ms, (int, float)) and elapsed_ms > 0:
+                time_label = f"{float(elapsed_ms):.1f} ms"
+            else:
+                time_label = "—"
+            recommendation = "Tak" if device == recommended else "—"
+            details = str(bench.get("details", "Wykryto urządzenie." if available == "Tak" else "Brak danych."))
+            rows.append(
+                {
+                    "name": device,
+                    "type": device_type,
+                    "availability": available,
+                    "test_time": time_label,
+                    "recommendation": recommendation,
+                    "details": details,
+                }
+            )
+        return rows
+
+    def _refresh_table(self) -> None:
+        rows = self._rows_for_table()
+        self.table.setRowCount(len(rows))
+        for row_idx, row in enumerate(rows):
+            self.table.setItem(row_idx, 0, QTableWidgetItem(row["name"]))
+            self.table.setItem(row_idx, 1, QTableWidgetItem(row["type"]))
+            self.table.setItem(row_idx, 2, QTableWidgetItem(row["availability"]))
+            self.table.setItem(row_idx, 3, QTableWidgetItem(row["test_time"]))
+            self.table.setItem(row_idx, 4, QTableWidgetItem(row["recommendation"]))
+            self.table.setItem(row_idx, 5, QTableWidgetItem(row["details"]))
+
+    def _set_busy(self, busy: bool, text: str) -> None:
+        self._task_running = bool(busy)
+        self.detect_btn.setEnabled(not busy)
+        self.benchmark_btn.setEnabled(not busy)
+        self.btn_apply.setEnabled(not busy)
+        self.status_label.setText(text)
+
+    def _run_task_async(self, task_name: str, fn) -> None:
+        if self._task_running:
+            return
+        self._set_busy(True, "Przetwarzanie…")
+
+        def _runner():
+            try:
+                payload = fn()
+            except Exception as exc:
+                payload = {"error": str(exc)}
+            self._worker_finished.emit(task_name, payload)
+
+        threading.Thread(target=_runner, daemon=True).start()
+
+    def _discover_devices_payload(self) -> dict:
+        discovered_raw = dg.get_supported_devices("@local")
+        discovered = [str(item).strip().lower() for item in discovered_raw if str(item).strip()]
+        discovered = [item for item in dict.fromkeys(discovered)]
+        return {"devices": discovered}
+
+    def _benchmark_payload(self) -> dict:
+        discovery = self._discover_devices_payload()
+        devices = discovery.get("devices", [])
+        model_name = DEFAULT_MODEL
+        if self.parent_window.cameras:
+            model_name = str(self.parent_window.cameras[0].get("model", DEFAULT_MODEL))
+        benchmark_by_device: dict[str, dict] = {}
+        best_device = ""
+        best_ms = None
+        for device in dict.fromkeys(["cpu", "gpu"] + list(devices)):
+            if not device:
+                continue
+            started = time.perf_counter()
+            try:
+                dg.load_model(
+                    model_name=model_name,
+                    inference_host_address="@local",
+                    zoo_url=str(MODELS_PATH / model_name),
+                    device_type=device,
+                )
+                elapsed_ms = (time.perf_counter() - started) * 1000.0
+                benchmark_by_device[device] = {"elapsed_ms": elapsed_ms, "details": f"Model: {model_name}"}
+                if best_ms is None or elapsed_ms < best_ms:
+                    best_ms = elapsed_ms
+                    best_device = device
+            except Exception as exc:
+                benchmark_by_device[device] = {"elapsed_ms": None, "details": f"Błąd testu: {exc}"}
+        return {
+            "devices": list(devices),
+            "benchmark": {
+                "updated_at": datetime.datetime.utcnow().isoformat() + "Z",
+                "recommended_device": best_device or "cpu",
+                "by_device": benchmark_by_device,
+            },
+        }
+
+    def _on_detect_clicked(self) -> None:
+        self._run_task_async("detect", self._discover_devices_payload)
+
+    def _on_benchmark_clicked(self) -> None:
+        self._run_task_async("benchmark", self._benchmark_payload)
+
+    def _on_worker_finished(self, task_name: str, payload: object) -> None:
+        data = payload if isinstance(payload, dict) else {}
+        if data.get("error"):
+            self._set_busy(False, f"Błąd: {data.get('error')}")
+            return
+        if task_name in {"detect", "benchmark"}:
+            self._detected_devices = list(data.get("devices", self._detected_devices))
+            if task_name == "benchmark" and isinstance(data.get("benchmark"), dict):
+                self._benchmark_data = dict(data["benchmark"])
+                recommended = str(self._benchmark_data.get("recommended_device", "")).strip().lower()
+                if self.auto_select_chk.isChecked() and recommended:
+                    idx = self.default_device_combo.findData(recommended)
+                    if idx >= 0:
+                        self.default_device_combo.setCurrentIndex(idx)
+        self._refresh_device_combo(self.default_device_combo.currentData())
+        self._refresh_table()
+        if task_name == "detect":
+            self._set_busy(False, "Wykrywanie zakończone.")
+        else:
+            self._set_busy(False, "Test zakończony.")
+
+    def _apply(self) -> None:
+        selected = str(self.default_device_combo.currentData() or "auto").strip().lower() or "auto"
+        payload = {
+            "degirum_auto_select_best": self.auto_select_chk.isChecked(),
+            "degirum_preferred_device": selected,
+            "degirum_available_devices": list(self._detected_devices),
+            "degirum_last_benchmark": dict(self._benchmark_data),
+        }
+        self.parent_window.apply_degirum_device_settings(payload)
+        self.accept()
 
 
 class SystemLoadBalancerDialog(QDialog):
