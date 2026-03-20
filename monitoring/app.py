@@ -951,6 +951,11 @@ class SingleCameraDialog(QDialog):
     def __init__(self, parent=None, camera=None):
         super().__init__(parent)
         self.setWindowTitle("Ustawienia kamery")
+        self._degirum_device_label_map: dict[str, str] = {
+            "inherit": "Dziedzicz (globalne)",
+            "cpu": "CPU (procesor)",
+            "gpu": "GPU (karta graficzna)",
+        }
 
         screen = QApplication.primaryScreen()
         if screen is not None:
@@ -1006,6 +1011,10 @@ class SingleCameraDialog(QDialog):
         self.preview_fps_main_spin = QDoubleSpinBox(); self.preview_fps_main_spin.setRange(1.0, 60.0); self.preview_fps_main_spin.setSingleStep(1.0)
         self.preview_fps_thumb_spin = QDoubleSpinBox(); self.preview_fps_thumb_spin.setRange(0.5, 30.0); self.preview_fps_thumb_spin.setSingleStep(0.5)
         self.preview_pause_chk = QCheckBox()
+        self.degirum_device_override_enabled_chk = QCheckBox("Nadpisz ustawienie globalne")
+        self.degirum_device_override_combo = QComboBox()
+        self._refresh_degirum_override_options()
+        self.degirum_device_override_enabled_chk.toggled.connect(self.degirum_device_override_combo.setEnabled)
 
         path_layout = QHBoxLayout(); path_layout.addWidget(self.path_edit); path_layout.addWidget(self.btn_path)
 
@@ -1056,6 +1065,8 @@ class SingleCameraDialog(QDialog):
         self._add_field_row(right_layout, "preview_fps_main", "Preview FPS main", self.preview_fps_main_spin)
         self._add_field_row(right_layout, "preview_fps_thumb", "Preview FPS thumb", self.preview_fps_thumb_spin)
         self._add_field_row(right_layout, "preview_pause_when_hidden", "Pauzuj preview gdy ukryta", self.preview_pause_chk)
+        self._add_field_row(right_layout, "degirum_device_override_enabled", "", self.degirum_device_override_enabled_chk)
+        self._add_field_row(right_layout, "degirum_device_override", "Urządzenie DeGirum", self.degirum_device_override_combo)
 
         self._apply_all_tooltips()
         self._apply_field_tooltip("record_path", None, self.btn_path)
@@ -1196,6 +1207,39 @@ class SingleCameraDialog(QDialog):
             return
         self.help_panel.setPlainText(CAMERA_SETTING_TOOLTIPS.get(key, ""))
 
+    def _detected_degirum_devices(self) -> list[str]:
+        parent = self.parent()
+        candidates = []
+        if parent is not None:
+            candidates.extend(getattr(parent, "degirum_available_devices", []) or [])
+            parent_cfg = getattr(parent, "config", None)
+            if isinstance(parent_cfg, dict):
+                candidates.extend(parent_cfg.get("degirum_available_devices", []) or [])
+        normalized = []
+        seen = set()
+        for item in candidates:
+            value = str(item).strip().lower()
+            if not value or value in {"inherit", "auto", "cpu", "gpu"} or value in seen:
+                continue
+            seen.add(value)
+            normalized.append(value)
+        return normalized
+
+    def _refresh_degirum_override_options(self) -> None:
+        current_value = str(self.degirum_device_override_combo.currentData() or "inherit").strip().lower()
+        options: list[tuple[str, str]] = [
+            (self._degirum_device_label_map["inherit"], "inherit"),
+            (self._degirum_device_label_map["cpu"], "cpu"),
+            (self._degirum_device_label_map["gpu"], "gpu"),
+        ]
+        for device_id in self._detected_degirum_devices():
+            options.append((f"Urządzenie: {device_id}", device_id))
+        self.degirum_device_override_combo.clear()
+        for label, value in options:
+            self.degirum_device_override_combo.addItem(label, value)
+        idx = self.degirum_device_override_combo.findData(current_value)
+        self.degirum_device_override_combo.setCurrentIndex(idx if idx >= 0 else 0)
+
     def eventFilter(self, watched, event):
         if event.type() == QEvent.FocusIn:
             key = self._focus_help_widgets.get(watched)
@@ -1284,6 +1328,7 @@ class SingleCameraDialog(QDialog):
 
     def load_camera(self, cam):
         cam = cam or {}
+        self._refresh_degirum_override_options()
         self.name_edit.setText(cam.get("name", ""))
         src_type = cam.get("type", "rtsp")
         self.type_combo.setCurrentText(src_type)
@@ -1324,6 +1369,15 @@ class SingleCameraDialog(QDialog):
         self.preview_fps_main_spin.setValue(float(cam.get("preview_fps_main", DEFAULT_PREVIEW_FPS_MAIN)))
         self.preview_fps_thumb_spin.setValue(float(cam.get("preview_fps_thumb", DEFAULT_PREVIEW_FPS_THUMB)))
         self.preview_pause_chk.setChecked(bool(cam.get("preview_pause_when_hidden", DEFAULT_PREVIEW_PAUSE_WHEN_HIDDEN)))
+        override_enabled = bool(cam.get("degirum_device_override_enabled", False))
+        self.degirum_device_override_enabled_chk.setChecked(override_enabled)
+        override_value = str(cam.get("degirum_device_override", "inherit")).strip().lower() or "inherit"
+        idx = self.degirum_device_override_combo.findData(override_value)
+        if idx < 0 and override_value not in {"inherit", "cpu", "gpu"}:
+            self.degirum_device_override_combo.addItem(f"Urządzenie: {override_value}", override_value)
+            idx = self.degirum_device_override_combo.findData(override_value)
+        self.degirum_device_override_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.degirum_device_override_combo.setEnabled(override_enabled)
         self._camera_runtime_telemetry = dict(cam.get("runtime_telemetry", {}) or {})
         profile_name = str(cam.get("sensitivity_profile", infer_sensitivity_profile(cam)) or DEFAULT_SENSITIVITY_PROFILE)
         if profile_name not in {"balanced", "high_recall", "high_precision", "custom"}:
@@ -1376,6 +1430,8 @@ class SingleCameraDialog(QDialog):
             "preview_fps_main": float(self.preview_fps_main_spin.value()),
             "preview_fps_thumb": float(self.preview_fps_thumb_spin.value()),
             "preview_pause_when_hidden": self.preview_pause_chk.isChecked(),
+            "degirum_device_override_enabled": self.degirum_device_override_enabled_chk.isChecked(),
+            "degirum_device_override": str(self.degirum_device_override_combo.currentData() or "inherit"),
         }
         profile_name = str(cam.get("sensitivity_profile", "custom") or "custom")
         if profile_name != "custom":
