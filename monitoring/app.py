@@ -2420,32 +2420,56 @@ QToolButton:focus { outline: none; }
         override_value = str(cam_cfg.get("degirum_device_override", "inherit")).strip().lower()
         if override_enabled and override_value and override_value != "inherit":
             selected = override_value
-            self.log_window.add_entry("application", f"device resolve [{cam_name}]: per-camera override -> {selected}")
+            self._log_info(
+                "settings",
+                "manual device override active",
+                source="settings",
+                camera=cam_name,
+                details=f"scope=camera forced_device={selected}",
+            )
         else:
             mode = str(app_cfg.get("degirum_device_mode", "auto")).strip().lower() or "auto"
             if mode != "auto":
                 selected = mode
-                self.log_window.add_entry("application", f"device resolve [{cam_name}]: global manual mode -> {selected}")
+                self._log_info(
+                    "settings",
+                    "manual device override active",
+                    source="settings",
+                    camera=cam_name,
+                    details=f"scope=global forced_device={selected}",
+                )
             else:
                 recommended = str(app_cfg.get("degirum_preferred_device", "cpu")).strip().lower() or "cpu"
                 if recommended == "auto":
                     recommended = "cpu"
                 selected = recommended
-                self.log_window.add_entry(
-                    "application",
-                    f"device resolve [{cam_name}]: global auto + recommendation -> {selected}",
+                self._log_info(
+                    "detection",
+                    "degirum recommendation selected",
+                    source="settings",
+                    camera=cam_name,
+                    details=f"recommended_device={selected}",
                 )
 
         available_raw = app_cfg.get("degirum_available_devices", [])
         available_devices = {str(item).strip().lower() for item in available_raw if str(item).strip()}
         if selected != "cpu" and available_devices and selected not in available_devices:
-            self.log_window.add_entry(
-                "warning",
-                f"device resolve [{cam_name}]: requested '{selected}' not available in {sorted(available_devices)} -> forcing cpu",
+            self._log_warning(
+                "error",
+                "requested device unavailable; forcing cpu",
+                source="settings",
+                camera=cam_name,
+                details=f"requested={selected} available={sorted(available_devices)}",
             )
             selected = "cpu"
 
-        self.log_window.add_entry("application", f"device resolve [{cam_name}]: effective -> {selected}")
+        self._log_info(
+            "settings",
+            "degirum effective device resolved",
+            source="settings",
+            camera=cam_name,
+            details=f"effective_device={selected}",
+        )
         return selected
 
     def _get_model(self, model_name: str, device_config: object = None):
@@ -2469,10 +2493,20 @@ QToolButton:focus { outline: none; }
             self.log_window.add_entry("application", f"model load: {model_name} ({effective_device})")
             return model
         except Exception as init_error:
-            self.log_window.add_entry("warning", f"model init error: {model_name} ({effective_device}) -> {init_error}")
+            self._log_error(
+                "error",
+                "degirum backend model init failure",
+                source="detection",
+                details=f"model={model_name} device={effective_device} error={init_error}",
+            )
             if effective_device != "gpu":
                 raise
-            self.log_window.add_entry("warning", f"model fallback: {model_name} gpu -> cpu")
+            self._log_warning(
+                "error",
+                "fallback to cpu after backend error",
+                source="detection",
+                details=f"model={model_name} failed_device={effective_device}",
+            )
 
         cpu_key = self._build_model_cache_key(model_name, "cpu")
         if cpu_key in self.model_cache:
@@ -2491,7 +2525,12 @@ QToolButton:focus { outline: none; }
             self.log_window.add_entry("application", f"model load: {model_name} (cpu)")
             return model
         except Exception as cpu_error:
-            self.log_window.add_entry("error", f"model init error: {model_name} (cpu) -> {cpu_error}")
+            self._log_error(
+                "error",
+                "degirum backend cpu fallback failed",
+                source="detection",
+                details=f"model={model_name} device=cpu error={cpu_error}",
+            )
             raise
 
     def _apply_worker_preview_roles(self) -> None:
@@ -3069,6 +3108,7 @@ QToolButton:focus { outline: none; }
                 "restart kamery po zmianie urządzenia",
                 source="settings",
                 camera=str(self.cameras[idx].get("name", idx)),
+                details=f"reason_keys={restart_reason_keys}",
             )
         restarted = self._restart_camera_with_new_settings(idx, was_running)
         if restarted:
@@ -4034,9 +4074,25 @@ class DeGirumDeviceSettingsDialog(QDialog):
         threading.Thread(target=_runner, daemon=True).start()
 
     def _discover_devices_payload(self) -> dict:
-        discovered_raw = dg.get_supported_devices("@local")
-        discovered = [str(item).strip().lower() for item in discovered_raw if str(item).strip()]
-        discovered = [item for item in dict.fromkeys(discovered)]
+        try:
+            discovered_raw = dg.get_supported_devices("@local")
+            discovered = [str(item).strip().lower() for item in discovered_raw if str(item).strip()]
+            discovered = [item for item in dict.fromkeys(discovered)]
+            self.parent_window._log_info(
+                "detection",
+                "wykryto urządzenia degirum",
+                source="settings-dialog",
+                details=f"devices={discovered}",
+            )
+        except Exception as exc:
+            discovered = ["cpu"]
+            self.parent_window._log_exception(
+                "error",
+                "degirum device detection failed; using cpu fallback",
+                exc=exc,
+                source="settings-dialog",
+                details=traceback.format_exc(),
+            )
         return {"devices": discovered}
 
     def _benchmark_payload(self) -> dict:
@@ -4048,6 +4104,12 @@ class DeGirumDeviceSettingsDialog(QDialog):
         benchmark_by_device: dict[str, dict] = {}
         best_device = ""
         best_ms = None
+        self.parent_window._log_info(
+            "detection",
+            "start benchmarku degirum",
+            source="settings-dialog",
+            details=f"model={model_name} candidates={list(dict.fromkeys(['cpu', 'gpu'] + list(devices)))}",
+        )
         for device in dict.fromkeys(["cpu", "gpu"] + list(devices)):
             if not device:
                 continue
@@ -4066,11 +4128,28 @@ class DeGirumDeviceSettingsDialog(QDialog):
                     best_device = device
             except Exception as exc:
                 benchmark_by_device[device] = {"elapsed_ms": None, "details": f"Błąd testu: {exc}"}
+                self.parent_window._log_error(
+                    "error",
+                    "degirum benchmark backend exception",
+                    source="settings-dialog",
+                    details=f"device={device} model={model_name} error={exc}",
+                )
+        recommended = best_device or "cpu"
+        ranking_summary = ", ".join(
+            f"{dev}:{entry.get('elapsed_ms') if entry.get('elapsed_ms') is not None else 'error'}"
+            for dev, entry in benchmark_by_device.items()
+        )
+        self.parent_window._log_info(
+            "detection",
+            "wynik rankingu i rekomendacja degirum",
+            source="settings-dialog",
+            details=f"ranking={ranking_summary} recommended={recommended}",
+        )
         return {
             "devices": list(devices),
             "benchmark": {
                 "updated_at": datetime.datetime.utcnow().isoformat() + "Z",
-                "recommended_device": best_device or "cpu",
+                "recommended_device": recommended,
                 "by_device": benchmark_by_device,
             },
         }
@@ -4084,6 +4163,12 @@ class DeGirumDeviceSettingsDialog(QDialog):
     def _on_worker_finished(self, task_name: str, payload: object) -> None:
         data = payload if isinstance(payload, dict) else {}
         if data.get("error"):
+            self.parent_window._log_error(
+                "error",
+                "degirum settings background task failed",
+                source="settings-dialog",
+                details=f"task={task_name} error={data.get('error')}",
+            )
             self._set_busy(False, f"Błąd: {data.get('error')}")
             return
         if task_name in {"detect", "benchmark"}:
