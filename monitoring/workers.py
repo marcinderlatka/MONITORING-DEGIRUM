@@ -36,6 +36,8 @@ from .config import (
     DEFAULT_PERFORMANCE_DIAGNOSTICS_ENABLED,
     DEFAULT_PERFORMANCE_LOG_INTERVAL_S,
     DEFAULT_RECORDER_DEGRADE_WARN_WINDOW_S,
+    DEFAULT_RECORDER_DEGRADE_ENTER_HYSTERESIS_S,
+    DEFAULT_RECORDER_DEGRADE_EXIT_HYSTERESIS_S,
     DEFAULT_RECORDER_DROPPED_CRITICAL_THRESHOLD,
     DEFAULT_RECORDER_DROPPED_WARN_THRESHOLD,
     DEFAULT_RECORDER_MIN_DYNAMIC_WRITER_FPS,
@@ -632,6 +634,8 @@ class CameraWorker(QThread):
         self.recorder_queue_peak_warn_threshold = int(self.camera.get("recorder_queue_peak_warn_threshold", DEFAULT_RECORDER_QUEUE_PEAK_WARN_THRESHOLD))
         self.recorder_queue_peak_critical_threshold = int(self.camera.get("recorder_queue_peak_critical_threshold", DEFAULT_RECORDER_QUEUE_PEAK_CRITICAL_THRESHOLD))
         self.recorder_degrade_warn_window_s = float(self.camera.get("recorder_degrade_warn_window_s", DEFAULT_RECORDER_DEGRADE_WARN_WINDOW_S))
+        self.recorder_degrade_enter_hysteresis_s = float(self.camera.get("recorder_degrade_enter_hysteresis_s", DEFAULT_RECORDER_DEGRADE_ENTER_HYSTERESIS_S))
+        self.recorder_degrade_exit_hysteresis_s = float(self.camera.get("recorder_degrade_exit_hysteresis_s", DEFAULT_RECORDER_DEGRADE_EXIT_HYSTERESIS_S))
         self.recorder_min_dynamic_writer_fps = float(self.camera.get("recorder_min_dynamic_writer_fps", DEFAULT_RECORDER_MIN_DYNAMIC_WRITER_FPS))
         self.recording_queue_manager = RecordingQueueManager(
             warn_threshold=self.recorder_queue_warn_threshold,
@@ -644,6 +648,8 @@ class CameraWorker(QThread):
         self.recorder_enqueue_stride = 1
         self._recorder_enqueue_counter = 0
         self._recorder_degradation_level = 0
+        self._recorder_degradation_candidate_level = 0
+        self._recorder_degradation_candidate_since = 0.0
         self._recorder_last_overload_warn_ts = 0.0
         self._record_queue_full_warn_ts = 0.0
         self._current_writer_fps_base = 0.0
@@ -1168,13 +1174,24 @@ class CameraWorker(QThread):
         dropped = int(self.record_thread.dropped_frames)
         queue_peak = int(self.record_thread.queue_peak)
         desired_level = self._compute_recorder_degradation_level(queue_size, dropped, queue_peak)
+        candidate_changed = desired_level != self._recorder_degradation_candidate_level
+        if candidate_changed:
+            self._recorder_degradation_candidate_level = desired_level
+            self._recorder_degradation_candidate_since = now_mono
+        candidate_for = now_mono - self._recorder_degradation_candidate_since if self._recorder_degradation_candidate_since > 0 else 0.0
         if desired_level > self._recorder_degradation_level:
-            self._recorder_degradation_level = desired_level
+            if candidate_for >= max(0.0, self.recorder_degrade_enter_hysteresis_s):
+                self._recorder_degradation_level = desired_level
         elif desired_level < self._recorder_degradation_level:
-            self._recorder_degradation_level = max(0, self._recorder_degradation_level - 1)
+            if candidate_for >= max(0.0, self.recorder_degrade_exit_hysteresis_s):
+                self._recorder_degradation_level = desired_level
 
         self.recorder_enqueue_stride = int(self.recording_queue_manager.enqueue_stride(self._recorder_degradation_level))
         queue_detect_factor = self.recording_queue_manager.detect_fps_factor(self._recorder_degradation_level, queue_size, queue_throttle_threshold=30)
+        if queue_size > 40:
+            self.recorder_enqueue_stride = max(2, self.recorder_enqueue_stride)
+            queue_detect_factor = min(0.75, queue_detect_factor)
+            self.preview_resolution_factor = min(self.preview_resolution_factor, 0.7)
         if self.recording and self.detect_fps_factor > queue_detect_factor:
             self.detect_fps_factor = max(0.45, queue_detect_factor)
         if self.recording and self._current_writer_fps_base > 0:
@@ -1317,6 +1334,8 @@ class CameraWorker(QThread):
         self.recorder_enqueue_stride = 1
         self._recorder_enqueue_counter = 0
         self._recorder_degradation_level = 0
+        self._recorder_degradation_candidate_level = 0
+        self._recorder_degradation_candidate_since = 0.0
         self._recorder_last_overload_warn_ts = 0.0
         if self.record_start_mode == "include_prerecord_first":
             for buffer_frame in list(self.prerecord_buffer):
@@ -1458,6 +1477,8 @@ class CameraWorker(QThread):
         self.recorder_enqueue_stride = 1
         self._recorder_enqueue_counter = 0
         self._recorder_degradation_level = 0
+        self._recorder_degradation_candidate_level = 0
+        self._recorder_degradation_candidate_since = 0.0
         self.current_detection_frame_saved = False
         self.current_thumbnail_ts = 0.0
         self.current_event_detection_count = 0
