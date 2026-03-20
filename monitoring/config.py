@@ -45,6 +45,13 @@ DEFAULT_REQUIRED_HITS_TO_START_RECORDING = 1
 DEFAULT_REQUIRED_MISSES_TO_END_DETECTION = 3
 DEFAULT_MIN_RECORD_SECONDS = 3
 DEFAULT_SENSITIVITY_PROFILE = "balanced"
+DEFAULT_DEGIRUM_DEVICE_MODE = "auto"
+DEFAULT_DEGIRUM_PREFERRED_DEVICE = "auto"
+DEFAULT_DEGIRUM_AUTO_SELECT_BEST = True
+DEFAULT_DEGIRUM_AVAILABLE_DEVICES: list[str] = []
+DEFAULT_DEGIRUM_LAST_BENCHMARK: dict[str, object] = {}
+DEFAULT_DEGIRUM_DEVICE_OVERRIDE_ENABLED = False
+DEFAULT_DEGIRUM_DEVICE_OVERRIDE = "inherit"
 
 SENSITIVITY_PROFILES = {
     "high_recall": {
@@ -208,6 +215,23 @@ def _resolve_path(value: str | os.PathLike[str] | None, *, default: Path) -> Pat
     return candidate
 
 
+def _normalize_degirum_device_value(value: object, *, allow_inherit: bool = False) -> str:
+    """Normalize DeGirum device selector values from configuration."""
+    if value is None:
+        return "cpu"
+    normalized = str(value).strip()
+    if not normalized:
+        return "cpu"
+    lowered = normalized.lower()
+    if allow_inherit and lowered == "inherit":
+        return "inherit"
+    if lowered in {"auto", "cpu", "gpu"}:
+        return lowered
+    if re.match(r"^[A-Za-z0-9_.:-]+$", normalized):
+        return normalized
+    return "cpu"
+
+
 def fill_camera_defaults(camera: MutableMapping[str, object]) -> MutableMapping[str, object]:
     """Fill missing camera parameters with default values."""
     has_detection_fps_limit = "detection_fps_limit" in camera
@@ -268,6 +292,8 @@ def fill_camera_defaults(camera: MutableMapping[str, object]) -> MutableMapping[
         "recorder_degrade_enter_hysteresis_s": DEFAULT_RECORDER_DEGRADE_ENTER_HYSTERESIS_S,
         "recorder_degrade_exit_hysteresis_s": DEFAULT_RECORDER_DEGRADE_EXIT_HYSTERESIS_S,
         "detection_debug_enabled": DEFAULT_DETECTION_DEBUG_ENABLED,
+        "degirum_device_override_enabled": DEFAULT_DEGIRUM_DEVICE_OVERRIDE_ENABLED,
+        "degirum_device_override": DEFAULT_DEGIRUM_DEVICE_OVERRIDE,
     }
 
     had_profile_inputs = any(
@@ -314,6 +340,10 @@ def fill_camera_defaults(camera: MutableMapping[str, object]) -> MutableMapping[
     camera["camera_priority"] = camera_priority if camera_priority in CAMERA_PRIORITIES else DEFAULT_CAMERA_PRIORITY
     recording_backend = str(camera.get("recording_backend", DEFAULT_RECORDING_BACKEND)).lower()
     camera["recording_backend"] = recording_backend if recording_backend in {"current", "ffmpeg"} else DEFAULT_RECORDING_BACKEND
+    camera["degirum_device_override_enabled"] = bool(camera.get("degirum_device_override_enabled", DEFAULT_DEGIRUM_DEVICE_OVERRIDE_ENABLED))
+    camera["degirum_device_override"] = _normalize_degirum_device_value(
+        camera.get("degirum_device_override", DEFAULT_DEGIRUM_DEVICE_OVERRIDE), allow_inherit=True
+    )
     camera.setdefault(
         "preview_channel_policies",
         {
@@ -447,6 +477,14 @@ def load_config(path: Path | None = None) -> Dict[str, object]:
     cfg.setdefault("config_watchdog_queue_delta_threshold", DEFAULT_CONFIG_WATCHDOG_QUEUE_DELTA_THRESHOLD)
     cfg.setdefault("performance_log_interval_s", DEFAULT_PERFORMANCE_LOG_INTERVAL_S)
     cfg.setdefault("performance_diagnostics_enabled", DEFAULT_PERFORMANCE_DIAGNOSTICS_ENABLED)
+    cfg.setdefault("degirum_device_mode", DEFAULT_DEGIRUM_DEVICE_MODE)
+    cfg.setdefault("degirum_preferred_device", DEFAULT_DEGIRUM_PREFERRED_DEVICE)
+    cfg.setdefault("degirum_auto_select_best", DEFAULT_DEGIRUM_AUTO_SELECT_BEST)
+    cfg.setdefault("degirum_available_devices", list(DEFAULT_DEGIRUM_AVAILABLE_DEVICES))
+    cfg.setdefault("degirum_last_benchmark", dict(DEFAULT_DEGIRUM_LAST_BENCHMARK))
+
+    cfg["degirum_device_mode"] = _normalize_degirum_device_value(cfg.get("degirum_device_mode"))
+    cfg["degirum_preferred_device"] = _normalize_degirum_device_value(cfg.get("degirum_preferred_device"))
 
     for camera in cfg.get("cameras", []):
         if isinstance(camera, MutableMapping):
@@ -465,6 +503,13 @@ def save_config(config: MutableMapping[str, object], path: Path | None = None) -
     config.setdefault("log_retention_hours", LOG_RETENTION_HOURS)
     LOG_FILTERS = normalize_log_filters(config.get("log_filters"))
     config["log_filters"] = dict(LOG_FILTERS)
+    config.setdefault("degirum_device_mode", DEFAULT_DEGIRUM_DEVICE_MODE)
+    config.setdefault("degirum_preferred_device", DEFAULT_DEGIRUM_PREFERRED_DEVICE)
+    config.setdefault("degirum_auto_select_best", DEFAULT_DEGIRUM_AUTO_SELECT_BEST)
+    config.setdefault("degirum_available_devices", list(DEFAULT_DEGIRUM_AVAILABLE_DEVICES))
+    config.setdefault("degirum_last_benchmark", dict(DEFAULT_DEGIRUM_LAST_BENCHMARK))
+    config["degirum_device_mode"] = _normalize_degirum_device_value(config.get("degirum_device_mode"))
+    config["degirum_preferred_device"] = _normalize_degirum_device_value(config.get("degirum_preferred_device"))
 
     cfg_path = path or CONFIG_PATH
     cfg_path.write_text(json.dumps(config, indent=4), encoding="utf-8")
@@ -484,6 +529,13 @@ __all__ = [
     "DEFAULT_DETECTION_FPS_LIMIT",
     "DEFAULT_RTSP_FPS",
     "DEFAULT_SENSITIVITY_PROFILE",
+    "DEFAULT_DEGIRUM_DEVICE_MODE",
+    "DEFAULT_DEGIRUM_PREFERRED_DEVICE",
+    "DEFAULT_DEGIRUM_AUTO_SELECT_BEST",
+    "DEFAULT_DEGIRUM_AVAILABLE_DEVICES",
+    "DEFAULT_DEGIRUM_LAST_BENCHMARK",
+    "DEFAULT_DEGIRUM_DEVICE_OVERRIDE_ENABLED",
+    "DEFAULT_DEGIRUM_DEVICE_OVERRIDE",
     "DEFAULT_LOST_SECONDS",
     "DEFAULT_MODEL",
     "DEFAULT_POST_SECONDS",

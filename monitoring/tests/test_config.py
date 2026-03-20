@@ -212,3 +212,46 @@ def test_fill_camera_defaults_adds_thumbnail_overlay_style_defaults():
     assert updated["thumbnail_box_thickness"] == 1
     assert updated["thumbnail_font_scale"] == 0.5
     assert updated["thumbnail_font_thickness"] == 1
+
+
+def test_load_config_adds_degirum_defaults_for_legacy_config(tmp_path):
+    from monitoring.config import load_config
+
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text('{"cameras":[{"name":"Cam","rtsp":"x"}]}', encoding="utf-8")
+
+    cfg = load_config(cfg_path)
+
+    assert cfg["degirum_device_mode"] == "auto"
+    assert cfg["degirum_preferred_device"] == "auto"
+    assert cfg["degirum_auto_select_best"] is True
+    assert cfg["degirum_available_devices"] == []
+    assert cfg["degirum_last_benchmark"] == {}
+
+
+def test_load_config_invalid_degirum_preferred_device_falls_back_to_cpu(tmp_path):
+    from monitoring.config import load_config
+
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(
+        '{"degirum_preferred_device":"!!!","cameras":[{"name":"Cam","rtsp":"x"}]}',
+        encoding="utf-8",
+    )
+
+    cfg = load_config(cfg_path)
+
+    assert cfg["degirum_preferred_device"] == "cpu"
+
+
+def test_fill_camera_defaults_sets_degirum_override_default_and_inherit():
+    from monitoring import config
+
+    updated = config.fill_camera_defaults({"name": "Cam"})
+    assert updated["degirum_device_override_enabled"] is False
+    assert updated["degirum_device_override"] == "inherit"
+
+    explicit = config.fill_camera_defaults(
+        {"name": "Cam2", "degirum_device_override": "inherit", "degirum_device_override_enabled": True}
+    )
+    assert explicit["degirum_device_override_enabled"] is True
+    assert explicit["degirum_device_override"] == "inherit"
