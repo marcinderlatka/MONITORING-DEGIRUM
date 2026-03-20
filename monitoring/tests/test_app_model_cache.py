@@ -42,6 +42,20 @@ def test_build_model_cache_key_is_deterministic_for_dict_config() -> None:
     assert key_a == key_b
 
 
+def test_build_model_cache_key_prefers_camera_override_over_other_device_hints() -> None:
+    fake = _fake_window()
+    cfg = {
+        "device_type": "cpu",
+        "effective_device": "cpu",
+        "degirum_device_override_enabled": True,
+        "degirum_device_override": "gpu:1",
+    }
+
+    key = app_mod.MainWindow._build_model_cache_key(fake, "model-x", cfg)
+
+    assert key == ("model-x", "gpu:1")
+
+
 def test_get_model_keeps_separate_cpu_gpu_cache_entries_on_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _fake_window()
     calls: list[dict[str, object]] = []
@@ -120,6 +134,21 @@ def test_resolve_effective_degirum_device_forces_cpu_when_selected_device_missin
     }
 
     selected = app_mod.MainWindow._resolve_effective_degirum_device(fake, {"name": "Cam-4"})
+
+    assert selected == "cpu"
+    assert any(group == "warning" and "forcing cpu" in msg for group, msg in fake._entries)
+
+
+def test_resolve_effective_degirum_device_unavailable_camera_device_id_warns_and_falls_back_to_cpu() -> None:
+    fake = _fake_window()
+    fake.config = {
+        "degirum_device_mode": "auto",
+        "degirum_preferred_device": "cpu",
+        "degirum_available_devices": ["cpu", "gpu"],
+    }
+    cam = {"name": "Cam-5", "degirum_device_override_enabled": True, "degirum_device_override": "gpu:3"}
+
+    selected = app_mod.MainWindow._resolve_effective_degirum_device(fake, cam)
 
     assert selected == "cpu"
     assert any(group == "warning" and "forcing cpu" in msg for group, msg in fake._entries)
