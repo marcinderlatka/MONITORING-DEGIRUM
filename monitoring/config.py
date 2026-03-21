@@ -186,6 +186,15 @@ LOG_FILTERS: Dict[str, List[str]] = {
     "sources": list(DEFAULT_LOG_FILTER_SOURCES),
 }
 
+DEGIRUM_KEYS = [
+    "degirum_device_mode",
+    "degirum_preferred_device",
+    "degirum_auto_select_best",
+    "degirum_available_devices",
+    "degirum_last_benchmark",
+    "degirum_device_override_enabled",
+    "degirum_device_override",
+]
 
 
 
@@ -475,6 +484,14 @@ def is_log_entry_enabled(group: str, level: str, source: str) -> bool:
     return True
 
 
+def load_degirum_config(cfg: dict) -> dict:
+    """Ensure all DeGirum-related keys are present in root config."""
+    for key in DEGIRUM_KEYS:
+        if key not in cfg:
+            cfg[key] = globals()[f"DEFAULT_{key.upper()}"]
+    return cfg
+
+
 def load_config(path: Path | None = None) -> Dict[str, object]:
     """Load the application configuration."""
     global LOG_HISTORY_PATH, LOG_RETENTION_HOURS, LOG_FILTERS
@@ -527,11 +544,7 @@ def load_config(path: Path | None = None) -> Dict[str, object]:
     cfg.setdefault("config_watchdog_queue_delta_threshold", DEFAULT_CONFIG_WATCHDOG_QUEUE_DELTA_THRESHOLD)
     cfg.setdefault("performance_log_interval_s", DEFAULT_PERFORMANCE_LOG_INTERVAL_S)
     cfg.setdefault("performance_diagnostics_enabled", DEFAULT_PERFORMANCE_DIAGNOSTICS_ENABLED)
-    cfg.setdefault("degirum_device_mode", DEFAULT_DEGIRUM_DEVICE_MODE)
-    cfg.setdefault("degirum_preferred_device", DEFAULT_DEGIRUM_PREFERRED_DEVICE)
-    cfg.setdefault("degirum_auto_select_best", DEFAULT_DEGIRUM_AUTO_SELECT_BEST)
-    cfg.setdefault("degirum_available_devices", list(DEFAULT_DEGIRUM_AVAILABLE_DEVICES))
-    cfg.setdefault("degirum_last_benchmark", dict(DEFAULT_DEGIRUM_LAST_BENCHMARK))
+    load_degirum_config(cfg)
 
     cfg["degirum_device_mode"] = normalize_degirum_device_selection(cfg.get("degirum_device_mode"))
     cfg["degirum_preferred_device"] = normalize_degirum_device_selection(cfg.get("degirum_preferred_device"))
@@ -561,11 +574,7 @@ def save_config(config: MutableMapping[str, object], path: Path | None = None) -
     config.setdefault("log_retention_hours", LOG_RETENTION_HOURS)
     LOG_FILTERS = normalize_log_filters(config.get("log_filters"))
     config["log_filters"] = dict(LOG_FILTERS)
-    config.setdefault("degirum_device_mode", DEFAULT_DEGIRUM_DEVICE_MODE)
-    config.setdefault("degirum_preferred_device", DEFAULT_DEGIRUM_PREFERRED_DEVICE)
-    config.setdefault("degirum_auto_select_best", DEFAULT_DEGIRUM_AUTO_SELECT_BEST)
-    config.setdefault("degirum_available_devices", list(DEFAULT_DEGIRUM_AVAILABLE_DEVICES))
-    config.setdefault("degirum_last_benchmark", dict(DEFAULT_DEGIRUM_LAST_BENCHMARK))
+    load_degirum_config(config)
     config["degirum_device_mode"] = normalize_degirum_device_selection(config.get("degirum_device_mode"))
     config["degirum_preferred_device"] = normalize_degirum_device_selection(config.get("degirum_preferred_device"))
     available_raw = config.get("degirum_available_devices", [])
@@ -576,8 +585,10 @@ def save_config(config: MutableMapping[str, object], path: Path | None = None) -
         for item in available_raw
         if (normalized := normalize_degirum_device_selection(item)) not in {"auto", "inherit"}
     ]))
-
     cfg_path = path or CONFIG_PATH
+    for key in DEGIRUM_KEYS:
+        if key in config:
+            config[key] = config[key]
     cfg_path.write_text(json.dumps(config, indent=4), encoding="utf-8")
 
 
@@ -654,6 +665,7 @@ __all__ = [
     "ICON_DIR",
     "LOG_HISTORY_PATH",
     "LOG_FILTERS",
+    "DEGIRUM_KEYS",
     "LOG_RETENTION_HOURS",
     "DEFAULT_LOG_FILTER_GROUPS",
     "DEFAULT_LOG_FILTER_LEVELS",
@@ -669,6 +681,7 @@ __all__ = [
     "infer_sensitivity_profile",
     "list_usb_cameras",
     "load_config",
+    "load_degirum_config",
     "normalize_log_filters",
     "normalize_degirum_device_selection",
     "is_valid_degirum_device_type",
