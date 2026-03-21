@@ -183,6 +183,12 @@ from .widgets.camera_list import CameraListWidget
 from .widgets.logs import LogSettingsDialog, LogWindow
 from .widgets.recordings_browser import RecordingsBrowserDialog
 from .system_metrics import SystemMetricsSampler
+from .degirum_devices import (
+    benchmark_device_candidates,
+    detect_degirum_devices,
+    get_model_supported_device_types,
+    resolve_degirum_runtime_target,
+)
 
 # Qt platform plugin path (Linux)
 os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = "/usr/lib/x86_64-linux-gnu/qt5/plugins/platforms"
@@ -1979,6 +1985,7 @@ QToolButton:focus { outline: none; }
             if (normalized := config_module.normalize_degirum_device_selection(item)) not in {"auto", "inherit"}
         ]
         self.degirum_last_benchmark = dict(self.config.get("degirum_last_benchmark", {})) if hasattr(self, "config") else {}
+        self._degirum_supported_types_cache: dict[tuple[str, str], list[str]] = {}
         self.overload_level = 0
         self.overload_mode_active = False
         self._overload_last_change_ts = 0.0
@@ -2411,6 +2418,28 @@ QToolButton:focus { outline: none; }
         effective_device = config_module.normalize_degirum_device_selection(device_config)
         return model_key, effective_device
 
+    def _resolve_degirum_runtime_target(
+        self,
+        model_name: str,
+        device_selection: object,
+        *,
+        inference_host_address: str = "@local",
+    ) -> dict:
+        normalized_model = str(model_name).strip()
+        supported = get_model_supported_device_types(
+            dg,
+            model_name=normalized_model,
+            zoo_url=MODELS_PATH / normalized_model,
+            inference_host_address=inference_host_address,
+            cache=self._degirum_supported_types_cache,
+        )
+        resolved = resolve_degirum_runtime_target(
+            logical_selection=device_selection,
+            supported_device_types=supported,
+            inference_host_address=inference_host_address,
+        )
+        return resolved
+
     def _resolve_degirum_load_model_params(
         self,
         model_name: str,
@@ -2418,18 +2447,20 @@ QToolButton:focus { outline: none; }
         *,
         inference_host_address: str = "@local",
     ) -> tuple[dict[str, str], str]:
-        logical_device = config_module.normalize_degirum_device_selection(device_selection)
+        resolved = self._resolve_degirum_runtime_target(
+            model_name,
+            device_selection,
+            inference_host_address=inference_host_address,
+        )
         load_kwargs = {
-            "model_name": model_name,
+            "model_name": str(model_name).strip(),
             "inference_host_address": inference_host_address,
-            "zoo_url": str(MODELS_PATH / model_name),
+            "zoo_url": str(MODELS_PATH / str(model_name).strip()),
         }
-        if config_module.is_valid_degirum_device_type(logical_device):
-            load_kwargs["device_type"] = logical_device
-            resolved_type = logical_device
-        else:
-            resolved_type = ""
-        return load_kwargs, resolved_type
+        final_device_type = str(resolved.get("final_device_type") or "")
+        if final_device_type:
+            load_kwargs["device_type"] = final_device_type
+        return load_kwargs, final_device_type
 
     def _resolve_effective_degirum_device(self, camera_config: dict | None) -> str:
         cam_cfg = camera_config if isinstance(camera_config, dict) else {}
@@ -2474,30 +2505,35 @@ QToolButton:focus { outline: none; }
                     details=f"recommended_device={selected}",
                 )
 
-        available_raw = app_cfg.get("degirum_available_devices", [])
-        if not isinstance(available_raw, list):
-            available_raw = [available_raw]
-        available_devices = {
-            config_module.normalize_degirum_device_selection(item)
-            for item in available_raw
-            if config_module.normalize_degirum_device_selection(item) not in {"auto", "inherit"}
-        }
-        if selected != "cpu" and available_devices and selected not in available_devices:
+        supported_types = self._resolve_degirum_runtime_target(
+            str(cam_cfg.get("model", DEFAULT_MODEL)),
+            "auto",
+        ).get("supported_device_types", [])
+        runtime_resolution = resolve_degirum_runtime_target(
+            logical_selection=selected,
+            supported_device_types=supported_types,
+        )
+        if runtime_resolution.get("fallback_used"):
             self._log_warning(
-                "error",
-                "requested device unavailable; forcing cpu",
+                "warning",
+                "requested device unavailable; forcing supported cpu/runtime fallback",
                 source="settings",
                 camera=cam_name,
-                details=f"requested={selected} available={sorted(available_devices)}",
+                details=(
+                    f"requested={selected} supported={supported_types} "
+                    f"resolved={runtime_resolution.get('final_device_type')}"
+                ),
             )
-            selected = "cpu"
 
         self._log_info(
             "settings",
             "degirum effective device resolved",
             source="settings",
             camera=cam_name,
-            details=f"effective_device={selected}",
+            details=(
+                f"logical_device={selected} "
+                f"final_device_type={runtime_resolution.get('final_device_type') or '<none>'}"
+            ),
         )
         return selected
 
@@ -2508,11 +2544,20 @@ QToolButton:focus { outline: none; }
             return self.model_cache[cache_key]
 
         logical_device = cache_key[1]
-        load_kwargs, resolved_type = self._resolve_degirum_load_model_params(model_name, logical_device)
-        if logical_device not in {"auto", "cpu"} and not resolved_type:
+        runtime = self._resolve_degirum_runtime_target(model_name, logical_device)
+        resolved_type = str(runtime.get("final_device_type") or "")
+        load_kwargs = {
+            "model_name": str(model_name).strip(),
+            "inference_host_address": str(runtime.get("inference_host_address") or "@local"),
+            "zoo_url": str(MODELS_PATH / str(model_name).strip()),
+        }
+        if resolved_type:
+            load_kwargs["device_type"] = resolved_type
+
+        if not resolved_type:
             self._log_warning(
                 "warning",
-                "fallback to cpu because invalid device_type",
+                "fallback to cpu because runtime target resolution failed",
                 source="detection",
                 details=f"model={model_name} raw={device_config} normalized={logical_device}",
             )
@@ -2524,7 +2569,8 @@ QToolButton:focus { outline: none; }
                 f"model={model_name} device_selection_raw={device_config} "
                 f"device_selection_normalized={logical_device} "
                 f"resolved_device_type={resolved_type or '<none>'} "
-                f"inference_host_address={load_kwargs.get('inference_host_address')}"
+                f"inference_host_address={load_kwargs.get('inference_host_address')} "
+                f"supported_types={runtime.get('supported_device_types')}"
             ),
         )
 
@@ -2546,7 +2592,9 @@ QToolButton:focus { outline: none; }
                 ),
             )
 
-        cpu_key = self._build_model_cache_key(model_name, "cpu")
+        cpu_runtime = self._resolve_degirum_runtime_target(model_name, "cpu")
+        cpu_type = str(cpu_runtime.get("final_device_type") or "cpu")
+        cpu_key = self._build_model_cache_key(model_name, cpu_type)
         if cpu_key in self.model_cache:
             self.log_window.add_entry("application", f"model cache-hit: {model_name} (cpu)")
             return self.model_cache[cpu_key]
@@ -4053,26 +4101,38 @@ class DeGirumDeviceSettingsDialog(QDialog):
     def _rows_for_table(self) -> list[dict]:
         benchmark_by_device = self._benchmark_data.get("by_device", {}) if isinstance(self._benchmark_data, dict) else {}
         recommended = str(self._benchmark_data.get("recommended_device", "")).strip().lower() if isinstance(self._benchmark_data, dict) else ""
-        known_devices = ["cpu", "gpu"] + list(self._detected_devices)
+        supported_types = self._benchmark_data.get("supported_device_types", []) if isinstance(self._benchmark_data, dict) else []
+        known_devices = ["auto", "cpu", "gpu"] + list(self._detected_devices)
         rows = []
         for device in dict.fromkeys([str(item).strip().lower() for item in known_devices if str(item).strip()]):
             if not device:
                 continue
             bench = benchmark_by_device.get(device, {}) if isinstance(benchmark_by_device, dict) else {}
-            if device == "cpu":
+            if device == "auto":
+                device_type = "AUTO"
+            elif device == "cpu":
                 device_type = "CPU"
             elif device == "gpu":
                 device_type = "GPU"
             else:
                 device_type = "device_id"
-            available = "Tak" if device in self._detected_devices or device in {"cpu", "gpu"} else "Nie"
+            resolution = resolve_degirum_runtime_target(
+                logical_selection=device,
+                supported_device_types=supported_types,
+            )
+            available = "Tak" if bool(resolution.get("final_device_type")) else "Nie"
             elapsed_ms = bench.get("elapsed_ms")
             if isinstance(elapsed_ms, (int, float)) and elapsed_ms > 0:
                 time_label = f"{float(elapsed_ms):.1f} ms"
             else:
                 time_label = "—"
             recommendation = "Tak" if device == recommended else "—"
-            details = str(bench.get("details", "Wykryto urządzenie." if available == "Tak" else "Brak danych."))
+            details = str(
+                bench.get(
+                    "details",
+                    f"logical={device} -> final={resolution.get('final_device_type') or '-'}",
+                )
+            )
             rows.append(
                 {
                     "name": device,
@@ -4118,22 +4178,27 @@ class DeGirumDeviceSettingsDialog(QDialog):
         threading.Thread(target=_runner, daemon=True).start()
 
     def _discover_devices_payload(self) -> dict:
+        model_name = DEFAULT_MODEL
+        if self.parent_window.cameras:
+            model_name = str(self.parent_window.cameras[0].get("model", DEFAULT_MODEL))
         try:
-            discovered_raw = dg.get_supported_devices("@local")
-            discovered = [
-                config_module.normalize_degirum_device_selection(item)
-                for item in discovered_raw
-                if config_module.normalize_degirum_device_selection(item) not in {"auto", "inherit"}
-            ]
-            discovered = [item for item in dict.fromkeys(discovered)]
+            records = detect_degirum_devices(
+                dg,
+                model_name=model_name,
+                zoo_url=MODELS_PATH / model_name,
+                supported_cache=self.parent_window._degirum_supported_types_cache,
+            )
+            discovered = [str(row.get("id")) for row in records if str(row.get("id")) not in {"auto", "cpu", "gpu"}]
+            supported = [str(row.get("id")) for row in records if config_module.is_valid_degirum_device_type(row.get("id"))]
             self.parent_window._log_info(
                 "detection",
                 "wykryto urządzenia degirum",
                 source="settings-dialog",
-                details=f"devices={discovered}",
+                details=f"model={model_name} supported={supported}",
             )
         except Exception as exc:
-            discovered = ["cpu"]
+            discovered = []
+            supported = []
             self.parent_window._log_exception(
                 "error",
                 "degirum device detection failed; using cpu fallback",
@@ -4141,7 +4206,7 @@ class DeGirumDeviceSettingsDialog(QDialog):
                 source="settings-dialog",
                 details=traceback.format_exc(),
             )
-        return {"devices": discovered}
+        return {"devices": discovered, "supported_device_types": supported}
 
     def _benchmark_payload(self) -> dict:
         discovery = self._discover_devices_payload()
@@ -4149,45 +4214,30 @@ class DeGirumDeviceSettingsDialog(QDialog):
         model_name = DEFAULT_MODEL
         if self.parent_window.cameras:
             model_name = str(self.parent_window.cameras[0].get("model", DEFAULT_MODEL))
-        benchmark_by_device: dict[str, dict] = {}
-        best_device = ""
-        best_ms = None
-        self.parent_window._log_info(
-            "detection",
-            "start benchmarku degirum",
-            source="settings-dialog",
-            details=f"model={model_name} candidates={list(dict.fromkeys(['cpu', 'gpu'] + list(devices)))}",
+        candidates = list(dict.fromkeys(["auto", "cpu", "gpu"] + list(devices)))
+        benchmark = benchmark_device_candidates(
+            dg,
+            model_name=model_name,
+            candidates=candidates,
+            zoo_url=MODELS_PATH / model_name,
+            config=None,
+            supported_cache=self.parent_window._degirum_supported_types_cache,
         )
-        for device in dict.fromkeys(["cpu", "gpu"] + list(devices)):
-            if not device:
-                continue
-            started = time.perf_counter()
-            try:
-                load_kwargs, resolved_type = self.parent_window._resolve_degirum_load_model_params(model_name, device)
-                if device == "gpu" and not resolved_type:
-                    raise RuntimeError("Brak poprawnego mapowania GPU do <runtime>/<device>.")
-                dg.load_model(**load_kwargs)
-                elapsed_ms = (time.perf_counter() - started) * 1000.0
-                benchmark_by_device[device] = {
-                    "elapsed_ms": elapsed_ms,
-                    "details": f"Model: {model_name}; device_type={resolved_type or 'default'}",
-                }
-                if best_ms is None or elapsed_ms < best_ms:
-                    best_ms = elapsed_ms
-                    best_device = device
-            except Exception as exc:
-                benchmark_by_device[device] = {"elapsed_ms": None, "details": f"Błąd testu: {exc}"}
-                self.parent_window._log_error(
-                    "error",
-                    "degirum benchmark backend exception",
-                    source="settings-dialog",
-                    details=f"device={device} model={model_name} error={exc}",
-                )
-        recommended = best_device or "cpu"
-        ranking_summary = ", ".join(
-            f"{dev}:{entry.get('elapsed_ms') if entry.get('elapsed_ms') is not None else 'error'}"
-            for dev, entry in benchmark_by_device.items()
+        benchmark_by_device = {
+            str(row.get("device")): {
+                "elapsed_ms": row.get("load_time_ms"),
+                "details": (
+                    f"logical={row.get('device')} -> final={row.get('final_device_type') or '-'}; "
+                    f"{row.get('error') or 'OK'}"
+                ),
+            }
+            for row in benchmark.get("results", [])
+        }
+        recommended = next(
+            (str(row.get("device")) for row in benchmark.get("results", []) if row.get("available")),
+            "cpu",
         )
+        ranking_summary = ", ".join(f"{key}:{val.get('elapsed_ms')}" for key, val in benchmark_by_device.items())
         self.parent_window._log_info(
             "detection",
             "wynik rankingu i rekomendacja degirum",
@@ -4200,6 +4250,7 @@ class DeGirumDeviceSettingsDialog(QDialog):
                 "updated_at": datetime.datetime.utcnow().isoformat() + "Z",
                 "recommended_device": recommended,
                 "by_device": benchmark_by_device,
+                "supported_device_types": list(benchmark.get("supported_device_types", [])),
             },
         }
 

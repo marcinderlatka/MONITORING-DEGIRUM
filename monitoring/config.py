@@ -262,6 +262,14 @@ def normalize_degirum_device_selection(value: object, *, allow_inherit: bool = F
     if not normalized:
         return "inherit" if allow_inherit else "cpu"
 
+    if normalized.startswith("[") and normalized.endswith("]"):
+        try:
+            parsed = json.loads(normalized.replace("'", '"'))
+        except Exception:
+            parsed = None
+        if isinstance(parsed, Sequence) and not isinstance(parsed, (str, bytes, bytearray)):
+            return normalize_degirum_device_selection(parsed, allow_inherit=allow_inherit)
+
     lowered = normalized.lower()
     if allow_inherit and lowered == "inherit":
         return "inherit"
