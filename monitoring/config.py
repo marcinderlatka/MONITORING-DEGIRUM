@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Mapping, Sequence
 from glob import glob
 from pathlib import Path
 from typing import Dict, List, MutableMapping
@@ -215,21 +216,62 @@ def _resolve_path(value: str | os.PathLike[str] | None, *, default: Path) -> Pat
     return candidate
 
 
-def _normalize_degirum_device_value(value: object, *, allow_inherit: bool = False) -> str:
-    """Normalize DeGirum device selector values from configuration."""
+def is_valid_degirum_device_type(value: object) -> bool:
+    """Return ``True`` when value uses DeGirum ``<runtime>/<device>`` format."""
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if not text:
+        return False
+    return bool(re.match(r"^[^/\s]+/[^/\s]+$", text))
+
+
+def normalize_degirum_device_selection(value: object, *, allow_inherit: bool = False) -> str:
+    """Normalize DeGirum device selector into safe logical value.
+
+    Accepted output values:
+    - ``auto``, ``cpu``, ``gpu``
+    - ``inherit`` (only when ``allow_inherit=True``)
+    - concrete single device id string
+    """
+    if isinstance(value, Mapping):
+        for key in (
+            "degirum_device_override",
+            "degirum_preferred_device",
+            "degirum_device_mode",
+            "effective_device",
+            "device_type",
+            "device",
+            "id",
+            "value",
+        ):
+            if key in value:
+                return normalize_degirum_device_selection(value.get(key), allow_inherit=allow_inherit)
+        return "inherit" if allow_inherit else "cpu"
+
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        items = [item for item in value if str(item).strip()]
+        if not items:
+            return "inherit" if allow_inherit else "cpu"
+        return normalize_degirum_device_selection(items[0], allow_inherit=allow_inherit)
+
     if value is None:
-        return "cpu"
+        return "inherit" if allow_inherit else "cpu"
+
     normalized = str(value).strip()
     if not normalized:
-        return "cpu"
+        return "inherit" if allow_inherit else "cpu"
+
     lowered = normalized.lower()
     if allow_inherit and lowered == "inherit":
         return "inherit"
     if lowered in {"auto", "cpu", "gpu"}:
         return lowered
+    if is_valid_degirum_device_type(normalized):
+        return normalized
     if re.match(r"^[A-Za-z0-9_.:-]+$", normalized):
         return normalized
-    return "cpu"
+    return "inherit" if allow_inherit else "cpu"
 
 
 def fill_camera_defaults(camera: MutableMapping[str, object]) -> MutableMapping[str, object]:
@@ -341,7 +383,7 @@ def fill_camera_defaults(camera: MutableMapping[str, object]) -> MutableMapping[
     recording_backend = str(camera.get("recording_backend", DEFAULT_RECORDING_BACKEND)).lower()
     camera["recording_backend"] = recording_backend if recording_backend in {"current", "ffmpeg"} else DEFAULT_RECORDING_BACKEND
     camera["degirum_device_override_enabled"] = bool(camera.get("degirum_device_override_enabled", DEFAULT_DEGIRUM_DEVICE_OVERRIDE_ENABLED))
-    camera["degirum_device_override"] = _normalize_degirum_device_value(
+    camera["degirum_device_override"] = normalize_degirum_device_selection(
         camera.get("degirum_device_override", DEFAULT_DEGIRUM_DEVICE_OVERRIDE), allow_inherit=True
     )
     camera.setdefault(
@@ -483,8 +525,16 @@ def load_config(path: Path | None = None) -> Dict[str, object]:
     cfg.setdefault("degirum_available_devices", list(DEFAULT_DEGIRUM_AVAILABLE_DEVICES))
     cfg.setdefault("degirum_last_benchmark", dict(DEFAULT_DEGIRUM_LAST_BENCHMARK))
 
-    cfg["degirum_device_mode"] = _normalize_degirum_device_value(cfg.get("degirum_device_mode"))
-    cfg["degirum_preferred_device"] = _normalize_degirum_device_value(cfg.get("degirum_preferred_device"))
+    cfg["degirum_device_mode"] = normalize_degirum_device_selection(cfg.get("degirum_device_mode"))
+    cfg["degirum_preferred_device"] = normalize_degirum_device_selection(cfg.get("degirum_preferred_device"))
+    available_raw = cfg.get("degirum_available_devices", [])
+    if not isinstance(available_raw, list):
+        available_raw = [available_raw]
+    cfg["degirum_available_devices"] = list(dict.fromkeys([
+        normalized
+        for item in available_raw
+        if (normalized := normalize_degirum_device_selection(item)) not in {"auto", "inherit"}
+    ]))
 
     for camera in cfg.get("cameras", []):
         if isinstance(camera, MutableMapping):
@@ -508,8 +558,16 @@ def save_config(config: MutableMapping[str, object], path: Path | None = None) -
     config.setdefault("degirum_auto_select_best", DEFAULT_DEGIRUM_AUTO_SELECT_BEST)
     config.setdefault("degirum_available_devices", list(DEFAULT_DEGIRUM_AVAILABLE_DEVICES))
     config.setdefault("degirum_last_benchmark", dict(DEFAULT_DEGIRUM_LAST_BENCHMARK))
-    config["degirum_device_mode"] = _normalize_degirum_device_value(config.get("degirum_device_mode"))
-    config["degirum_preferred_device"] = _normalize_degirum_device_value(config.get("degirum_preferred_device"))
+    config["degirum_device_mode"] = normalize_degirum_device_selection(config.get("degirum_device_mode"))
+    config["degirum_preferred_device"] = normalize_degirum_device_selection(config.get("degirum_preferred_device"))
+    available_raw = config.get("degirum_available_devices", [])
+    if not isinstance(available_raw, list):
+        available_raw = [available_raw]
+    config["degirum_available_devices"] = list(dict.fromkeys([
+        normalized
+        for item in available_raw
+        if (normalized := normalize_degirum_device_selection(item)) not in {"auto", "inherit"}
+    ]))
 
     cfg_path = path or CONFIG_PATH
     cfg_path.write_text(json.dumps(config, indent=4), encoding="utf-8")
@@ -604,5 +662,7 @@ __all__ = [
     "list_usb_cameras",
     "load_config",
     "normalize_log_filters",
+    "normalize_degirum_device_selection",
+    "is_valid_degirum_device_type",
     "save_config",
 ]

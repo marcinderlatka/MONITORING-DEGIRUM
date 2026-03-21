@@ -12,7 +12,7 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
-from .config import DEFAULT_MODEL, MODELS_PATH
+from .config import DEFAULT_MODEL, MODELS_PATH, is_valid_degirum_device_type, normalize_degirum_device_selection
 
 
 GUI_LABELS = {
@@ -110,25 +110,31 @@ def _probe_gpu_with_load_model(
 
     for host in candidate_hosts:
         for device in candidate_devices:
-            attempts = (
+            attempts = [
                 {
                     "model_name": model_name,
                     "inference_host_address": host,
                     "zoo_url": zoo_url,
-                    "device_type": device,
-                },
-                {
-                    "model_name": model_name,
-                    "inference_host_address": host,
-                    "zoo_url": zoo_url,
-                    "device": device,
-                },
-                {
-                    "model_name": model_name,
-                    "zoo_url": zoo_url,
-                    "device_type": device,
-                },
-            )
+                }
+            ]
+            if is_valid_degirum_device_type(device):
+                attempts.append(
+                    {
+                        "model_name": model_name,
+                        "inference_host_address": host,
+                        "zoo_url": zoo_url,
+                        "device_type": device,
+                    }
+                )
+            else:
+                attempts.append(
+                    {
+                        "model_name": model_name,
+                        "inference_host_address": host,
+                        "zoo_url": zoo_url,
+                        "device": device,
+                    }
+                )
             for kwargs in attempts:
                 try:
                     model = load_model(**kwargs)
@@ -159,30 +165,49 @@ def _load_model_for_device(
 
     last_error: str | None = None
     for host in candidate_hosts:
-        attempts = (
+        attempts = [
             {
                 "model_name": model_name,
                 "inference_host_address": host,
                 "zoo_url": zoo_url,
-                "device_type": device,
-            },
-            {
-                "model_name": model_name,
-                "inference_host_address": host,
-                "zoo_url": zoo_url,
-                "device": device,
             },
             {
                 "model_name": model_name,
                 "zoo_url": zoo_url,
-                "device_type": device,
             },
-            {
-                "model_name": model_name,
-                "zoo_url": zoo_url,
-                "device": device,
-            },
-        )
+        ]
+        if is_valid_degirum_device_type(device):
+            attempts.extend(
+                [
+                    {
+                        "model_name": model_name,
+                        "inference_host_address": host,
+                        "zoo_url": zoo_url,
+                        "device_type": device,
+                    },
+                    {
+                        "model_name": model_name,
+                        "zoo_url": zoo_url,
+                        "device_type": device,
+                    },
+                ]
+            )
+        else:
+            attempts.extend(
+                [
+                    {
+                        "model_name": model_name,
+                        "inference_host_address": host,
+                        "zoo_url": zoo_url,
+                        "device": device,
+                    },
+                    {
+                        "model_name": model_name,
+                        "zoo_url": zoo_url,
+                        "device": device,
+                    },
+                ]
+            )
         for kwargs in attempts:
             try:
                 model = load_model(**kwargs)
@@ -233,7 +258,11 @@ def benchmark_device_candidates(
     """Benchmark candidate devices by model load time and short inference runs."""
 
     normalized_zoo = str(Path(zoo_url) if zoo_url is not None else MODELS_PATH / model_name)
-    normalized_candidates = [str(item).strip().lower() for item in candidates if str(item).strip()]
+    normalized_candidates = [
+        normalize_degirum_device_selection(item)
+        for item in candidates
+        if normalize_degirum_device_selection(item) not in {"inherit", "auto"}
+    ]
     safe_runs = max(1, min(3, int(inference_runs)))
 
     logger.info(

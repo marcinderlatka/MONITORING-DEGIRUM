@@ -1218,7 +1218,7 @@ class SingleCameraDialog(QDialog):
         normalized = []
         seen = set()
         for item in candidates:
-            value = str(item).strip().lower()
+            value = config_module.normalize_degirum_device_selection(item)
             if not value or value in {"inherit", "auto", "cpu", "gpu"} or value in seen:
                 continue
             seen.add(value)
@@ -1226,7 +1226,10 @@ class SingleCameraDialog(QDialog):
         return normalized
 
     def _refresh_degirum_override_options(self) -> None:
-        current_value = str(self.degirum_device_override_combo.currentData() or "inherit").strip().lower()
+        current_value = config_module.normalize_degirum_device_selection(
+            self.degirum_device_override_combo.currentData() or "inherit",
+            allow_inherit=True,
+        )
         options: list[tuple[str, str]] = [
             (self._degirum_device_label_map["inherit"], "inherit"),
             (self._degirum_device_label_map["cpu"], "cpu"),
@@ -1371,7 +1374,10 @@ class SingleCameraDialog(QDialog):
         self.preview_pause_chk.setChecked(bool(cam.get("preview_pause_when_hidden", DEFAULT_PREVIEW_PAUSE_WHEN_HIDDEN)))
         override_enabled = bool(cam.get("degirum_device_override_enabled", False))
         self.degirum_device_override_enabled_chk.setChecked(override_enabled)
-        override_value = str(cam.get("degirum_device_override", "inherit")).strip().lower() or "inherit"
+        override_value = config_module.normalize_degirum_device_selection(
+            cam.get("degirum_device_override", "inherit"),
+            allow_inherit=True,
+        )
         idx = self.degirum_device_override_combo.findData(override_value)
         if idx < 0 and override_value not in {"inherit", "cpu", "gpu"}:
             self.degirum_device_override_combo.addItem(f"Urządzenie: {override_value}", override_value)
@@ -1431,7 +1437,10 @@ class SingleCameraDialog(QDialog):
             "preview_fps_thumb": float(self.preview_fps_thumb_spin.value()),
             "preview_pause_when_hidden": self.preview_pause_chk.isChecked(),
             "degirum_device_override_enabled": self.degirum_device_override_enabled_chk.isChecked(),
-            "degirum_device_override": str(self.degirum_device_override_combo.currentData() or "inherit"),
+            "degirum_device_override": config_module.normalize_degirum_device_selection(
+                self.degirum_device_override_combo.currentData() or "inherit",
+                allow_inherit=True,
+            ),
         }
         profile_name = str(cam.get("sensitivity_profile", "custom") or "custom")
         if profile_name != "custom":
@@ -1954,11 +1963,21 @@ QToolButton:focus { outline: none; }
         self.overload_max_queue_size = int(self.config.get("overload_max_queue_size", DEFAULT_OVERLOAD_MAX_QUEUE_SIZE)) if hasattr(self, "config") else DEFAULT_OVERLOAD_MAX_QUEUE_SIZE
         self.overload_max_preview_bandwidth_mbps = float(self.config.get("overload_max_preview_bandwidth_mbps", DEFAULT_OVERLOAD_MAX_PREVIEW_BANDWIDTH_MBPS)) if hasattr(self, "config") else DEFAULT_OVERLOAD_MAX_PREVIEW_BANDWIDTH_MBPS
         self.overload_safety_threshold_pct = int(self.config.get("overload_safety_threshold_pct", 85)) if hasattr(self, "config") else 85
-        self.degirum_device_mode = str(self.config.get("degirum_device_mode", "auto")).strip().lower() or "auto"
-        self.degirum_preferred_device = str(self.config.get("degirum_preferred_device", "auto")).strip().lower() or "auto"
+        self.degirum_device_mode = config_module.normalize_degirum_device_selection(
+            self.config.get("degirum_device_mode", "auto")
+        )
+        self.degirum_preferred_device = config_module.normalize_degirum_device_selection(
+            self.config.get("degirum_preferred_device", "auto")
+        )
         self.degirum_auto_select_best = bool(self.config.get("degirum_auto_select_best", True))
         raw_devices = self.config.get("degirum_available_devices", []) if hasattr(self, "config") else []
-        self.degirum_available_devices = [str(item).strip().lower() for item in raw_devices if str(item).strip()]
+        if not isinstance(raw_devices, list):
+            raw_devices = [raw_devices]
+        self.degirum_available_devices = [
+            normalized
+            for item in raw_devices
+            if (normalized := config_module.normalize_degirum_device_selection(item)) not in {"auto", "inherit"}
+        ]
         self.degirum_last_benchmark = dict(self.config.get("degirum_last_benchmark", {})) if hasattr(self, "config") else {}
         self.overload_level = 0
         self.overload_mode_active = False
@@ -2389,27 +2408,28 @@ QToolButton:focus { outline: none; }
 
     def _build_model_cache_key(self, model_name: str, device_config: object = None) -> tuple[str, str]:
         model_key = str(model_name).strip()
-        effective_device = "auto"
-        if isinstance(device_config, dict):
-            cfg = dict(device_config)
-            override_enabled = bool(cfg.get("degirum_device_override_enabled", False))
-            override_value = str(cfg.get("degirum_device_override", "inherit")).strip().lower()
-            if override_enabled and override_value and override_value != "inherit":
-                effective_device = override_value
-            else:
-                for key in ("effective_device", "device_type", "device", "degirum_preferred_device", "degirum_device_mode"):
-                    raw = cfg.get(key)
-                    if raw is None:
-                        continue
-                    candidate = str(raw).strip().lower()
-                    if candidate:
-                        effective_device = candidate
-                        break
-        elif isinstance(device_config, str):
-            candidate = device_config.strip().lower()
-            if candidate:
-                effective_device = candidate
+        effective_device = config_module.normalize_degirum_device_selection(device_config)
         return model_key, effective_device
+
+    def _resolve_degirum_load_model_params(
+        self,
+        model_name: str,
+        device_selection: object,
+        *,
+        inference_host_address: str = "@local",
+    ) -> tuple[dict[str, str], str]:
+        logical_device = config_module.normalize_degirum_device_selection(device_selection)
+        load_kwargs = {
+            "model_name": model_name,
+            "inference_host_address": inference_host_address,
+            "zoo_url": str(MODELS_PATH / model_name),
+        }
+        if config_module.is_valid_degirum_device_type(logical_device):
+            load_kwargs["device_type"] = logical_device
+            resolved_type = logical_device
+        else:
+            resolved_type = ""
+        return load_kwargs, resolved_type
 
     def _resolve_effective_degirum_device(self, camera_config: dict | None) -> str:
         cam_cfg = camera_config if isinstance(camera_config, dict) else {}
@@ -2417,7 +2437,10 @@ QToolButton:focus { outline: none; }
         app_cfg = self.config if isinstance(getattr(self, "config", None), dict) else {}
 
         override_enabled = bool(cam_cfg.get("degirum_device_override_enabled", False))
-        override_value = str(cam_cfg.get("degirum_device_override", "inherit")).strip().lower()
+        override_value = config_module.normalize_degirum_device_selection(
+            cam_cfg.get("degirum_device_override", "inherit"),
+            allow_inherit=True,
+        )
         if override_enabled and override_value and override_value != "inherit":
             selected = override_value
             self._log_info(
@@ -2428,7 +2451,7 @@ QToolButton:focus { outline: none; }
                 details=f"scope=camera forced_device={selected}",
             )
         else:
-            mode = str(app_cfg.get("degirum_device_mode", "auto")).strip().lower() or "auto"
+            mode = config_module.normalize_degirum_device_selection(app_cfg.get("degirum_device_mode", "auto"))
             if mode != "auto":
                 selected = mode
                 self._log_info(
@@ -2439,7 +2462,7 @@ QToolButton:focus { outline: none; }
                     details=f"scope=global forced_device={selected}",
                 )
             else:
-                recommended = str(app_cfg.get("degirum_preferred_device", "cpu")).strip().lower() or "cpu"
+                recommended = config_module.normalize_degirum_device_selection(app_cfg.get("degirum_preferred_device", "cpu"))
                 if recommended == "auto":
                     recommended = "cpu"
                 selected = recommended
@@ -2452,7 +2475,13 @@ QToolButton:focus { outline: none; }
                 )
 
         available_raw = app_cfg.get("degirum_available_devices", [])
-        available_devices = {str(item).strip().lower() for item in available_raw if str(item).strip()}
+        if not isinstance(available_raw, list):
+            available_raw = [available_raw]
+        available_devices = {
+            config_module.normalize_degirum_device_selection(item)
+            for item in available_raw
+            if config_module.normalize_degirum_device_selection(item) not in {"auto", "inherit"}
+        }
         if selected != "cpu" and available_devices and selected not in available_devices:
             self._log_warning(
                 "error",
@@ -2478,34 +2507,43 @@ QToolButton:focus { outline: none; }
             self.log_window.add_entry("application", f"model cache-hit: {model_name} ({cache_key[1]})")
             return self.model_cache[cache_key]
 
-        effective_device = cache_key[1]
-        load_kwargs = {
-            "model_name": model_name,
-            "inference_host_address": "@local",
-            "zoo_url": str(MODELS_PATH / model_name),
-        }
-        if effective_device and effective_device != "auto":
-            load_kwargs["device_type"] = effective_device
+        logical_device = cache_key[1]
+        load_kwargs, resolved_type = self._resolve_degirum_load_model_params(model_name, logical_device)
+        if logical_device not in {"auto", "cpu"} and not resolved_type:
+            self._log_warning(
+                "warning",
+                "fallback to cpu because invalid device_type",
+                source="detection",
+                details=f"model={model_name} raw={device_config} normalized={logical_device}",
+            )
+        self._log_info(
+            "detection",
+            "degirum load model params resolved",
+            source="detection",
+            details=(
+                f"model={model_name} device_selection_raw={device_config} "
+                f"device_selection_normalized={logical_device} "
+                f"resolved_device_type={resolved_type or '<none>'} "
+                f"inference_host_address={load_kwargs.get('inference_host_address')}"
+            ),
+        )
 
         try:
             model = dg.load_model(**load_kwargs)
-            self.model_cache[cache_key] = model
-            self.log_window.add_entry("application", f"model load: {model_name} ({effective_device})")
+            cache_variant = resolved_type or logical_device
+            success_key = self._build_model_cache_key(model_name, cache_variant)
+            self.model_cache[success_key] = model
+            self.log_window.add_entry("application", f"model load: {model_name} ({cache_variant})")
             return model
         except Exception as init_error:
             self._log_error(
                 "error",
                 "degirum backend model init failure",
                 source="detection",
-                details=f"model={model_name} device={effective_device} error={init_error}",
-            )
-            if effective_device != "gpu":
-                raise
-            self._log_warning(
-                "error",
-                "fallback to cpu after backend error",
-                source="detection",
-                details=f"model={model_name} failed_device={effective_device}",
+                details=(
+                    f"model={model_name} logical_device={logical_device} "
+                    f"device_type={resolved_type or '<none>'} error={init_error}"
+                ),
             )
 
         cpu_key = self._build_model_cache_key(model_name, "cpu")
@@ -2513,12 +2551,13 @@ QToolButton:focus { outline: none; }
             self.log_window.add_entry("application", f"model cache-hit: {model_name} (cpu)")
             return self.model_cache[cpu_key]
 
-        cpu_kwargs = {
-            "model_name": model_name,
-            "inference_host_address": "@local",
-            "zoo_url": str(MODELS_PATH / model_name),
-            "device_type": "cpu",
-        }
+        self._log_warning(
+            "warning",
+            "fallback to cpu after backend error",
+            source="detection",
+            details=f"model={model_name} requested={logical_device}",
+        )
+        cpu_kwargs, _ = self._resolve_degirum_load_model_params(model_name, "cpu")
         try:
             model = dg.load_model(**cpu_kwargs)
             self.model_cache[cpu_key] = model
@@ -3818,8 +3857,13 @@ QToolButton:focus { outline: none; }
     def apply_degirum_device_settings(self, settings: dict) -> None:
         previous_cfg = self._build_runtime_config()
         self.degirum_auto_select_best = bool(settings.get("degirum_auto_select_best", self.degirum_auto_select_best))
-        preferred = config_module._normalize_degirum_device_value(settings.get("degirum_preferred_device", self.degirum_preferred_device))
-        available = [config_module._normalize_degirum_device_value(item) for item in settings.get("degirum_available_devices", self.degirum_available_devices)]
+        preferred = config_module.normalize_degirum_device_selection(
+            settings.get("degirum_preferred_device", self.degirum_preferred_device)
+        )
+        available = [
+            config_module.normalize_degirum_device_selection(item)
+            for item in settings.get("degirum_available_devices", self.degirum_available_devices)
+        ]
         unique_available = [item for item in dict.fromkeys([item for item in available if item and item not in {"auto"}])]
         self.degirum_preferred_device = preferred
         self.degirum_device_mode = "auto"
@@ -3987,7 +4031,7 @@ class DeGirumDeviceSettingsDialog(QDialog):
             ("GPU (karta graficzna)", "gpu"),
         ]
         for dev in self._detected_devices:
-            val = str(dev).strip().lower()
+            val = config_module.normalize_degirum_device_selection(dev)
             if not val or val in {"auto", "cpu", "gpu"}:
                 continue
             options.append((val, val))
@@ -4002,8 +4046,8 @@ class DeGirumDeviceSettingsDialog(QDialog):
         for label, value in unique_options:
             self.default_device_combo.addItem(label, value)
         if selected_device is None:
-            selected_device = str(self.default_device_combo.currentData() or "auto")
-        idx = self.default_device_combo.findData(str(selected_device).strip().lower())
+            selected_device = config_module.normalize_degirum_device_selection(self.default_device_combo.currentData() or "auto")
+        idx = self.default_device_combo.findData(config_module.normalize_degirum_device_selection(selected_device))
         self.default_device_combo.setCurrentIndex(idx if idx >= 0 else 0)
 
     def _rows_for_table(self) -> list[dict]:
@@ -4076,7 +4120,11 @@ class DeGirumDeviceSettingsDialog(QDialog):
     def _discover_devices_payload(self) -> dict:
         try:
             discovered_raw = dg.get_supported_devices("@local")
-            discovered = [str(item).strip().lower() for item in discovered_raw if str(item).strip()]
+            discovered = [
+                config_module.normalize_degirum_device_selection(item)
+                for item in discovered_raw
+                if config_module.normalize_degirum_device_selection(item) not in {"auto", "inherit"}
+            ]
             discovered = [item for item in dict.fromkeys(discovered)]
             self.parent_window._log_info(
                 "detection",
@@ -4115,14 +4163,15 @@ class DeGirumDeviceSettingsDialog(QDialog):
                 continue
             started = time.perf_counter()
             try:
-                dg.load_model(
-                    model_name=model_name,
-                    inference_host_address="@local",
-                    zoo_url=str(MODELS_PATH / model_name),
-                    device_type=device,
-                )
+                load_kwargs, resolved_type = self.parent_window._resolve_degirum_load_model_params(model_name, device)
+                if device == "gpu" and not resolved_type:
+                    raise RuntimeError("Brak poprawnego mapowania GPU do <runtime>/<device>.")
+                dg.load_model(**load_kwargs)
                 elapsed_ms = (time.perf_counter() - started) * 1000.0
-                benchmark_by_device[device] = {"elapsed_ms": elapsed_ms, "details": f"Model: {model_name}"}
+                benchmark_by_device[device] = {
+                    "elapsed_ms": elapsed_ms,
+                    "details": f"Model: {model_name}; device_type={resolved_type or 'default'}",
+                }
                 if best_ms is None or elapsed_ms < best_ms:
                     best_ms = elapsed_ms
                     best_device = device
@@ -4188,7 +4237,7 @@ class DeGirumDeviceSettingsDialog(QDialog):
             self._set_busy(False, "Test zakończony.")
 
     def _apply(self) -> None:
-        selected = str(self.default_device_combo.currentData() or "auto").strip().lower() or "auto"
+        selected = config_module.normalize_degirum_device_selection(self.default_device_combo.currentData() or "auto")
         payload = {
             "degirum_auto_select_best": self.auto_select_chk.isChecked(),
             "degirum_preferred_device": selected,
