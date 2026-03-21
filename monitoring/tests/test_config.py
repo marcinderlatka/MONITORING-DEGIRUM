@@ -313,3 +313,44 @@ def test_load_config_applies_camera_defaults_independently_per_camera(tmp_path):
     assert cam_a["degirum_device_override"] == "gpu:1"
     assert cam_b["degirum_device_override_enabled"] is False
     assert cam_b["degirum_device_override"] == "inherit"
+
+
+def test_normalize_degirum_device_selection_handles_legacy_list_values():
+    from monitoring import config
+
+    assert config.normalize_degirum_device_selection(["cpu"]) == "cpu"
+    assert config.normalize_degirum_device_selection(["gpu"]) == "gpu"
+    assert config.normalize_degirum_device_selection([]) == "cpu"
+    assert config.normalize_degirum_device_selection(None) == "cpu"
+    assert config.normalize_degirum_device_selection("runtime/device") == "runtime/device"
+
+
+def test_load_config_migrates_legacy_degirum_list_values(tmp_path):
+    from monitoring.config import load_config
+
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(
+        json.dumps(
+            {
+                "degirum_device_mode": ["auto"],
+                "degirum_preferred_device": ["cpu"],
+                "degirum_available_devices": [["cpu"], "gpu", ""],
+                "cameras": [
+                    {
+                        "name": "Cam-A",
+                        "rtsp": "rtsp://a",
+                        "degirum_device_override_enabled": True,
+                        "degirum_device_override": ["gpu"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = load_config(cfg_path)
+
+    assert cfg["degirum_device_mode"] == "auto"
+    assert cfg["degirum_preferred_device"] == "cpu"
+    assert cfg["degirum_available_devices"] == ["cpu", "gpu"]
+    assert cfg["cameras"][0]["degirum_device_override"] == "gpu"

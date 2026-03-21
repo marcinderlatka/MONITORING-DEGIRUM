@@ -35,7 +35,7 @@ def test_detect_degirum_devices_adds_gpu_only_after_positive_probe() -> None:
 
         @staticmethod
         def load_model(**kwargs):
-            if kwargs.get("device_type") == "gpu":
+            if kwargs.get("device") == "gpu":
                 return _FakeModel()
             raise RuntimeError("unsupported")
 
@@ -133,3 +133,26 @@ def test_choose_best_degirum_device_falls_back_to_cpu_when_gpu_unstable() -> Non
 
     assert selected == "cpu"
     assert config["degirum_preferred_device"] == "cpu"
+
+
+def test_benchmark_never_passes_logical_cpu_gpu_as_device_type() -> None:
+    captured: list[dict[str, object]] = []
+
+    class _Api:
+        @staticmethod
+        def load_model(**kwargs):
+            captured.append(dict(kwargs))
+            device_type = kwargs.get("device_type")
+            if device_type in {"cpu", "gpu"}:
+                raise AssertionError("invalid logical device_type passed to load_model")
+            return _FakeModel()
+
+    benchmark_device_candidates(
+        _Api(),
+        model_name="dummy",
+        candidates=["cpu", "gpu"],
+        sample_input={"frame": b"x"},
+    )
+
+    assert captured
+    assert all(call.get("device_type") not in {"cpu", "gpu"} for call in captured)
