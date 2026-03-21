@@ -164,7 +164,7 @@ class RecordingQueueManager:
 
     @staticmethod
     def enqueue_stride(level: int) -> int:
-        return {0: 1, 1: 2, 2: 3, 3: 4}.get(int(max(0, min(3, level))), 4)
+        return {0: 1, 1: 1, 2: 2, 3: 3}.get(int(max(0, min(3, level))), 3)
 
     @staticmethod
     def detect_fps_factor(level: int, queue_size: int, queue_throttle_threshold: int = 30) -> float:
@@ -1208,10 +1208,10 @@ class CameraWorker(QThread):
             self.preview_resolution_factor = min(self.preview_resolution_factor, 0.7)
         if self.recording and self.detect_fps_factor > queue_detect_factor:
             self.detect_fps_factor = max(0.45, queue_detect_factor)
-        if self.recording and self._current_writer_fps_base > 0:
-            writer_factor = max(0.45, 1.0 - 0.15 * self._recorder_degradation_level)
-            target_writer = max(self.recorder_min_dynamic_writer_fps, self._current_writer_fps_base * writer_factor)
-            self.current_writer_fps = min(self.current_writer_fps or target_writer, target_writer)
+        # Writer FPS metadata must stay constant during a session (CFR container).
+        # We degrade by reducing enqueue density, but we do not mutate writer_fps mid-clip,
+        # because backend timing is fixed at open() and changing this value only desynchronizes
+        # diagnostics/metadata from actual file timing.
 
         if self._recorder_degradation_level > 0:
             self._warn_recorder_overload_once_per_window(

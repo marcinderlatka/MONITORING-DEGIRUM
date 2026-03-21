@@ -1948,7 +1948,6 @@ QToolButton:focus { outline: none; }
         self._worker_diag: dict[str, dict[str, object]] = {}
         self.worker_status: dict[str, dict[str, object]] = {}
         self.last_render_time = 0.0
-        self._render_interval_s = 1 / 15
         self.preview_fps_main = float(self.config.get("preview_fps_main", DEFAULT_PREVIEW_FPS_MAIN)) if hasattr(self, "config") else DEFAULT_PREVIEW_FPS_MAIN
         self.preview_fps_grid = float(self.config.get("preview_fps_grid", DEFAULT_PREVIEW_FPS_GRID)) if hasattr(self, "config") else DEFAULT_PREVIEW_FPS_GRID
         self.preview_fps_thumb = float(self.config.get("preview_fps_thumb", DEFAULT_PREVIEW_FPS_THUMB)) if hasattr(self, "config") else DEFAULT_PREVIEW_FPS_THUMB
@@ -2020,9 +2019,10 @@ QToolButton:focus { outline: none; }
         self._stable_config_snapshot = self._build_runtime_config()
         self._preview_cache: dict[tuple[int, str, int, int, int, int, str], QPixmap] = {}
         self._last_thumb_update_ts: dict[int, float] = {}
-        self._thumb_update_interval_s = 1.0 / max(0.5, float(self.preview_fps_thumb))
+        self._thumb_update_interval_s = 1.0
         self._last_grid_update_ts: dict[int, float] = {}
-        self._grid_update_interval_s = 1.0 / max(0.5, float(self.preview_fps_grid))
+        self._grid_update_interval_s = 1.0
+        self._refresh_preview_intervals()
         self._recordings_browser_open = False
         self._hud_interval_s = 0.35
         self._last_hud_render_ts = 0.0
@@ -2059,6 +2059,11 @@ QToolButton:focus { outline: none; }
 
     def _log_error(self, group: str, message: str, **kwargs) -> None:
         APP_LOG_BRIDGE.error(group, message, **kwargs)
+
+    def _refresh_preview_intervals(self) -> None:
+        self._render_interval_s = 1.0 / max(1.0, float(self.preview_fps_main))
+        self._thumb_update_interval_s = 1.0 / max(0.5, float(self.preview_fps_thumb))
+        self._grid_update_interval_s = 1.0 / max(0.5, float(self.preview_fps_grid))
 
     def _log_exception(self, group: str, message: str, exc: BaseException | None = None, **kwargs) -> None:
         APP_LOG_BRIDGE.exception(group, message, exc=exc, **kwargs)
@@ -3732,8 +3737,7 @@ QToolButton:focus { outline: none; }
         dlg.open_video.connect(self.open_video_file)
         dlg.exec_()
         self._recordings_browser_open = False
-        self._thumb_update_interval_s = 1.0 / max(0.5, float(self.preview_fps_thumb))
-        self._grid_update_interval_s = 1.0 / max(0.5, float(self.preview_fps_grid))
+        self._refresh_preview_intervals()
         self._apply_worker_preview_roles()
 
     def open_camera_list_dialog(self):
@@ -3838,7 +3842,7 @@ QToolButton:focus { outline: none; }
         self.preview_grid_max_height = int(preset.get("preview_grid_max_height", self.preview_grid_max_height))
         self.preview_thumb_max_width = int(preset.get("preview_thumb_max_width", self.preview_thumb_max_width))
         self.preview_thumb_max_height = int(preset.get("preview_thumb_max_height", self.preview_thumb_max_height))
-        self._thumb_update_interval_s = 1.0 / max(0.5, float(self.preview_fps_thumb))
+        self._refresh_preview_intervals()
         for cam in self.cameras:
             if not isinstance(cam, dict):
                 continue

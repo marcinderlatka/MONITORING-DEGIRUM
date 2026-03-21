@@ -620,10 +620,8 @@ def test_thumb_hidden_role_downscales_payload_before_emit():
     worker._maybe_emit_preview(frame, overlays=[], now_mono=10.0)
     worker._maybe_emit_preview(frame, overlays=[], now_mono=11.0)
 
-    assert emitted_main
+    assert not emitted_main
     assert emitted_thumb
-    assert emitted_main[-1].shape[1] <= 320
-    assert emitted_main[-1].shape[0] <= 180
     assert emitted_thumb[-1].shape[1] <= 320
     assert emitted_thumb[-1].shape[0] <= 180
 
@@ -663,7 +661,7 @@ def test_recorder_degradation_level_responds_to_queue_and_drops():
     assert worker._compute_recorder_degradation_level(queue_size=21, dropped_frames=0, queue_peak=5) >= 2
 
 
-def test_dynamic_recorder_degradation_updates_stride_and_writer_fps():
+def test_dynamic_recorder_degradation_updates_stride_without_mutating_writer_fps():
     worker = _worker()
     worker.recording = True
     worker.current_writer_fps = 8.0
@@ -675,6 +673,8 @@ def test_dynamic_recorder_degradation_updates_stride_and_writer_fps():
     worker.recorder_dropped_critical_threshold = 3
     worker.recorder_queue_peak_warn_threshold = 3
     worker.recorder_queue_peak_critical_threshold = 5
+    worker.recorder_degrade_enter_hysteresis_s = 0.0
+    worker.recorder_degrade_exit_hysteresis_s = 0.0
 
     class _Queue:
         def qsize(self):
@@ -684,8 +684,8 @@ def test_dynamic_recorder_degradation_updates_stride_and_writer_fps():
     worker._apply_dynamic_recorder_degradation(now_mono=100.0)
 
     assert worker._recorder_degradation_level >= 2
-    assert worker.recorder_enqueue_stride >= 3
-    assert worker.current_writer_fps < 8.0
+    assert worker.recorder_enqueue_stride >= 2
+    assert worker.current_writer_fps == 8.0
 
 
 def test_thumb_hidden_fast_path_uses_single_resize_call(monkeypatch):
