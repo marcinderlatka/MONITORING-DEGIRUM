@@ -16,6 +16,7 @@ from threading import Event, Lock, RLock
 from typing import Any, Callable
 
 import cv2
+import degirum as dg  # type: ignore
 import degirum_tools  # type: ignore
 import numpy as np
 from PyQt5.QtCore import QThread, pyqtSignal
@@ -23,6 +24,7 @@ from PyQt5.QtCore import QThread, pyqtSignal
 from .config import (
     DEFAULT_CONFIDENCE_THRESHOLD,
     DEFAULT_DETECTION_HOURS,
+    DEFAULT_MODEL,
     DEFAULT_DETECTION_DEBUG_ENABLED,
     DEFAULT_DRAW_OVERLAYS,
     DEFAULT_ENABLE_DETECTION,
@@ -69,6 +71,7 @@ from .config import (
     DEFAULT_THUMBNAIL_FONT_THICKNESS,
     DEFAULT_THUMBNAIL_MODE,
     DEFAULT_THUMBNAIL_OVERLAY_ENABLED,
+    MODELS_PATH,
     RECORD_CLASSES,
     SENSITIVITY_PROFILES,
     VISIBLE_CLASSES,
@@ -485,6 +488,8 @@ class CameraWorker(QThread):
         self.model = model
         self.index = index
         self.state = PipelineState()
+        self.device_type = str(self.camera.get("effective_device_type", "CPU"))
+        self.soft_fallback_enabled = True
 
         self.fps = int(self.camera.get("fps", DEFAULT_FPS))
         self.detection_fps_limit = float(max(1, int(self.camera.get("detection_fps_limit", self.fps))))
@@ -672,6 +677,15 @@ class CameraWorker(QThread):
             "outside_schedule": 0,
             "detection_disabled": 0,
         }
+
+    def _reload_model_with_device(self, device_type: str) -> Any:
+        model_name = str(self.camera.get("model", DEFAULT_MODEL))
+        return dg.load_model(
+            model_name=model_name,
+            inference_host_address="@local",
+            zoo_url=MODELS_PATH / model_name,
+            device_type=device_type,
+        )
 
     def _sample_process_metrics(self, now_mono: float) -> tuple[float, float]:
         if self.state.metrics_last_sample_ts and now_mono - self.state.metrics_last_sample_ts < 0.2:
@@ -1279,6 +1293,7 @@ class CameraWorker(QThread):
             "calibration_sample_count": int(self.telemetry_confidence_count),
             "calibration_duration_hours": float((now_mono - self.telemetry_started_ts) / 3600.0),
             "suggested_record_threshold": suggested_threshold,
+            "device_type": str(self.device_type),
         }
 
     def _start_recording_session(self, raw_frame: np.ndarray, preview_frame: np.ndarray, best_label: str, best_score: float, best_bbox: tuple[int, int, int, int] | None, stream_fps: float, detect_fps: float) -> bool:
@@ -1698,7 +1713,7 @@ class CameraWorker(QThread):
             emit_h = target_grid_h if self.preview_role == "grid" else target_thumb_h
             thumb_emit_frame = self._resize_for_preview_cached(preview_frame, emit_w, emit_h)
             self.thumb_preview_signal.emit(thumb_emit_frame, self.index)
-            self._update_preview_bytes_estimate(thumb_emit_frame, now_mono)
+            self._update_preview_bytes_estimate(thumb_emit_frame, now_mono=now_mono)
             self.state.last_preview_emit_ts = now_mono
             self.state.frames_emitted += 1
             self.preview_processing_ms = max(0.0, (time.monotonic() - preview_start) * 1000.0)
@@ -1846,6 +1861,8 @@ class CameraWorker(QThread):
                 "rss_mb": float(metrics["rss_mb"]),
                 "frame_copies_total": int(self.frame_copies_total),
                 "frame_copies_delta": int(frame_copies_delta),
+                "device_type": str(self.device_type),
+                "inference_device": str(self.device_type),
             },
         )
         app_log(
@@ -1883,6 +1900,8 @@ class CameraWorker(QThread):
                     "trigger_h": f"{float(telemetry['trigger_frequency_per_hour']):.2f}",
                     "camera_fps_config": f"{float(self.fps):.2f}",
                     "detection_fps_limit": f"{float(self.detection_fps_limit):.2f}",
+                    "device_type": str(self.device_type),
+                    "inference_device": str(self.device_type),
                 },
                 PERFORMANCE_PARAM_LABELS,
             ),
@@ -1951,6 +1970,8 @@ class CameraWorker(QThread):
             "calibration_sample_count": int(telemetry["calibration_sample_count"]),
             "calibration_duration_hours": float(telemetry["calibration_duration_hours"]),
             "suggested_record_threshold": telemetry["suggested_record_threshold"],
+            "device_type": str(self.device_type),
+            "inference_device": str(self.device_type),
             "rejection_counters": dict(self.rejection_counters),
             "average_inference_ms": float(self.average_inference_ms),
             "last_inference_ms": float(self.last_inference_ms),
@@ -2082,6 +2103,36 @@ class CameraWorker(QThread):
                                 connected = True
 
                             raw_frame, preview_frame = self._capture_next_frame(frame, now_mono)
+                            queue_size = self.record_thread.queue.qsize() if self.record_thread else 0
+                            if (
+                                self.app_overload_mode
+                                and self.overload_level >= 2
+                                and queue_size > 40
+                                and str(self.device_type).lower().startswith("gpu")
+                                and self.soft_fallback_enabled
+                            ):
+                                app_log(
+                                    "warning",
+                                    "GPU overload → soft fallback to CPU",
+                                    camera=str(self.camera.get("name", self.index)),
+                                    source="worker",
+                                    level="WARNING",
+                                    details=f"queue_size={queue_size} overload_level={self.overload_level}",
+                                )
+                                try:
+                                    self.model = self._reload_model_with_device("CPU")
+                                    self.device_type = "CPU"
+                                    self.camera["effective_device_type"] = "CPU"
+                                    self.soft_fallback_enabled = False
+                                except Exception as fallback_exc:
+                                    app_log(
+                                        "error",
+                                        "soft fallback model reload failed",
+                                        camera=str(self.camera.get("name", self.index)),
+                                        source="worker",
+                                        level="ERROR",
+                                        details=str(fallback_exc),
+                                    )
                             inference_result, detected, best_label, best_score, best_bbox, overlays = self._maybe_run_inference(raw_frame, now_mono)
 
                             if detected:

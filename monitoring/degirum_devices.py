@@ -175,6 +175,27 @@ def resolve_degirum_runtime_target(
     }
 
 
+def resolve_effective_degirum_selection(camera_config: dict[str, Any] | None, app_config: dict[str, Any] | None) -> dict[str, Any]:
+    """Resolve logical DeGirum selection from camera override + app preferences."""
+    cam_cfg = camera_config if isinstance(camera_config, dict) else {}
+    app_cfg = app_config if isinstance(app_config, dict) else {}
+
+    override_enabled = bool(cam_cfg.get("degirum_device_override_enabled", False))
+    override_value = normalize_degirum_device_selection(
+        cam_cfg.get("degirum_device_override", "inherit"),
+        allow_inherit=True,
+    )
+    if override_enabled and override_value != "inherit":
+        return {"logical_selection": override_value, "resolution_source": "camera_override"}
+
+    mode = normalize_degirum_device_selection(app_cfg.get("degirum_device_mode", "auto"))
+    if mode != "auto":
+        return {"logical_selection": mode, "resolution_source": "global_mode"}
+
+    preferred = normalize_degirum_device_selection(app_cfg.get("degirum_preferred_device", "auto"))
+    return {"logical_selection": preferred, "resolution_source": "global_preferred"}
+
+
 def detect_degirum_devices(
     dg_module: Any,
     *,
@@ -399,5 +420,6 @@ __all__ = [
     "detect_degirum_devices",
     "get_model_supported_device_types",
     "parse_supported_device_types_from_error",
+    "resolve_effective_degirum_selection",
     "resolve_degirum_runtime_target",
 ]
