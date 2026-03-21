@@ -185,10 +185,12 @@ from .widgets.recordings_browser import RecordingsBrowserDialog
 from .system_metrics import SystemMetricsSampler
 from .degirum_devices import (
     benchmark_device_candidates,
+    build_degirum_load_model_kwargs,
     detect_degirum_devices,
     get_model_supported_device_types,
     resolve_effective_degirum_selection,
     resolve_degirum_runtime_target,
+    sanitize_degirum_load_model_kwargs,
 )
 
 # Qt platform plugin path (Linux)
@@ -2422,14 +2424,12 @@ QToolButton:focus { outline: none; }
     def _get_model(self, camera: dict):
         model_name = str(camera.get("model", DEFAULT_MODEL))
         logical = camera.get("degirum_device_override", self.config.get("degirum_preferred_device", "auto"))
-        supported = self._degirum_supported_types_cache.get(model_name)
-        if supported is None:
-            supported = get_model_supported_device_types(
-                dg,
-                model_name=model_name,
-                zoo_url=MODELS_PATH / model_name,
-                cache=self._degirum_supported_types_cache,
-            )
+        supported = get_model_supported_device_types(
+            dg,
+            model_name=model_name,
+            zoo_url=MODELS_PATH / model_name,
+            cache=self._degirum_supported_types_cache,
+        )
         resolution = resolve_degirum_runtime_target(
             logical_selection=logical,
             supported_device_types=supported,
@@ -2441,12 +2441,18 @@ QToolButton:focus { outline: none; }
             return self.model_cache[cache_key]
 
         try:
-            model = dg.load_model(
+            raw_kwargs = build_degirum_load_model_kwargs(
                 model_name=model_name,
                 inference_host_address="@local",
                 zoo_url=MODELS_PATH / model_name,
                 device_type=final_device,
             )
+            load_kwargs = sanitize_degirum_load_model_kwargs(raw_kwargs)
+            logger.debug("degirum _get_model raw kwargs=%s", raw_kwargs)
+            logger.debug("degirum _get_model sanitized types=%s", {k: type(v).__name__ for k, v in load_kwargs.items()})
+            logger.debug("degirum _get_model load attempt camera=%s model=%s", camera.get("name"), model_name)
+            model = dg.load_model(**load_kwargs)
+            logger.debug("degirum _get_model load success camera=%s model=%s", camera.get("name"), model_name)
             camera["effective_device_type"] = final_device
             self._log_info("detection", f"model loaded → {final_device}", camera=camera.get("name"))
             cache_variant = final_device
@@ -2481,17 +2487,24 @@ QToolButton:focus { outline: none; }
             details=f"model={model_name} requested={logical}",
         )
         try:
-            model = dg.load_model(
+            raw_kwargs = build_degirum_load_model_kwargs(
                 model_name=model_name,
                 inference_host_address="@local",
                 zoo_url=MODELS_PATH / model_name,
                 device_type=cpu_type,
             )
+            load_kwargs = sanitize_degirum_load_model_kwargs(raw_kwargs)
+            logger.debug("degirum _get_model cpu raw kwargs=%s", raw_kwargs)
+            logger.debug("degirum _get_model cpu sanitized types=%s", {k: type(v).__name__ for k, v in load_kwargs.items()})
+            logger.debug("degirum _get_model cpu fallback attempt camera=%s model=%s", camera.get("name"), model_name)
+            model = dg.load_model(**load_kwargs)
+            logger.debug("degirum _get_model cpu fallback success camera=%s model=%s", camera.get("name"), model_name)
             camera["effective_device_type"] = cpu_type
             self.model_cache[cpu_key] = model
             self.log_window.add_entry("application", f"model load: {model_name} (cpu)")
             return model
         except Exception as cpu_error:
+            logger.debug("degirum _get_model cpu fallback failure camera=%s model=%s error=%s", camera.get("name"), model_name, cpu_error)
             self._log_error(
                 "error",
                 "degirum backend cpu fallback failed",

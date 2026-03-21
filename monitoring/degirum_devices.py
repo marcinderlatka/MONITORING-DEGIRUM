@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import logging
+import os
 import re
 import time
 from collections.abc import Sequence
@@ -20,6 +21,76 @@ GUI_LABELS = {
 
 logger = logging.getLogger(__name__)
 _SUPPORTED_RE = re.compile(r"Supported device types are:\s*(\[[^\]]*\])", re.IGNORECASE)
+
+
+def coerce_pathlike_to_str(value: object) -> object:
+    """Convert ``Path``/``os.PathLike`` values to ``str`` for DeGirum APIs."""
+    if isinstance(value, (str, bytes)):
+        return value
+    if isinstance(value, os.PathLike):
+        try:
+            coerced = os.fspath(value)
+            return str(coerced)
+        except Exception:
+            logger.warning("degirum load_model coercion failed for path-like value type=%s", type(value).__name__)
+            return str(value)
+    return value
+
+
+def coerce_optional_str(value: object) -> str | None:
+    """Normalize optional text values into ``str`` while preserving ``None``."""
+    if value is None:
+        return None
+    normalized = coerce_pathlike_to_str(value)
+    if isinstance(normalized, bytes):
+        try:
+            return normalized.decode("utf-8", errors="ignore")
+        except Exception:
+            return str(normalized)
+    return str(normalized)
+
+
+def sanitize_degirum_load_model_kwargs(kwargs: dict[str, object]) -> dict[str, object]:
+    """Return kwargs safe for ``dg.load_model`` (no ``Path`` / ``PathLike`` values)."""
+    sanitized: dict[str, object] = {}
+    for key, value in kwargs.items():
+        normalized = coerce_pathlike_to_str(value)
+        if key in {"model_name", "zoo_url", "model_path", "inference_host_address", "device_type"}:
+            normalized_opt = coerce_optional_str(normalized)
+            normalized = normalized_opt if normalized_opt is not None else ""
+        elif isinstance(normalized, bytes):
+            normalized = normalized.decode("utf-8", errors="ignore")
+        sanitized[key] = normalized
+    return sanitized
+
+
+def build_degirum_load_model_kwargs(
+    *,
+    model_name: object,
+    inference_host_address: object = "@local",
+    zoo_url: object | None = None,
+    device_type: object | None = None,
+) -> dict[str, object]:
+    """Build and sanitize canonical kwargs passed to ``dg.load_model``."""
+    normalized_model = coerce_optional_str(model_name) or ""
+    zoo_value = zoo_url if zoo_url is not None else MODELS_PATH / normalized_model
+    payload: dict[str, object] = {
+        "model_name": normalized_model,
+        "inference_host_address": coerce_optional_str(inference_host_address) or "@local",
+        "zoo_url": zoo_value,
+    }
+    if device_type is not None:
+        payload["device_type"] = device_type
+    return sanitize_degirum_load_model_kwargs(payload)
+
+
+def _log_load_model_diagnostics(prefix: str, raw_kwargs: dict[str, object], sanitized_kwargs: dict[str, object]) -> None:
+    logger.debug("%s raw kwargs=%s", prefix, raw_kwargs)
+    logger.debug(
+        "%s sanitized types=%s",
+        prefix,
+        {key: type(value).__name__ for key, value in sanitized_kwargs.items()},
+    )
 
 
 def _normalize_supported_device_type(value: object) -> str:
@@ -80,8 +151,8 @@ def get_model_supported_device_types(
     inference_host_address: str = "@local",
     cache: dict[tuple[str, str], list[str]] | None = None,
 ) -> list[str]:
-    normalized_model = str(model_name).strip()
-    normalized_zoo = str(Path(zoo_url) if zoo_url is not None else MODELS_PATH / normalized_model)
+    normalized_model = coerce_optional_str(model_name) or ""
+    normalized_zoo = coerce_optional_str(zoo_url if zoo_url is not None else MODELS_PATH / normalized_model) or ""
     cache_key = (normalized_model, normalized_zoo)
     if cache is not None and cache_key in cache:
         return list(cache[cache_key])
@@ -93,17 +164,23 @@ def get_model_supported_device_types(
         return []
 
     # Probe with intentionally invalid type to retrieve authoritative supported list.
-    probe_kwargs = {
+    raw_probe_kwargs = {
         "model_name": normalized_model,
         "inference_host_address": inference_host_address,
         "zoo_url": normalized_zoo,
         "device_type": "__INVALID__/__INVALID__",
     }
+    probe_kwargs = sanitize_degirum_load_model_kwargs(raw_probe_kwargs)
+    _log_load_model_diagnostics("degirum supported-probe", raw_probe_kwargs, probe_kwargs)
     supported: list[str] = []
     try:
+        logger.debug("degirum supported-probe load attempt")
         load_model(**probe_kwargs)
     except Exception as exc:
+        logger.debug("degirum supported-probe failed: %s", exc)
         supported = parse_supported_device_types_from_error(exc)
+    else:
+        logger.debug("degirum supported-probe succeeded")
 
     if cache is not None:
         cache[cache_key] = list(supported)
@@ -277,8 +354,8 @@ def benchmark_device_candidates(
     config: dict[str, Any] | None = None,
     supported_cache: dict[tuple[str, str], list[str]] | None = None,
 ) -> dict[str, Any]:
-    normalized_model = str(model_name).strip()
-    normalized_zoo = str(Path(zoo_url) if zoo_url is not None else MODELS_PATH / normalized_model)
+    normalized_model = coerce_optional_str(model_name) or ""
+    normalized_zoo = coerce_optional_str(zoo_url if zoo_url is not None else MODELS_PATH / normalized_model) or ""
     supported = get_model_supported_device_types(
         dg_module,
         model_name=normalized_model,
@@ -317,12 +394,17 @@ def benchmark_device_candidates(
         started = time.perf_counter()
         model = None
         try:
-            model = dg_module.load_model(
-                model_name=normalized_model,
-                inference_host_address="@local",
-                zoo_url=normalized_zoo,
-                device_type=final_device_type,
-            )
+            raw_kwargs = {
+                "model_name": normalized_model,
+                "inference_host_address": "@local",
+                "zoo_url": normalized_zoo,
+                "device_type": final_device_type,
+            }
+            load_kwargs = sanitize_degirum_load_model_kwargs(raw_kwargs)
+            _log_load_model_diagnostics(f"degirum benchmark {logical}", raw_kwargs, load_kwargs)
+            logger.debug("degirum benchmark load attempt logical=%s final_device_type=%s", logical, final_device_type)
+            model = dg_module.load_model(**load_kwargs)
+            logger.debug("degirum benchmark load success logical=%s final_device_type=%s", logical, final_device_type)
             load_ms = (time.perf_counter() - started) * 1000.0
             infer_ms_values: list[float] = []
             infer_fn = getattr(model, "predict", None)
@@ -347,6 +429,12 @@ def benchmark_device_candidates(
                 }
             )
         except Exception as exc:
+            logger.debug(
+                "degirum benchmark load failure logical=%s final_device_type=%s error=%s",
+                logical,
+                final_device_type,
+                exc,
+            )
             rows.append(
                 {
                     "device": logical,
@@ -416,10 +504,14 @@ def choose_best_degirum_device(
 
 __all__ = [
     "benchmark_device_candidates",
+    "build_degirum_load_model_kwargs",
     "choose_best_degirum_device",
+    "coerce_optional_str",
+    "coerce_pathlike_to_str",
     "detect_degirum_devices",
     "get_model_supported_device_types",
     "parse_supported_device_types_from_error",
     "resolve_effective_degirum_selection",
     "resolve_degirum_runtime_target",
+    "sanitize_degirum_load_model_kwargs",
 ]
