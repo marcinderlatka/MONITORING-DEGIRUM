@@ -1,11 +1,15 @@
 from __future__ import annotations
 
-import itertools
+import sys
+from pathlib import Path
+
+sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from monitoring.degirum_devices import (
     benchmark_device_candidates,
-    choose_best_degirum_device,
     detect_degirum_devices,
+    parse_supported_device_types_from_error,
+    resolve_degirum_runtime_target,
 )
 
 
@@ -17,142 +21,56 @@ class _FakeModel:
         return {"ok": True, "sample": sample}
 
 
-def test_detect_degirum_devices_always_returns_cpu_and_auto() -> None:
-    class _NoApi:
-        pass
-
-    result = detect_degirum_devices(_NoApi())
-    assert [item["id"] for item in result] == ["auto", "cpu"]
-    assert result[1]["label"] == "CPU (procesor)"
-    assert result[0]["label"] == "Auto"
+def test_parse_supported_device_types_from_error() -> None:
+    exc = RuntimeError("Unsupported. Supported device types are: ['TFLITE/CPU', 'TFLITE/GPU']")
+    assert parse_supported_device_types_from_error(exc) == ["TFLITE/CPU", "TFLITE/GPU"]
 
 
-def test_detect_degirum_devices_adds_gpu_only_after_positive_probe() -> None:
-    class _Api:
-        @staticmethod
-        def enumerate_devices():
-            raise RuntimeError("enumeration failed")
-
-        @staticmethod
-        def load_model(**kwargs):
-            if kwargs.get("device") == "gpu":
-                return _FakeModel()
-            raise RuntimeError("unsupported")
-
-    result = detect_degirum_devices(_Api())
-    assert [item["id"] for item in result] == ["auto", "cpu", "gpu"]
-    assert result[2]["label"] == "GPU (karta graficzna)"
-
-
-def test_detect_degirum_devices_swallows_probe_errors() -> None:
-    class _Api:
-        @staticmethod
-        def enumerate_devices():
-            return []
-
-        @staticmethod
-        def load_model(**kwargs):
-            raise RuntimeError("boom")
-
-    result = detect_degirum_devices(_Api())
-    assert [item["id"] for item in result] == ["auto", "cpu"]
-
-
-def test_benchmark_device_candidates_updates_config() -> None:
+def test_detect_degirum_devices_uses_supported_types_from_model_error() -> None:
     class _Api:
         @staticmethod
         def load_model(**kwargs):
-            if kwargs.get("device_type") in {"gpu", "cpu"} or kwargs.get("device") in {"gpu", "cpu"}:
-                return _FakeModel()
-            raise RuntimeError("unsupported")
+            raise RuntimeError("Supported device types are: ['TFLITE/CPU']")
 
-    config: dict[str, object] = {}
-    result = benchmark_device_candidates(
-        _Api(),
-        model_name="dummy",
-        candidates=["gpu", "cpu"],
-        sample_input={"frame": b"x"},
-        config=config,
+    result = detect_degirum_devices(_Api(), model_name="dummy")
+    ids = [item["id"] for item in result]
+
+    assert "cpu" in ids
+    assert "gpu" in ids
+    assert "TFLITE/CPU" in ids
+
+
+def test_runtime_resolution_gpu_falls_back_to_cpu_when_model_supports_only_cpu() -> None:
+    resolved = resolve_degirum_runtime_target(
+        logical_selection="gpu",
+        supported_device_types=["TFLITE/CPU"],
     )
 
-    assert [row["device"] for row in result["results"]] == ["gpu", "cpu"]
-    assert config["degirum_available_devices"] == ["gpu", "cpu"]
-    assert "degirum_last_benchmark" in config
+    assert resolved["logical_selection"] == "gpu"
+    assert resolved["final_device_type"] == "TFLITE/CPU"
+    assert resolved["fallback_used"] is True
 
 
-def test_benchmark_device_candidates_is_deterministic_with_mocked_perf_counter(monkeypatch) -> None:
-    class _Api:
-        @staticmethod
-        def load_model(**kwargs):
-            if kwargs.get("device_type") in {"gpu", "cpu"} or kwargs.get("device") in {"gpu", "cpu"}:
-                return _FakeModel()
-            raise RuntimeError("unsupported")
-
-    ticks = itertools.count(start=0, step=1)
-    monkeypatch.setattr("monitoring.degirum_devices.time.perf_counter", lambda: next(ticks) / 1000.0)
-
-    result = benchmark_device_candidates(
-        _Api(),
-        model_name="dummy",
-        candidates=["gpu", "cpu"],
-        sample_input={"frame": b"x"},
-        inference_runs=2,
-    )
-
-    assert [row["device"] for row in result["results"]] == ["gpu", "cpu"]
-    assert result["results"][0]["load_time_ms"] == 1.0
-    assert result["results"][1]["load_time_ms"] == 1.0
-    assert result["results"][0]["inference_time_ms"] == [1.0, 1.0]
-    assert result["results"][1]["inference_time_ms"] == [1.0, 1.0]
-
-
-def test_choose_best_degirum_device_falls_back_to_cpu_when_gpu_unstable() -> None:
-    class _UnstableGpuModel(_FakeModel):
-        def predict(self, sample) -> dict[str, object]:
-            raise RuntimeError("gpu unstable")
-
-    class _Api:
-        @staticmethod
-        def load_model(**kwargs):
-            device = kwargs.get("device_type") or kwargs.get("device")
-            if device == "gpu":
-                return _UnstableGpuModel()
-            if device == "cpu":
-                return _FakeModel()
-            raise RuntimeError("unsupported")
-
-    config: dict[str, object] = {}
-    selected = choose_best_degirum_device(
-        _Api(),
-        model_name="dummy",
-        candidates=["gpu", "cpu"],
-        sample_input={"frame": b"x"},
-        config=config,
-        auto_select=True,
-    )
-
-    assert selected == "cpu"
-    assert config["degirum_preferred_device"] == "cpu"
-
-
-def test_benchmark_never_passes_logical_cpu_gpu_as_device_type() -> None:
+def test_benchmark_device_candidates_never_uses_logical_cpu_gpu_as_device_type() -> None:
     captured: list[dict[str, object]] = []
 
     class _Api:
         @staticmethod
         def load_model(**kwargs):
             captured.append(dict(kwargs))
-            device_type = kwargs.get("device_type")
-            if device_type in {"cpu", "gpu"}:
-                raise AssertionError("invalid logical device_type passed to load_model")
+            if kwargs.get("device_type") == "__INVALID__/__INVALID__":
+                raise RuntimeError("Supported device types are: ['TFLITE/CPU']")
+            if kwargs.get("device_type") != "TFLITE/CPU":
+                raise AssertionError("invalid runtime device type")
             return _FakeModel()
 
-    benchmark_device_candidates(
+    benchmark = benchmark_device_candidates(
         _Api(),
         model_name="dummy",
-        candidates=["cpu", "gpu"],
+        candidates=["cpu", "gpu", "auto"],
         sample_input={"frame": b"x"},
     )
 
     assert captured
     assert all(call.get("device_type") not in {"cpu", "gpu"} for call in captured)
+    assert benchmark["supported_device_types"] == ["TFLITE/CPU"]

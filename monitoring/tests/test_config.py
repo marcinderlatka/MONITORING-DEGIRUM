@@ -243,6 +243,19 @@ def test_load_config_invalid_degirum_preferred_device_falls_back_to_cpu(tmp_path
     assert cfg["degirum_preferred_device"] == "cpu"
 
 
+def test_load_config_normalizes_legacy_stringified_list_device_selection(tmp_path):
+    from monitoring.config import load_config
+
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(
+        '{"degirum_preferred_device":"[\'cpu\']","degirum_device_mode":"[]","cameras":[{"name":"Cam","rtsp":"x"}]}',
+        encoding="utf-8",
+    )
+    cfg = load_config(cfg_path)
+    assert cfg["degirum_preferred_device"] == "cpu"
+    assert cfg["degirum_device_mode"] == "cpu"
+
+
 def test_fill_camera_defaults_sets_degirum_override_default_and_inherit():
     from monitoring import config
 
