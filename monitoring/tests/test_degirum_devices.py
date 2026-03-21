@@ -7,9 +7,13 @@ sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from monitoring.degirum_devices import (
     benchmark_device_candidates,
+    build_degirum_load_model_kwargs,
+    coerce_optional_str,
+    coerce_pathlike_to_str,
     detect_degirum_devices,
     parse_supported_device_types_from_error,
     resolve_degirum_runtime_target,
+    sanitize_degirum_load_model_kwargs,
 )
 
 
@@ -74,3 +78,29 @@ def test_benchmark_device_candidates_never_uses_logical_cpu_gpu_as_device_type()
     assert captured
     assert all(call.get("device_type") not in {"cpu", "gpu"} for call in captured)
     assert benchmark["supported_device_types"] == ["TFLITE/CPU"]
+    assert all(isinstance(call.get("zoo_url"), str) for call in captured)
+
+
+def test_sanitize_degirum_load_model_kwargs_coerces_pathlike_fields() -> None:
+    payload = sanitize_degirum_load_model_kwargs(
+        {
+            "model_name": "demo",
+            "zoo_url": Path("/tmp/demo-zoo"),
+            "inference_host_address": Path("@local"),
+            "device_type": Path("TFLITE/CPU"),
+        }
+    )
+
+    assert payload["zoo_url"] == "/tmp/demo-zoo"
+    assert payload["inference_host_address"] == "@local"
+    assert payload["device_type"] == "TFLITE/CPU"
+    assert all(not isinstance(value, Path) for value in payload.values())
+
+
+def test_build_kwargs_defaults_and_coerce_helpers() -> None:
+    kwargs = build_degirum_load_model_kwargs(model_name="model-x", zoo_url=Path("/tmp/model-x"))
+
+    assert kwargs["zoo_url"] == "/tmp/model-x"
+    assert kwargs["inference_host_address"] == "@local"
+    assert coerce_pathlike_to_str(Path("/tmp/a")) == "/tmp/a"
+    assert coerce_optional_str(Path("/tmp/b")) == "/tmp/b"
