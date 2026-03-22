@@ -1706,12 +1706,30 @@ _QT_HANDLER_INSTALLED = False
 
 def install_global_exception_hooks() -> None:
     def _sys_hook(exc_type, exc, tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            logger.info("Application interruption requested by user (KeyboardInterrupt)")
+            APP_LOG_BRIDGE.info(
+                "application",
+                "Application interruption requested by user",
+                source="global-exception",
+                action="KeyboardInterrupt",
+            )
+            return
         tb_text = "".join(traceback.format_exception(exc_type, exc, tb))
         logger.critical("Unhandled exception", exc_info=(exc_type, exc, tb))
         APP_LOG_BRIDGE.log(group="error", message=str(exc), source="global-exception", level="CRITICAL", details=tb_text, traceback_text=tb_text, action="Unhandled application exception")
         sys.__excepthook__(exc_type, exc, tb)
 
     def _thread_hook(args):
+        if issubclass(args.exc_type, KeyboardInterrupt):
+            logger.info("Thread interruption requested by user (KeyboardInterrupt)")
+            APP_LOG_BRIDGE.info(
+                "application",
+                "Thread interruption requested by user",
+                source="thread-exception",
+                action=f"KeyboardInterrupt in thread {args.thread.name}",
+            )
+            return
         tb_text = "".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback))
         logger.critical("Unhandled thread exception", exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
         APP_LOG_BRIDGE.log(group="error", message=str(args.exc_value), source="thread-exception", level="CRITICAL", details=tb_text, traceback_text=tb_text, action=f"Unhandled exception in thread {args.thread.name}")
