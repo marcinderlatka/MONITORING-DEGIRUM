@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import ast
 import logging
 import os
@@ -69,7 +70,9 @@ def sanitize_degirum_load_model_kwargs(kwargs: dict[str, object]) -> dict[str, o
         normalized = coerce_pathlike_to_str(value)
         if key in {"model_name", "zoo_url", "model_path", "inference_host_address", "device_type"}:
             normalized_opt = coerce_optional_str(normalized)
-            normalized = normalized_opt if normalized_opt is not None else ""
+            if normalized_opt is None:
+                continue
+            normalized = normalized_opt
         elif isinstance(normalized, bytes):
             normalized = normalized.decode("utf-8", errors="ignore")
         sanitized[key] = normalized
@@ -195,7 +198,11 @@ def get_model_supported_device_types(
     zoo_url: str | Path | None = None,
     inference_host_address: str = "@local",
     cache: dict[tuple[str, str], list[str]] | None = None,
+    supported_cache: dict[tuple[str, str], list[str]] | None = None,
 ) -> list[str]:
+    if cache is None and supported_cache is not None:
+        cache = supported_cache
+
     normalized_model = coerce_optional_str(model_name) or ""
     normalized_zoo = coerce_optional_str(zoo_url if zoo_url is not None else MODELS_PATH / normalized_model) or ""
     cache_key = (normalized_model, normalized_zoo)
@@ -214,7 +221,13 @@ def get_model_supported_device_types(
     get_supported_devices = getattr(dg_module, "get_supported_devices", None)
     if callable(get_supported_devices):
         try:
-            detected = get_supported_devices(inference_host_address=inference_host_address, zoo_url=normalized_zoo)
+            sig = inspect.signature(get_supported_devices)
+            kwargs: dict[str, object] = {}
+            if "inference_host_address" in sig.parameters:
+                kwargs["inference_host_address"] = inference_host_address
+            if "zoo_url" in sig.parameters:
+                kwargs["zoo_url"] = normalized_zoo
+            detected = get_supported_devices(**kwargs)
         except Exception as exc:
             logger.debug("degirum get_supported_devices failed error=%s", exc)
         else:
@@ -223,6 +236,7 @@ def get_model_supported_device_types(
                 if normalized and normalized not in probe_candidates:
                     probe_candidates.append(normalized)
 
+    # Keep only real runtime/device strings for probing.
     for candidate in _PROBE_FALLBACK_DEVICE_TYPES:
         normalized = _normalize_supported_device_type(candidate)
         if normalized and normalized not in probe_candidates:
@@ -349,6 +363,20 @@ def resolve_effective_degirum_selection(camera_config: dict[str, Any] | None, ap
 
     preferred = normalize_degirum_device_selection(app_cfg.get("degirum_preferred_device", "auto"))
     return {"logical_selection": preferred, "resolution_source": "global_preferred"}
+
+
+def cpu_fallback_candidates_from_supported(supported_device_types: Sequence[str]) -> list[str]:
+    supported = [
+        normalized
+        for item in supported_device_types
+        if (normalized := _normalize_supported_device_type(item))
+    ]
+    cpu_only = [item for item in supported if device_kind_from_type(item) == "cpu"]
+    if cpu_only:
+        return list(dict.fromkeys(cpu_only))
+    if supported:
+        return [supported[0]]
+    return []
 
 
 def detect_degirum_devices(
@@ -586,6 +614,7 @@ __all__ = [
     "choose_best_degirum_device",
     "coerce_optional_str",
     "coerce_pathlike_to_str",
+    "cpu_fallback_candidates_from_supported",
     "detect_degirum_devices",
     "device_kind_from_type",
     "get_model_supported_device_types",
