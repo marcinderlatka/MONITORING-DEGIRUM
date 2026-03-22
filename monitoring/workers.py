@@ -82,6 +82,7 @@ from .recording_backends import BaseRecordingBackend, DeGirumWriterBackend, FFmp
 from .log_messages import PERFORMANCE_PARAM_LABELS, format_dict_multiline, msg
 from .runtime_helpers import app_log, compute_effective_writer_fps, compute_effective_writer_fps_details, scale_bbox, stabilized_stream_fps, worker_stop_timeout_details
 from .storage import enqueue_recording_metadata_persist
+from .degirum_devices import load_model_with_timeout
 
 LABEL_COLORS = {
     "person": (0, 0, 255),
@@ -680,7 +681,9 @@ class CameraWorker(QThread):
 
     def _reload_model_with_device(self, device_type: str) -> Any:
         model_name = str(self.camera.get("model", DEFAULT_MODEL))
-        return dg.load_model(
+        return load_model_with_timeout(
+            dg,
+            timeout_s=20.0,
             model_name=model_name,
             inference_host_address="@local",
             zoo_url=MODELS_PATH / model_name,
