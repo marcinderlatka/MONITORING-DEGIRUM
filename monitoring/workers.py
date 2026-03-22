@@ -82,7 +82,6 @@ from .recording_backends import BaseRecordingBackend, DeGirumWriterBackend, FFmp
 from .log_messages import PERFORMANCE_PARAM_LABELS, format_dict_multiline, msg
 from .runtime_helpers import app_log, compute_effective_writer_fps, compute_effective_writer_fps_details, scale_bbox, stabilized_stream_fps, worker_stop_timeout_details
 from .storage import enqueue_recording_metadata_persist
-from .degirum_devices import device_kind_from_type, load_model_with_timeout, resolve_degirum_runtime_target
 
 LABEL_COLORS = {
     "person": (0, 0, 255),
@@ -489,8 +488,7 @@ class CameraWorker(QThread):
         self.model = model
         self.index = index
         self.state = PipelineState()
-        self.device_type = str(self.camera.get("effective_device_type", "CPU"))
-        self.soft_fallback_enabled = True
+        self.device_type = str(getattr(self.model, "device_type", "CPU"))
 
         self.fps = int(self.camera.get("fps", DEFAULT_FPS))
         self.detection_fps_limit = float(max(1, int(self.camera.get("detection_fps_limit", self.fps))))
@@ -678,36 +676,6 @@ class CameraWorker(QThread):
             "outside_schedule": 0,
             "detection_disabled": 0,
         }
-
-    def _reload_model_with_device(self, device_type: str) -> Any:
-        model_name = str(self.camera.get("model", DEFAULT_MODEL))
-        supported_device_types = [str(item) for item in self.camera.get("supported_device_types", []) if str(item).strip()]
-        if not supported_device_types:
-            fallback_candidates = [
-                self.camera.get("effective_device_type"),
-                self.device_type,
-                getattr(self.model, "device_type", None),
-            ]
-            supported_device_types = [str(item) for item in fallback_candidates if str(item or "").strip()]
-        requested = str(device_type or "").strip()
-        logical_selection = requested.lower() if "/" not in requested else requested
-        resolved_target = resolve_degirum_runtime_target(
-            logical_selection=logical_selection,
-            supported_device_types=supported_device_types,
-        )
-        final_device_type = str(resolved_target.get("final_device_type", "")).strip()
-        if not final_device_type:
-            raise RuntimeError(
-                f"unable to resolve final_device_type from requested={requested!r} supported={supported_device_types!r}"
-            )
-        return load_model_with_timeout(
-            dg,
-            timeout_s=20.0,
-            model_name=model_name,
-            inference_host_address="@local",
-            zoo_url=MODELS_PATH / model_name,
-            device_type=final_device_type,
-        )
 
     def _sample_process_metrics(self, now_mono: float) -> tuple[float, float]:
         if self.state.metrics_last_sample_ts and now_mono - self.state.metrics_last_sample_ts < 0.2:
@@ -2126,52 +2094,6 @@ class CameraWorker(QThread):
 
                             raw_frame, preview_frame = self._capture_next_frame(frame, now_mono)
                             queue_size = self.record_thread.queue.qsize() if self.record_thread else 0
-                            if (
-                                self.app_overload_mode
-                                and self.overload_level >= 2
-                                and queue_size > 40
-                                and device_kind_from_type(str(self.device_type)) == "gpu"
-                                and self.soft_fallback_enabled
-                            ):
-                                app_log(
-                                    "warning",
-                                    "GPU overload → soft fallback to CPU",
-                                    camera=str(self.camera.get("name", self.index)),
-                                    source="worker",
-                                    level="WARNING",
-                                    details=f"queue_size={queue_size} overload_level={self.overload_level}",
-                                )
-                                try:
-                                    fallback_target = resolve_degirum_runtime_target(
-                                        logical_selection="cpu",
-                                        supported_device_types=[
-                                            str(item) for item in self.camera.get("supported_device_types", []) if str(item).strip()
-                                        ] or [str(self.device_type)],
-                                    )
-                                    final_device_type = str(fallback_target.get("final_device_type", "")).strip()
-                                    if not final_device_type:
-                                        raise RuntimeError("cpu fallback did not resolve final_device_type")
-                                    self.model = self._reload_model_with_device(final_device_type)
-                                    self.device_type = final_device_type
-                                    self.camera["effective_device_type"] = final_device_type
-                                    app_log(
-                                        "warning",
-                                        "soft fallback applied",
-                                        camera=str(self.camera.get("name", self.index)),
-                                        source="worker",
-                                        level="WARNING",
-                                        details=f"final_device_type={final_device_type}",
-                                    )
-                                    self.soft_fallback_enabled = False
-                                except Exception as fallback_exc:
-                                    app_log(
-                                        "error",
-                                        "soft fallback model reload failed",
-                                        camera=str(self.camera.get("name", self.index)),
-                                        source="worker",
-                                        level="ERROR",
-                                        details=str(fallback_exc),
-                                    )
                             inference_result, detected, best_label, best_score, best_bbox, overlays = self._maybe_run_inference(raw_frame, now_mono)
 
                             if detected:
