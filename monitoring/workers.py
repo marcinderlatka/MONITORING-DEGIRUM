@@ -547,11 +547,11 @@ class CameraWorker(QThread):
         else:
             app_log("warning", "thumbnail write failed", camera=str(self.camera.get("name", self.index)), source="worker", level="WARNING", details=thumb_path)
             return
-            self.current_thumbnail_ts = time.time()
-            self.current_detection_frame_saved = True
-            if best_score >= self.current_event_best_confidence:
-                self.current_event_best_confidence = float(best_score)
-                self.current_event_best_frame = thumb_frame
+        self.current_thumbnail_ts = time.time()
+        self.current_detection_frame_saved = True
+        if best_score >= self.current_event_best_confidence:
+            self.current_event_best_confidence = float(best_score)
+            self.current_event_best_frame = thumb_frame
 
     def _should_start_recording_now(self) -> bool:
         return self.pending_positive_hits >= max(1, self.required_hits_to_start_recording)
