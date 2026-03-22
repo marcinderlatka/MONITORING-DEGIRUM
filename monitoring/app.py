@@ -2449,7 +2449,7 @@ QToolButton:focus { outline: none; }
     def _load_model_with_progress(self, *, load_kwargs: dict[str, object], camera_name: str, model_name: str):
         progress = QProgressDialog(
             f"Ładowanie modelu '{model_name}' dla kamery '{camera_name}'...",
-            "Anuluj",
+            "",
             0,
             0,
             self,
@@ -2457,6 +2457,7 @@ QToolButton:focus { outline: none; }
         progress.setWindowModality(Qt.ApplicationModal)
         progress.setMinimumDuration(0)
         progress.setAutoClose(True)
+        progress.setCancelButton(None)
         progress.setValue(0)
         progress.show()
 
