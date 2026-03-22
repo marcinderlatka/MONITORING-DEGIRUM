@@ -188,6 +188,7 @@ from .system_metrics import SystemMetricsSampler
 from .degirum_devices import (
     benchmark_device_candidates,
     build_degirum_load_model_kwargs,
+    cpu_fallback_candidates_from_supported,
     detect_degirum_devices,
     get_model_supported_device_types,
     load_model_with_timeout,
@@ -2584,14 +2585,18 @@ QToolButton:focus { outline: none; }
         )
         cpu_type = str(cpu_resolution.get("final_device_type") or "").strip()
 
-        cpu_candidates = [cpu_type] if cpu_type else ["CPU", "TFLITE/CPU", "OPENVINO/CPU"]
-        if not cpu_type:
-            self._log_warning(
-                "warning",
-                "cpu resolution returned empty final_device_type; using explicit cpu fallback chain",
+        cpu_candidates = cpu_fallback_candidates_from_supported(supported)
+        if cpu_type and cpu_type not in cpu_candidates:
+            cpu_candidates.insert(0, cpu_type)
+        cpu_candidates = list(dict.fromkeys([item for item in cpu_candidates if item]))
+        if not cpu_candidates:
+            self._log_error(
+                "error",
+                "degirum backend cpu fallback unavailable",
                 source="detection",
-                details=f"model={model_name} requested={logical}",
+                details=f"model={model_name} requested={logical} supported={supported}",
             )
+            raise RuntimeError(f"Brak wspieranego CPU device type dla modelu {model_name}: {supported}")
 
         self._log_warning(
             "warning",
@@ -4168,7 +4173,7 @@ class DeGirumDeviceSettingsDialog(QDialog):
                         dg,
                         model_name=model_name,
                         zoo_url=MODELS_PATH / model_name,
-                        supported_cache=self.parent_window._degirum_supported_types_cache,
+                        cache=self.parent_window._degirum_supported_types_cache,
                     )
                 )
             except Exception:
