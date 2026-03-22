@@ -2462,6 +2462,14 @@ QToolButton:focus { outline: none; }
         progress.show()
 
         holder: dict[str, object] = {}
+        canceled_by_user = False
+
+        def _on_cancel() -> None:
+            nonlocal canceled_by_user
+            canceled_by_user = True
+
+        progress.canceled.connect(_on_cancel)
+
         thread = ModelLoadThread(kwargs=load_kwargs, timeout_s=25.0, parent=self)
         thread.loaded.connect(lambda model: holder.update({"model": model}))
         thread.failed.connect(lambda error: holder.update({"error": error}))
@@ -2470,6 +2478,8 @@ QToolButton:focus { outline: none; }
         deadline = time.monotonic() + 25.5
         while thread.isRunning() and time.monotonic() < deadline:
             QApplication.processEvents()
+            if canceled_by_user:
+                break
             QThread.msleep(20)
 
         if thread.isRunning():
@@ -2477,6 +2487,8 @@ QToolButton:focus { outline: none; }
         thread.wait(100)
         progress.close()
 
+        if canceled_by_user:
+            raise TimeoutError("Ładowanie modelu anulowane przez użytkownika.")
         if "error" in holder:
             raise RuntimeError(str(holder["error"]))
         model = holder.get("model")
