@@ -62,10 +62,8 @@ def test_benchmark_device_candidates_never_uses_logical_cpu_gpu_as_device_type()
         @staticmethod
         def load_model(**kwargs):
             captured.append(dict(kwargs))
-            if kwargs.get("device_type") == "__INVALID__/__INVALID__":
-                raise RuntimeError("Supported device types are: ['TFLITE/CPU']")
             if kwargs.get("device_type") != "TFLITE/CPU":
-                raise AssertionError("invalid runtime device type")
+                raise RuntimeError("Supported device types are: ['TFLITE/CPU']")
             return _FakeModel()
 
     benchmark = benchmark_device_candidates(
@@ -104,3 +102,13 @@ def test_build_kwargs_defaults_and_coerce_helpers() -> None:
     assert kwargs["inference_host_address"] == "@local"
     assert coerce_pathlike_to_str(Path("/tmp/a")) == "/tmp/a"
     assert coerce_optional_str(Path("/tmp/b")) == "/tmp/b"
+
+
+def test_build_kwargs_omits_empty_device_type() -> None:
+    kwargs = build_degirum_load_model_kwargs(
+        model_name="model-x",
+        zoo_url=Path("/tmp/model-x"),
+        device_type="",
+    )
+
+    assert "device_type" not in kwargs
