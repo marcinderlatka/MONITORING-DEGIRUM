@@ -121,7 +121,7 @@ def _normalize_supported_device_type(value: object) -> str:
     return f"{runtime}/{device}"
 
 
-def _device_kind_from_type(device_type: str) -> str:
+def device_kind_from_type(device_type: str) -> str:
     normalized = _normalize_supported_device_type(device_type)
     if not normalized:
         return ""
@@ -285,7 +285,7 @@ def resolve_degirum_runtime_target(
 
     def _first_by_kind(kind: str) -> str:
         for dev_type in supported:
-            if _device_kind_from_type(dev_type) == kind:
+            if device_kind_from_type(dev_type) == kind:
                 return dev_type
         return ""
 
@@ -380,7 +380,7 @@ def detect_degirum_devices(
             "id": "cpu",
             "label": GUI_LABELS["cpu"],
             "kind": "cpu",
-            "available": any(_device_kind_from_type(item) == "cpu" for item in supported),
+            "available": any(device_kind_from_type(item) == "cpu" for item in supported),
             "details": "Mapowanie logiczne CPU -> pierwszy wspierany typ CPU.",
             "score": 0.0,
             "recommended": False,
@@ -393,7 +393,7 @@ def detect_degirum_devices(
             "id": "gpu",
             "label": GUI_LABELS["gpu"],
             "kind": "gpu",
-            "available": any(_device_kind_from_type(item) == "gpu" for item in supported),
+            "available": any(device_kind_from_type(item) == "gpu" for item in supported),
             "details": "Mapowanie logiczne GPU -> pierwszy wspierany typ GPU.",
             "score": 0.0,
             "recommended": False,
@@ -409,7 +409,7 @@ def detect_degirum_devices(
             {
                 "id": item,
                 "label": item,
-                "kind": _device_kind_from_type(item) or "device_type",
+                "kind": device_kind_from_type(item) or "device_type",
                 "available": True,
                 "details": f"Wspierany device type modelu: {item}",
                 "score": 0.0,
@@ -587,6 +587,7 @@ __all__ = [
     "coerce_optional_str",
     "coerce_pathlike_to_str",
     "detect_degirum_devices",
+    "device_kind_from_type",
     "get_model_supported_device_types",
     "load_model_with_timeout",
     "parse_supported_device_types_from_error",
