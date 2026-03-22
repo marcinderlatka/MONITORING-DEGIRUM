@@ -67,6 +67,11 @@ def sanitize_degirum_load_model_kwargs(kwargs: dict[str, object]) -> dict[str, o
     """Return kwargs safe for ``dg.load_model`` (no ``Path`` / ``PathLike`` values)."""
     sanitized: dict[str, object] = {}
     for key, value in kwargs.items():
+        if key in {"model_name", "zoo_url", "model_path", "inference_host_address", "device_type"} and isinstance(
+            value, (list, tuple, set, dict)
+        ):
+            logger.debug("degirum load_model sanitize skip non-scalar key=%s type=%s", key, type(value).__name__)
+            continue
         normalized = coerce_pathlike_to_str(value)
         if key in {"model_name", "zoo_url", "model_path", "inference_host_address", "device_type"}:
             normalized_opt = coerce_optional_str(normalized)
