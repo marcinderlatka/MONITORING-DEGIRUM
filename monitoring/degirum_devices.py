@@ -7,6 +7,9 @@ import logging
 import os
 import re
 import time
+from contextlib import suppress
+from queue import Queue
+from threading import Thread
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -21,6 +24,15 @@ GUI_LABELS = {
 
 logger = logging.getLogger(__name__)
 _SUPPORTED_RE = re.compile(r"Supported device types are:\s*(\[[^\]]*\])", re.IGNORECASE)
+_PROBE_FALLBACK_DEVICE_TYPES = (
+    "CPU",
+    "OPENVINO/CPU",
+    "CUDA/GPU",
+    "TENSORRT/GPU",
+    "HAILORT/HAILO8",
+    "AXELERA/GPU",
+    "DEEPX/GPU",
+)
 
 
 def coerce_pathlike_to_str(value: object) -> object:
@@ -143,6 +155,38 @@ def parse_supported_device_types_from_error(error: object) -> list[str]:
     return normalized
 
 
+def load_model_with_timeout(
+    dg_module: Any,
+    *,
+    timeout_s: float,
+    **load_kwargs: object,
+) -> Any:
+    """Run ``dg.load_model`` in a daemon thread and enforce a hard timeout."""
+    load_model = getattr(dg_module, "load_model", None)
+    if not callable(load_model):
+        raise RuntimeError("dg.load_model is unavailable")
+
+    result_queue: Queue[tuple[bool, Any]] = Queue(maxsize=1)
+
+    def _runner() -> None:
+        try:
+            model = load_model(**sanitize_degirum_load_model_kwargs(dict(load_kwargs)))
+        except Exception as exc:
+            result_queue.put((False, exc))
+            return
+        result_queue.put((True, model))
+
+    thread = Thread(target=_runner, name="dg-load-model-timeout", daemon=True)
+    thread.start()
+    thread.join(timeout=max(0.1, float(timeout_s)))
+    if thread.is_alive():
+        raise TimeoutError(f"dg.load_model timeout after {timeout_s:.1f}s")
+    ok, payload = result_queue.get_nowait()
+    if ok:
+        return payload
+    raise payload
+
+
 def get_model_supported_device_types(
     dg_module: Any,
     *,
@@ -163,24 +207,44 @@ def get_model_supported_device_types(
             cache[cache_key] = []
         return []
 
-    # Probe with intentionally invalid type to retrieve authoritative supported list.
-    raw_probe_kwargs = {
-        "model_name": normalized_model,
-        "inference_host_address": inference_host_address,
-        "zoo_url": normalized_zoo,
-        "device_type": "__INVALID__/__INVALID__",
-    }
-    probe_kwargs = sanitize_degirum_load_model_kwargs(raw_probe_kwargs)
-    _log_load_model_diagnostics("degirum supported-probe", raw_probe_kwargs, probe_kwargs)
     supported: list[str] = []
-    try:
-        logger.debug("degirum supported-probe load attempt")
-        load_model(**probe_kwargs)
-    except Exception as exc:
-        logger.debug("degirum supported-probe failed: %s", exc)
-        supported = parse_supported_device_types_from_error(exc)
-    else:
-        logger.debug("degirum supported-probe succeeded")
+    probe_candidates: list[str] = []
+    for candidate in _PROBE_FALLBACK_DEVICE_TYPES:
+        normalized = _normalize_supported_device_type(candidate)
+        if normalized and normalized not in probe_candidates:
+            probe_candidates.append(normalized)
+
+    for device_type in probe_candidates:
+        raw_probe_kwargs = {
+            "model_name": normalized_model,
+            "inference_host_address": inference_host_address,
+            "zoo_url": normalized_zoo,
+            "device_type": device_type,
+        }
+        probe_kwargs = sanitize_degirum_load_model_kwargs(raw_probe_kwargs)
+        _log_load_model_diagnostics("degirum supported-probe", raw_probe_kwargs, probe_kwargs)
+        model = None
+        try:
+            logger.debug("degirum supported-probe load attempt device_type=%s", device_type)
+            model = load_model_with_timeout(dg_module, timeout_s=6.0, **probe_kwargs)
+            logger.debug("degirum supported-probe load success device_type=%s", device_type)
+            if device_type not in supported:
+                supported.append(device_type)
+        except TimeoutError:
+            logger.warning("degirum supported-probe timeout device_type=%s", device_type)
+        except Exception as exc:
+            parsed = parse_supported_device_types_from_error(exc)
+            if parsed:
+                for item in parsed:
+                    if item not in supported:
+                        supported.append(item)
+                break
+            logger.debug("degirum supported-probe failed device_type=%s error=%s", device_type, exc)
+        finally:
+            close_method = getattr(model, "close", None)
+            if callable(close_method):
+                with suppress(Exception):
+                    close_method()
 
     if cache is not None:
         cache[cache_key] = list(supported)
@@ -510,6 +574,7 @@ __all__ = [
     "coerce_pathlike_to_str",
     "detect_degirum_devices",
     "get_model_supported_device_types",
+    "load_model_with_timeout",
     "parse_supported_device_types_from_error",
     "resolve_effective_degirum_selection",
     "resolve_degirum_runtime_target",

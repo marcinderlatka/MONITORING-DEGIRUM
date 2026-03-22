@@ -35,6 +35,7 @@ from PyQt5.QtCore import (
     QTimer,
     QSize,
     QEvent,
+    QThread,
     pyqtSignal,
     qInstallMessageHandler,
     QtMsgType,
@@ -63,6 +64,7 @@ from PyQt5.QtWidgets import (
     QAction,
     QMenu,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QSlider,
     QSpinBox,
@@ -188,6 +190,7 @@ from .degirum_devices import (
     build_degirum_load_model_kwargs,
     detect_degirum_devices,
     get_model_supported_device_types,
+    load_model_with_timeout,
     resolve_effective_degirum_selection,
     resolve_degirum_runtime_target,
     sanitize_degirum_load_model_kwargs,
@@ -1737,6 +1740,23 @@ def install_qt_message_handler() -> None:
     _QT_HANDLER_INSTALLED = True
 
 
+class ModelLoadThread(QThread):
+    loaded = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, *, kwargs: dict[str, object], timeout_s: float = 25.0, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self.kwargs = dict(kwargs)
+        self.timeout_s = float(timeout_s)
+
+    def run(self) -> None:
+        try:
+            model = load_model_with_timeout(dg, timeout_s=self.timeout_s, **self.kwargs)
+            self.loaded.emit(model)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class MainWindow(QMainWindow):
     def __init__(self, cameras):
         super().__init__()
@@ -2426,6 +2446,47 @@ QToolButton:focus { outline: none; }
         effective_device = str(device_config or "").strip() or "CPU"
         return model_key, effective_device
 
+    def _load_model_with_progress(self, *, load_kwargs: dict[str, object], camera_name: str, model_name: str):
+        progress = QProgressDialog(
+            f"Ładowanie modelu '{model_name}' dla kamery '{camera_name}'...",
+            "Anuluj",
+            0,
+            0,
+            self,
+        )
+        progress.setWindowModality(Qt.ApplicationModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(True)
+        progress.setValue(0)
+        progress.show()
+
+        holder: dict[str, object] = {}
+        thread = ModelLoadThread(kwargs=load_kwargs, timeout_s=25.0, parent=self)
+        thread.loaded.connect(lambda model: holder.update({"model": model}))
+        thread.failed.connect(lambda error: holder.update({"error": error}))
+        thread.start()
+
+        deadline = time.monotonic() + 25.5
+        while thread.isRunning() and time.monotonic() < deadline:
+            QApplication.processEvents()
+            if progress.wasCanceled():
+                break
+            QThread.msleep(20)
+
+        if thread.isRunning():
+            thread.requestInterruption()
+        thread.wait(100)
+        progress.close()
+
+        if progress.wasCanceled():
+            raise TimeoutError("Ładowanie modelu anulowane przez użytkownika.")
+        if "error" in holder:
+            raise RuntimeError(str(holder["error"]))
+        model = holder.get("model")
+        if model is None:
+            raise TimeoutError("Przekroczono limit czasu ładowania modelu (25s).")
+        return model
+
     def _get_model(self, camera: dict):
         model_name = str(camera.get("model", DEFAULT_MODEL))
         logical = camera.get("degirum_device_override", self.config.get("degirum_preferred_device", "auto"))
@@ -2456,7 +2517,11 @@ QToolButton:focus { outline: none; }
             logger.debug("degirum _get_model raw kwargs=%s", raw_kwargs)
             logger.debug("degirum _get_model sanitized types=%s", {k: type(v).__name__ for k, v in load_kwargs.items()})
             logger.debug("degirum _get_model load attempt camera=%s model=%s", camera.get("name"), model_name)
-            model = dg.load_model(**load_kwargs)
+            model = self._load_model_with_progress(
+                load_kwargs=load_kwargs,
+                camera_name=str(camera.get("name", "")),
+                model_name=model_name,
+            )
             logger.debug("degirum _get_model load success camera=%s model=%s", camera.get("name"), model_name)
             camera["effective_device_type"] = final_device
             self._log_info("detection", f"model loaded → {final_device}", camera=camera.get("name"))
@@ -2502,7 +2567,11 @@ QToolButton:focus { outline: none; }
             logger.debug("degirum _get_model cpu raw kwargs=%s", raw_kwargs)
             logger.debug("degirum _get_model cpu sanitized types=%s", {k: type(v).__name__ for k, v in load_kwargs.items()})
             logger.debug("degirum _get_model cpu fallback attempt camera=%s model=%s", camera.get("name"), model_name)
-            model = dg.load_model(**load_kwargs)
+            model = self._load_model_with_progress(
+                load_kwargs=load_kwargs,
+                camera_name=str(camera.get("name", "")),
+                model_name=model_name,
+            )
             logger.debug("degirum _get_model cpu fallback success camera=%s model=%s", camera.get("name"), model_name)
             camera["effective_device_type"] = cpu_type
             self.model_cache[cpu_key] = model
