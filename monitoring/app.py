@@ -2461,6 +2461,14 @@ QToolButton:focus { outline: none; }
         progress.show()
 
         holder: dict[str, object] = {}
+        canceled_by_user = False
+
+        def _on_cancel() -> None:
+            nonlocal canceled_by_user
+            canceled_by_user = True
+
+        progress.canceled.connect(_on_cancel)
+
         thread = ModelLoadThread(kwargs=load_kwargs, timeout_s=25.0, parent=self)
         thread.loaded.connect(lambda model: holder.update({"model": model}))
         thread.failed.connect(lambda error: holder.update({"error": error}))
@@ -2469,7 +2477,7 @@ QToolButton:focus { outline: none; }
         deadline = time.monotonic() + 25.5
         while thread.isRunning() and time.monotonic() < deadline:
             QApplication.processEvents()
-            if progress.wasCanceled():
+            if canceled_by_user:
                 break
             QThread.msleep(20)
 
@@ -2478,7 +2486,7 @@ QToolButton:focus { outline: none; }
         thread.wait(100)
         progress.close()
 
-        if progress.wasCanceled():
+        if canceled_by_user:
             raise TimeoutError("Ładowanie modelu anulowane przez użytkownika.")
         if "error" in holder:
             raise RuntimeError(str(holder["error"]))
@@ -2500,7 +2508,7 @@ QToolButton:focus { outline: none; }
             logical_selection=logical,
             supported_device_types=supported,
         )
-        final_device = str(resolution.get("final_device_type") or "CPU")
+        final_device = str(resolution.get("final_device_type") or "").strip()
         cache_key = self._build_model_cache_key(model_name, final_device)
         if cache_key in self.model_cache:
             self.log_window.add_entry("application", f"model cache-hit: {model_name} ({cache_key[1]})")
@@ -2511,7 +2519,7 @@ QToolButton:focus { outline: none; }
                 model_name=model_name,
                 inference_host_address="@local",
                 zoo_url=MODELS_PATH / model_name,
-                device_type=final_device,
+                device_type=final_device or None,
             )
             load_kwargs = sanitize_degirum_load_model_kwargs(raw_kwargs)
             logger.debug("degirum _get_model raw kwargs=%s", raw_kwargs)
@@ -2544,7 +2552,7 @@ QToolButton:focus { outline: none; }
             logical_selection="cpu",
             supported_device_types=supported,
         )
-        cpu_type = str(cpu_resolution.get("final_device_type") or "CPU")
+        cpu_type = str(cpu_resolution.get("final_device_type") or "").strip()
         cpu_key = self._build_model_cache_key(model_name, cpu_type)
         if cpu_key in self.model_cache:
             self.log_window.add_entry("application", f"model cache-hit: {model_name} (cpu)")
@@ -2561,7 +2569,7 @@ QToolButton:focus { outline: none; }
                 model_name=model_name,
                 inference_host_address="@local",
                 zoo_url=MODELS_PATH / model_name,
-                device_type=cpu_type,
+                device_type=cpu_type or None,
             )
             load_kwargs = sanitize_degirum_load_model_kwargs(raw_kwargs)
             logger.debug("degirum _get_model cpu raw kwargs=%s", raw_kwargs)

@@ -91,8 +91,9 @@ def build_degirum_load_model_kwargs(
         "inference_host_address": coerce_optional_str(inference_host_address) or "@local",
         "zoo_url": zoo_value,
     }
-    if device_type is not None:
-        payload["device_type"] = device_type
+    normalized_device = coerce_optional_str(device_type) if device_type is not None else None
+    if normalized_device:
+        payload["device_type"] = normalized_device
     return sanitize_degirum_load_model_kwargs(payload)
 
 
@@ -209,6 +210,19 @@ def get_model_supported_device_types(
 
     supported: list[str] = []
     probe_candidates: list[str] = []
+
+    get_supported_devices = getattr(dg_module, "get_supported_devices", None)
+    if callable(get_supported_devices):
+        try:
+            detected = get_supported_devices(inference_host_address=inference_host_address, zoo_url=normalized_zoo)
+        except Exception as exc:
+            logger.debug("degirum get_supported_devices failed error=%s", exc)
+        else:
+            for candidate in detected:
+                normalized = _normalize_supported_device_type(candidate)
+                if normalized and normalized not in probe_candidates:
+                    probe_candidates.append(normalized)
+
     for candidate in _PROBE_FALLBACK_DEVICE_TYPES:
         normalized = _normalize_supported_device_type(candidate)
         if normalized and normalized not in probe_candidates:
