@@ -2518,11 +2518,23 @@ QToolButton:focus { outline: none; }
     def _get_model(self, camera: dict):
         model_name = str(camera.get("model", DEFAULT_MODEL))
         logical = camera.get("degirum_device_override", self.config.get("degirum_preferred_device", "auto"))
+        logger.debug(
+            "degirum _get_model requested logical device camera=%s model=%s logical=%s",
+            camera.get("name"),
+            model_name,
+            logical,
+        )
         supported = get_model_supported_device_types(
             dg,
             model_name=model_name,
             zoo_url=MODELS_PATH / model_name,
             cache=self._degirum_supported_types_cache,
+        )
+        logger.debug(
+            "degirum _get_model supported_device_types camera=%s model=%s supported=%s",
+            camera.get("name"),
+            model_name,
+            supported,
         )
         if not supported:
             self._log_warning(
@@ -2536,6 +2548,13 @@ QToolButton:focus { outline: none; }
             supported_device_types=supported,
         )
         final_device = str(resolution.get("final_device_type") or "").strip()
+        logger.debug(
+            "degirum _get_model resolved final_device_type camera=%s model=%s logical=%s final=%s",
+            camera.get("name"),
+            model_name,
+            logical,
+            final_device or "<none>",
+        )
         cache_key = None
         if final_device:
             cache_key = self._build_model_cache_key(model_name, final_device)
@@ -2560,7 +2579,12 @@ QToolButton:focus { outline: none; }
                 camera_name=str(camera.get("name", "")),
                 model_name=model_name,
             )
-            logger.debug("degirum _get_model load success camera=%s model=%s", camera.get("name"), model_name)
+            logger.debug(
+                "degirum _get_model model load success camera=%s model=%s final_device_type=%s",
+                camera.get("name"),
+                model_name,
+                final_device or "<none>",
+            )
             camera["effective_device_type"] = final_device
             self._log_info("detection", f"model loaded → {final_device}", camera=camera.get("name"))
             cache_variant = final_device
@@ -2589,6 +2613,12 @@ QToolButton:focus { outline: none; }
         if cpu_type and cpu_type not in cpu_candidates:
             cpu_candidates.insert(0, cpu_type)
         cpu_candidates = list(dict.fromkeys([item for item in cpu_candidates if item]))
+        logger.debug(
+            "degirum _get_model cpu fallback candidates camera=%s model=%s candidates=%s",
+            camera.get("name"),
+            model_name,
+            cpu_candidates,
+        )
         if not cpu_candidates:
             self._log_error(
                 "error",
@@ -2635,6 +2665,12 @@ QToolButton:focus { outline: none; }
                 )
                 logger.debug(
                     "degirum _get_model cpu fallback success camera=%s model=%s candidate=%s",
+                    camera.get("name"),
+                    model_name,
+                    candidate,
+                )
+                logger.debug(
+                    "degirum _get_model model load success camera=%s model=%s final_device_type=%s",
                     camera.get("name"),
                     model_name,
                     candidate,
