@@ -233,3 +233,27 @@ def test_worker_stop_returns_bool_and_sets_signal():
     result = worker.stop(timeout_ms=1)
     assert worker.stop_signal is True
     assert result is True
+
+
+def test_update_event_thumbnail_updates_state_after_successful_write(monkeypatch):
+    worker = _worker()
+    worker.output_file = "/tmp/test_recording"
+    worker.thumbnail_mode = "best_detection"
+    worker.current_detection_frame_saved = False
+    worker.current_event_best_confidence = 0.1
+
+    frame = np.zeros((32, 32, 3), dtype=np.uint8)
+    writes: list[str] = []
+    monkeypatch.setattr("monitoring.workers.cv2.imwrite", lambda path, _img: writes.append(path) or True, raising=False)
+    monkeypatch.setattr(worker, "_build_scene_thumbnail_frame", lambda _frame: frame)
+    monkeypatch.setattr(worker, "_build_thumbnail_frame", lambda *_args, **_kwargs: frame)
+
+    worker._update_event_thumbnail(frame, None, "person", 0.8)
+
+    assert worker.current_event_thumbnail_path == "/tmp/test_recording.jpg"
+    assert worker.current_event_scene_thumbnail_path == "/tmp/test_recording.alert.jpg"
+    assert worker.current_detection_frame_saved is True
+    assert worker.current_thumbnail_ts > 0
+    assert worker.current_event_best_confidence == 0.8
+    assert worker.current_event_best_frame is frame
+    assert "/tmp/test_recording.jpg" in writes
