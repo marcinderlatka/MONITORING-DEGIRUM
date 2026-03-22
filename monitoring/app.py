@@ -2505,15 +2505,25 @@ QToolButton:focus { outline: none; }
             zoo_url=MODELS_PATH / model_name,
             cache=self._degirum_supported_types_cache,
         )
+        if not supported:
+            self._log_warning(
+                "warning",
+                "supported_device_types is empty",
+                source="detection",
+                details=f"model={model_name} logical_device={logical}",
+            )
         resolution = resolve_degirum_runtime_target(
             logical_selection=logical,
             supported_device_types=supported,
         )
         final_device = str(resolution.get("final_device_type") or "").strip()
-        cache_key = self._build_model_cache_key(model_name, final_device)
-        if cache_key in self.model_cache:
-            self.log_window.add_entry("application", f"model cache-hit: {model_name} ({cache_key[1]})")
-            return self.model_cache[cache_key]
+        cache_key = None
+        if final_device:
+            cache_key = self._build_model_cache_key(model_name, final_device)
+            if cache_key in self.model_cache:
+                self.log_window.add_entry("application", f"model cache-hit: {model_name} ({cache_key[1]})")
+                camera["effective_device_type"] = final_device
+                return self.model_cache[cache_key]
 
         try:
             raw_kwargs = build_degirum_load_model_kwargs(
@@ -2535,8 +2545,9 @@ QToolButton:focus { outline: none; }
             camera["effective_device_type"] = final_device
             self._log_info("detection", f"model loaded → {final_device}", camera=camera.get("name"))
             cache_variant = final_device
-            success_key = self._build_model_cache_key(model_name, cache_variant)
-            self.model_cache[success_key] = model
+            if cache_variant:
+                success_key = self._build_model_cache_key(model_name, cache_variant)
+                self.model_cache[success_key] = model
             self.log_window.add_entry("application", f"model load: {model_name} ({cache_variant})")
             return model
         except Exception as init_error:
@@ -2554,47 +2565,81 @@ QToolButton:focus { outline: none; }
             supported_device_types=supported,
         )
         cpu_type = str(cpu_resolution.get("final_device_type") or "").strip()
-        cpu_key = self._build_model_cache_key(model_name, cpu_type)
-        if cpu_key in self.model_cache:
-            self.log_window.add_entry("application", f"model cache-hit: {model_name} (cpu)")
-            return self.model_cache[cpu_key]
+
+        cpu_candidates = [cpu_type] if cpu_type else ["CPU", "TFLITE/CPU", "OPENVINO/CPU"]
+        if not cpu_type:
+            self._log_warning(
+                "warning",
+                "cpu resolution returned empty final_device_type; using explicit cpu fallback chain",
+                source="detection",
+                details=f"model={model_name} requested={logical}",
+            )
 
         self._log_warning(
             "warning",
             "fallback to cpu after backend error",
             source="detection",
-            details=f"model={model_name} requested={logical}",
+            details=f"model={model_name} requested={logical} cpu_candidates={cpu_candidates}",
         )
-        try:
+        last_cpu_error = None
+        for candidate in cpu_candidates:
+            cpu_key = self._build_model_cache_key(model_name, candidate)
+            if cpu_key in self.model_cache:
+                self.log_window.add_entry("application", f"model cache-hit: {model_name} ({candidate})")
+                camera["effective_device_type"] = candidate
+                return self.model_cache[cpu_key]
+
             raw_kwargs = build_degirum_load_model_kwargs(
                 model_name=model_name,
                 inference_host_address="@local",
                 zoo_url=MODELS_PATH / model_name,
-                device_type=cpu_type or None,
+                device_type=candidate,
             )
             load_kwargs = sanitize_degirum_load_model_kwargs(raw_kwargs)
-            logger.debug("degirum _get_model cpu raw kwargs=%s", raw_kwargs)
-            logger.debug("degirum _get_model cpu sanitized types=%s", {k: type(v).__name__ for k, v in load_kwargs.items()})
-            logger.debug("degirum _get_model cpu fallback attempt camera=%s model=%s", camera.get("name"), model_name)
-            model = self._load_model_with_progress(
-                load_kwargs=load_kwargs,
-                camera_name=str(camera.get("name", "")),
-                model_name=model_name,
-            )
-            logger.debug("degirum _get_model cpu fallback success camera=%s model=%s", camera.get("name"), model_name)
-            camera["effective_device_type"] = cpu_type
-            self.model_cache[cpu_key] = model
-            self.log_window.add_entry("application", f"model load: {model_name} (cpu)")
-            return model
-        except Exception as cpu_error:
-            logger.debug("degirum _get_model cpu fallback failure camera=%s model=%s error=%s", camera.get("name"), model_name, cpu_error)
-            self._log_error(
-                "error",
-                "degirum backend cpu fallback failed",
-                source="detection",
-                details=f"model={model_name} device=cpu error={cpu_error}",
-            )
-            raise
+            try:
+                logger.debug("degirum _get_model cpu raw kwargs=%s", raw_kwargs)
+                logger.debug("degirum _get_model cpu sanitized types=%s", {k: type(v).__name__ for k, v in load_kwargs.items()})
+                logger.debug(
+                    "degirum _get_model cpu fallback attempt camera=%s model=%s candidate=%s",
+                    camera.get("name"),
+                    model_name,
+                    candidate,
+                )
+                model = self._load_model_with_progress(
+                    load_kwargs=load_kwargs,
+                    camera_name=str(camera.get("name", "")),
+                    model_name=model_name,
+                )
+                logger.debug(
+                    "degirum _get_model cpu fallback success camera=%s model=%s candidate=%s",
+                    camera.get("name"),
+                    model_name,
+                    candidate,
+                )
+                camera["effective_device_type"] = candidate
+                self.model_cache[cpu_key] = model
+                self.log_window.add_entry("application", f"model load: {model_name} ({candidate})")
+                return model
+            except Exception as cpu_error:
+                last_cpu_error = cpu_error
+                logger.debug(
+                    "degirum _get_model cpu fallback failure camera=%s model=%s candidate=%s error=%s",
+                    camera.get("name"),
+                    model_name,
+                    candidate,
+                    cpu_error,
+                )
+                continue
+
+        self._log_error(
+            "error",
+            "degirum backend cpu fallback failed",
+            source="detection",
+            details=f"model={model_name} cpu_candidates={cpu_candidates} error={last_cpu_error}",
+        )
+        if last_cpu_error is not None:
+            raise last_cpu_error
+        raise RuntimeError("CPU fallback chain exhausted without explicit error.")
 
     def _apply_worker_preview_roles(self) -> None:
         selected_idx = self.camera_list.currentRow()
