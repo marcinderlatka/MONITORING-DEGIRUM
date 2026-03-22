@@ -4044,6 +4044,10 @@ class DeGirumDeviceSettingsDialog(QDialog):
         self.default_device_combo = QComboBox()
         self.default_device_combo.setToolTip("Automatycznie wybiera najlepszy wspierany device type modelu.")
         form.addRow("Domyślne urządzenie", self.default_device_combo)
+
+        self.benchmark_model_combo = QComboBox()
+        self.benchmark_model_combo.setToolTip("Model używany do wykrywania urządzeń i benchmarku DeGirum.")
+        form.addRow("Model benchmarku", self.benchmark_model_combo)
         layout.addLayout(form)
 
         buttons_row = QHBoxLayout()
@@ -4059,6 +4063,9 @@ class DeGirumDeviceSettingsDialog(QDialog):
         self.status_label = QLabel("Gotowe.")
         self.status_label.setToolTip("Stan ostatniej operacji wykrywania/testu urządzeń.")
         layout.addWidget(self.status_label)
+        self.benchmark_context_label = QLabel("")
+        self.benchmark_context_label.setToolTip("Informacja, dla jakiego modelu i urządzenia pokazano wyniki.")
+        layout.addWidget(self.benchmark_context_label)
 
         self.table = QTableWidget(0, 6, self)
         self.table.setHorizontalHeaderLabels(["Nazwa", "Typ", "Dostępność", "Czas testu", "Rekomendacja", "Szczegóły"])
@@ -4091,7 +4098,68 @@ class DeGirumDeviceSettingsDialog(QDialog):
 
         initial_device = str(parent.degirum_preferred_device or "auto")
         self._refresh_device_combo(initial_device)
+        self._refresh_benchmark_model_combo()
         self._refresh_table()
+
+    def _collect_available_benchmark_models(self) -> list[str]:
+        models: list[str] = []
+        for cam in self.parent_window.cameras:
+            model_name = str(cam.get("model", "")).strip()
+            if model_name:
+                models.append(model_name)
+        last_model = str(self._benchmark_data.get("model_name", "")).strip() if isinstance(self._benchmark_data, dict) else ""
+        if last_model:
+            models.append(last_model)
+        if not models:
+            models = [DEFAULT_MODEL]
+        return list(dict.fromkeys(models))
+
+    def _preferred_benchmark_model(self) -> str:
+        active_idx = self.parent_window.camera_list.currentRow() if hasattr(self.parent_window, "camera_list") else -1
+        if isinstance(active_idx, int) and 0 <= active_idx < len(self.parent_window.cameras):
+            active_model = str(self.parent_window.cameras[active_idx].get("model", "")).strip()
+            if active_model:
+                return active_model
+        if self.parent_window.cameras:
+            global_model = str(self.parent_window.cameras[0].get("model", "")).strip()
+            if global_model:
+                return global_model
+        return str(self._benchmark_data.get("model_name", "")).strip() or DEFAULT_MODEL
+
+    def _refresh_benchmark_model_combo(self) -> None:
+        selected_model = self._preferred_benchmark_model()
+        models = self._collect_available_benchmark_models()
+        self.benchmark_model_combo.clear()
+        self.benchmark_model_combo.addItems(models)
+        idx = self.benchmark_model_combo.findText(selected_model)
+        self.benchmark_model_combo.setCurrentIndex(idx if idx >= 0 else 0)
+
+    def _selected_benchmark_model(self) -> str:
+        model_name = str(self.benchmark_model_combo.currentText() or "").strip()
+        return model_name or DEFAULT_MODEL
+
+    def _effective_device_type_label(self, model_name: str) -> str:
+        logical = config_module.normalize_degirum_device_selection(self.default_device_combo.currentData() or "auto")
+        supported_types = []
+        if isinstance(self._benchmark_data, dict):
+            supported_types = list(self._benchmark_data.get("supported_device_types", []))
+        if not supported_types:
+            try:
+                supported_types = list(
+                    get_model_supported_device_types(
+                        dg,
+                        model_name=model_name,
+                        zoo_url=MODELS_PATH / model_name,
+                        supported_cache=self.parent_window._degirum_supported_types_cache,
+                    )
+                )
+            except Exception:
+                supported_types = []
+        resolution = resolve_degirum_runtime_target(
+            logical_selection=logical,
+            supported_device_types=supported_types,
+        )
+        return str(resolution.get("final_device_type") or "n/a")
 
     def _refresh_device_combo(self, selected_device: str | None = None) -> None:
         options: list[tuple[str, str]] = [
@@ -4167,6 +4235,17 @@ class DeGirumDeviceSettingsDialog(QDialog):
         return rows
 
     def _refresh_table(self) -> None:
+        model_name = str(self._benchmark_data.get("model_name", "")).strip() if isinstance(self._benchmark_data, dict) else ""
+        if not model_name:
+            model_name = self._selected_benchmark_model()
+        camera_idx = self.parent_window.camera_list.currentRow() if hasattr(self.parent_window, "camera_list") else -1
+        camera_name = "-"
+        if isinstance(camera_idx, int) and 0 <= camera_idx < len(self.parent_window.cameras):
+            camera_name = str(self.parent_window.cameras[camera_idx].get("name", f"#{camera_idx + 1}"))
+        effective_device_type = self._effective_device_type_label(model_name)
+        self.benchmark_context_label.setText(
+            f"Benchmark dla modelu: {model_name} | Załadowany model (kamera {camera_name}): {model_name}, device_type: {effective_device_type}"
+        )
         rows = self._rows_for_table()
         self.table.setRowCount(len(rows))
         for row_idx, row in enumerate(rows):
@@ -4199,9 +4278,7 @@ class DeGirumDeviceSettingsDialog(QDialog):
         threading.Thread(target=_runner, daemon=True).start()
 
     def _discover_devices_payload(self) -> dict:
-        model_name = DEFAULT_MODEL
-        if self.parent_window.cameras:
-            model_name = str(self.parent_window.cameras[0].get("model", DEFAULT_MODEL))
+        model_name = self._selected_benchmark_model()
         try:
             records = detect_degirum_devices(
                 dg,
@@ -4232,9 +4309,7 @@ class DeGirumDeviceSettingsDialog(QDialog):
     def _benchmark_payload(self) -> dict:
         discovery = self._discover_devices_payload()
         devices = discovery.get("devices", [])
-        model_name = DEFAULT_MODEL
-        if self.parent_window.cameras:
-            model_name = str(self.parent_window.cameras[0].get("model", DEFAULT_MODEL))
+        model_name = self._selected_benchmark_model()
         candidates = list(dict.fromkeys(["auto", "cpu", "gpu"] + list(devices)))
         benchmark = benchmark_device_candidates(
             dg,
@@ -4269,6 +4344,7 @@ class DeGirumDeviceSettingsDialog(QDialog):
             "devices": list(devices),
             "benchmark": {
                 "updated_at": datetime.datetime.utcnow().isoformat() + "Z",
+                "model_name": model_name,
                 "recommended_device": recommended,
                 "by_device": benchmark_by_device,
                 "supported_device_types": list(benchmark.get("supported_device_types", [])),
