@@ -734,19 +734,28 @@ class RecordingsBrowserDialog(QDialog):
             return
         self._pending_thumbnails.discard(key)
         self._thumbnail_tasks.pop(key, None)
-        self._mp4_fallback_inflight.discard(key)
+        fallback_inflight = getattr(self, "_mp4_fallback_inflight", None)
+        if fallback_inflight is not None:
+            fallback_inflight.discard(key)
         if reason == "jpg-missing":
             app_log("warning", "brak pliku miniatury JPG", source="recordings-browser", level="WARNING", details=filepath)
             self._apply_thumbnail_failed(filepath, reason, level="WARNING", group="warning")
-            if self._is_tile_visible(filepath) and key not in self._mp4_fallback_requested and len(self._mp4_fallback_inflight) < self._mp4_fallback_limit:
-                self._mp4_fallback_requested.add(key)
-                self._mp4_fallback_inflight.add(key)
+            fallback_requested = getattr(self, "_mp4_fallback_requested", None)
+            if fallback_requested is None:
+                fallback_requested = set()
+                setattr(self, "_mp4_fallback_requested", fallback_requested)
+            fallback_limit = int(getattr(self, "_mp4_fallback_limit", 0) or 0)
+            fallback_inflight_size = len(fallback_inflight) if fallback_inflight is not None else 0
+            if self._is_tile_visible(filepath) and key not in fallback_requested and fallback_inflight_size < fallback_limit:
+                fallback_requested.add(key)
+                if fallback_inflight is not None:
+                    fallback_inflight.add(key)
                 app_log(
                     "browser",
                     "thumbnail mp4 fallback queued",
                     source="recordings-browser",
                     level="INFO",
-                    details=f"active_fallbacks={len(self._mp4_fallback_inflight)} limit={self._mp4_fallback_limit}",
+                    details=f"active_fallbacks={len(fallback_inflight) if fallback_inflight is not None else 0} limit={fallback_limit}",
                 )
                 entry = self._thumbnail_entries.get(key)
                 if entry is not None:
